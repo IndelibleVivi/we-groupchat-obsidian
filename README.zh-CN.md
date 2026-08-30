@@ -7,9 +7,10 @@ operator CLI、持久化本地状态、recovery/backup workers 和完整 regress
 数据流和账号安全边界，再在真实聊天数据上使用。当前不分发 bundled Python runtime
 或已签名 installer。
 
-Windows 迁移当前处于 **W0.2A 可移植文件锁阶段**。仓库已经为 config、菜单 app
-单例、monitor state 和 source inventory 接入原生 macOS/Windows 共享锁与独占锁，
-并由真实多进程测试覆盖。这仍然只是源码可移植性：不支持 Windows 微信发现、密钥、
+Windows 迁移当前处于 **W0.2B.1 路径身份阶段**。仓库已有原生 macOS/Windows
+共享锁与独占锁，并新增 concrete path provider，明确区分展示路径、操作路径、
+文件系统身份键和 source-relative 路径。Windows 身份当前只支持本地 NTFS，遇到
+reparse point 会失败关闭，且尚未迁移现有 storage/source 调用者。这仍然只是源码可移植性：不支持 Windows 微信发现、密钥、
 数据库读取、monitor、托盘、backup、自启、打包或发送。分阶段契约见
 [`docs/WINDOWS-PORT-MAP.md`](docs/WINDOWS-PORT-MAP.md)。
 
@@ -297,7 +298,7 @@ source install 与 LaunchAgent 继续使用。
 | `Source inventory` | 区分 complete、degraded 与 uninitialized，并分别统计 present、missing、cache-only、key-missing、unreadable。只有 expected inventory 完整、current generations 稳定且 required reads 全部成功，才能叫 source complete。 |
 | `Mounted resource handoff` | 只读检查现有 destination binding 与 latest snapshot handoff；即使是 `sync_delegated`，也明确保留 `provider_side_sync=unknown`、`remote_verified=False`。 |
 | `Google Drive API remote verification` | 可选 Direct Drive API ledger 中经过 remote verification 的 object 数；它与 source completeness、mounted delivery 都是不同事实。 |
-| `Link preview` / `MCP compatibility` / `Windows` | Preview 停用且零请求；MCP 为 legacy read-only、send retired；W0.2A 只提供可移植锁源码，不是 Windows 产品支持。 |
+| `Link preview` / `MCP compatibility` / `Windows` | Preview 停用且零请求；MCP 为 legacy read-only、send retired；W0.2B.1 只提供可移植锁/路径源码，不是 Windows 产品支持。 |
 
 只有显式 `--sensitive` 才可能显示本机 paths、chat names、topic titles、source-relative
 paths 与 opaque shard IDs。默认输出不打印这些值，也不打印 message text、API endpoint 或 token material。

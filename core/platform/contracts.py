@@ -1,7 +1,8 @@
 """Behavioral contracts for platform-owned services.
 
-W0.2A supplies concrete macOS and Windows file-lock adapters. Later platform
-capabilities remain fail-closed until their owning phases.
+W0.2A supplies concrete macOS and Windows file-lock adapters. W0.2B.1 adds
+path identity without activating storage, source, monitor, or UI behavior.
+Later platform capabilities remain fail-closed until their owning phases.
 """
 from __future__ import annotations
 
@@ -69,6 +70,19 @@ class FileLock(Protocol):
         mode: LockMode,
         blocking: bool,
     ) -> LockHandle: ...
+
+
+class PathIdentityError(RuntimeError):
+    code = "path_identity_unknown"
+
+    def __init__(self, reason: str, *, native_error: int | None = None):
+        self.reason = reason
+        self.native_error = native_error
+        super().__init__(f"{self.code}:{reason}")
+
+
+class ReparsePointConflict(PathIdentityError):
+    code = "reparse_point_conflict"
 
 
 @dataclass(frozen=True)

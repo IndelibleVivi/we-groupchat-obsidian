@@ -668,7 +668,7 @@ gui/501/com.example.wechat-summary = {
                 text,
             )
             self.assertIn(
-                "Windows: W0.2A portable file-lock source only; "
+                "Windows: W0.2B.1 portable lock/path source only; "
                 "product_support=not_claimed",
                 text,
             )

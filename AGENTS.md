@@ -47,7 +47,7 @@
   distinguish monitor healthy/missing/corrupt/conflict, source inventory
   completeness/counts, raw cursor progress, mounted handoff with provider sync
   unknown, separate Direct Drive verification, disabled link preview, legacy
-  read-only/send-retired MCP, and the Windows W0.2A portable-lock-only boundary.
+  read-only/send-retired MCP, and the Windows W0.2B.1 lock-and-path-only boundary.
   Health inspection must not scan source, initialize/migrate the source
   inventory, open CAS payload objects, or promote mounted evidence to remote
   verification. Local details require explicit `--sensitive`.
@@ -92,15 +92,17 @@
 ## Windows port staging
 
 - The full Windows programme contract, `WGO-WIN-SPEC-2`, remains external
-  owner-review candidate material. `PR-W0.2A` is authorized as a bounded source
-  migration; `docs/WINDOWS-PORT-MAP.md` is its sole in-repository executable
-  authority and the living module/import classification.
-- `app.py` remains the macOS shell. W0.2A must not add Windows source reads, key
+  owner-review candidate material. `PR-W0.2B.1` is authorized as a bounded
+  path-identity foundation; `docs/WINDOWS-PORT-MAP.md` is its sole
+  in-repository executable authority and the living module/import
+  classification.
+- `app.py` remains the macOS shell. W0.2B.1 must not add Windows source reads, key
   acquisition, monitor activation, attachment/backup behavior, tray UI,
   autostart, packaging or message sending.
 - `core/platform/` owns platform contracts and fail-closed provider selection.
-  W0.2A supplies only concrete macOS/Windows file-lock adapters. Path identity,
-  atomic publication, and private storage remain W0.2B; secrets remain W0.3;
+  W0.2A supplies concrete macOS/Windows file-lock adapters. W0.2B.1 adds only
+  concrete path-identity providers. Atomic publication and private storage
+  remain W0.2B.2; secrets remain W0.3;
   notifications/open/autostart/tray/packaging remain W6; source adapters begin
   in W1.
 - W0.2A migrates direct lock ownership only in `core/config.py`,
@@ -108,6 +110,13 @@
   `core/source_inventory.py`. Preserve ConfigStore sole-writer semantics,
   AppInstanceLock process singleton ownership, MonitorState revision CAS, and
   SourceInventory completeness/revision semantics.
+- W0.2B.1 distinguishes `display_path`, `operational_path`, `identity_key`, and
+  slash-normalized `source_relative_path`. Windows paths are native strings and
+  must never pass through POSIX shell unescaping. Initial live identity support
+  is local NTFS; UNC remains syntax-only, and reparse points, case-sensitive
+  directories, unsupported filesystems/namespaces, root escape, reserved names,
+  and trailing-dot/space components fail closed. Do not migrate existing
+  storage/resource/source callers in this phase.
 - `docs/WINDOWS-PORT-MAP.md` is the living module inventory. Every root,
   `ai/`, `core/`, `ui/` and `scripts/` Python module must remain classified,
   and only modules marked `windows-import-safe` enter the Windows import gate.
@@ -163,7 +172,7 @@ private/public publication, app-bundle rebuild, LaunchAgent reload and live
 acceptance are separate gates. Do not mutate live config/data or reload a live
 agent merely because source tests pass.
 
-For W0.2A on Windows, also run:
+For W0.2B.1 on Windows, also run:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest `

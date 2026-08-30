@@ -532,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print("[OK] MCP compatibility: legacy_read_only; send=mcp_send_retired")
     print(
-        "[OK] Windows: W0.2A portable file-lock source only; "
+        "[OK] Windows: W0.2B.1 portable lock/path source only; "
         "product_support=not_claimed"
     )
     print("")

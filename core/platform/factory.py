@@ -4,21 +4,31 @@ from __future__ import annotations
 import platform as runtime_platform
 from collections.abc import Callable
 
-from .contracts import FileLock, PlatformName, PlatformServices
+from .contracts import FileLock, PathService, PlatformName, PlatformServices
 
 PlatformServicesProvider = Callable[[], PlatformServices]
 
 
 def _macos_services() -> PlatformServices:
     from .macos_locks import MacOSFileLock
+    from .macos_paths import MacOSPathService
 
-    return PlatformServices(platform=PlatformName.MACOS, locks=MacOSFileLock())
+    return PlatformServices(
+        platform=PlatformName.MACOS,
+        locks=MacOSFileLock(),
+        paths=MacOSPathService(),
+    )
 
 
 def _windows_services() -> PlatformServices:
     from .windows_locks import WindowsFileLock
+    from .windows_paths import WindowsPathService
 
-    return PlatformServices(platform=PlatformName.WINDOWS, locks=WindowsFileLock())
+    return PlatformServices(
+        platform=PlatformName.WINDOWS,
+        locks=WindowsFileLock(),
+        paths=WindowsPathService(),
+    )
 
 
 _PLATFORM_FACTORIES: dict[PlatformName, PlatformServicesProvider] = {
@@ -95,3 +105,7 @@ def create_platform_services(
 
 def create_file_lock(platform_name: PlatformName | None = None) -> FileLock:
     return create_platform_services(platform_name).require("locks")
+
+
+def create_path_service(platform_name: PlatformName | None = None) -> PathService:
+    return create_platform_services(platform_name).require("paths")

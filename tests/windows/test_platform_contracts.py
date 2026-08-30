@@ -11,6 +11,7 @@ from core.platform.factory import (
     PlatformFactoryMismatch,
     PlatformServicesUnavailable,
     _PLATFORM_FACTORIES,
+    create_path_service,
     create_platform_services,
     detect_platform,
     register_platform_services,
@@ -97,6 +98,17 @@ class PlatformFactoryTests(unittest.TestCase):
         with self.assertRaises(PlatformCapabilityUnavailable) as raised:
             services.require("secrets")
         self.assertEqual(raised.exception.code, "platform_capability_unavailable")
+
+    def test_concrete_desktop_provider_exposes_locks_and_paths_only(self):
+        selected = detect_platform()
+        if selected is PlatformName.UNSUPPORTED:
+            self.skipTest("desktop provider gate targets macOS and Windows")
+        services = create_platform_services(selected)
+        self.assertEqual(
+            services.available_capabilities(),
+            frozenset({"locks", "paths"}),
+        )
+        self.assertIsNotNone(create_path_service(selected))
 
 
 if __name__ == "__main__":

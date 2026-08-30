@@ -27,7 +27,7 @@ jobs:
           cache: pip
       - name: Install base and Windows-safe dependencies
         run: python -m pip install -r requirements.txt
-      - name: Verify W0.2A Windows locks, inventory, and public boundary
+      - name: Verify W0.2B.1 Windows locks, paths, inventory, and public boundary
         run: >-
           python -m unittest
           tests.windows
