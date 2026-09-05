@@ -782,7 +782,12 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
     if projections:
         print(f"  date indexes: {projections['indexes'].get('written_count', 0)}")
         for digest in projections["digests"]:
-            print(f"  Digest {digest['date']}: {digest['notes']} notes / {digest['actions']} actions")
+            print(
+                f"  Digest {digest['date']}: {digest['events']} events / "
+                f"{digest['touched_topics']} touched topics / "
+                f"{digest['new_topics']} new topics / "
+                f"{digest['actions']} actions"
+            )
     if validation:
         print(
             "  canonical: "

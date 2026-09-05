@@ -291,6 +291,12 @@ If WeChat was updated or key extraction needs a fresh authorization:
 ./启动.command --allow-wechat-resign
 ```
 
+WGO has verified protected binary cipher-context key recovery for macOS WeChat
+`4.1.11 (269136)` on arm64. Protected-key profiles are bound to an exact WeChat
+build, and every candidate must pass page-one HMAC verification against its
+encrypted database before entering the private key cache. An unknown future
+build fails closed and preserves the previously verified cache.
+
 ### Documentation map
 
 - `README.md` / `README.zh-CN.md`: current user, operator, privacy, and project

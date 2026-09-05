@@ -1,12 +1,21 @@
-"""Key extraction - compile and run C scanner to extract DB keys from WeChat process memory."""
+"""Recover and cumulatively store local WeChat database keys."""
 import json
 import os
+import platform
+import plistlib
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 
-from .config import APP_DIR, DATA_DIR, ensure_private_file, load_config
+from .config import (
+    APP_DIR,
+    DATA_DIR,
+    ensure_private_dir,
+    ensure_private_file,
+    load_config,
+)
 
 
 C_SOURCE = os.path.join(APP_DIR, "c_src", "find_keys_macos.c")
@@ -26,6 +35,13 @@ REQUIRED_DATABASE_PATTERNS = (
     re.compile(r"^message/(?:biz_)?message_\d+\.db$"),
     re.compile(r"^message/message_fts\.db$"),
 )
+SQLCIPHER_PAGE_SIZE = 4096
+PROTECTED_KEY_MEMORY_MASKS = {
+    ("4.1.11", "269136", "arm64"): bytes.fromhex(
+        "e8ac38191bd59c963f4654d8f9d7437e"
+        "1acc81a5cad6312c7bd0f5e73238d4af"
+    ),
+}
 
 
 def _first_pid(args):
@@ -80,6 +96,8 @@ def is_wechat_running():
 
 def get_wechat_app_path():
     """Get WeChat.app path, preferring system-installed location."""
+    if os.path.isdir(DEFAULT_WECHAT_APP):
+        return DEFAULT_WECHAT_APP
     try:
         result = subprocess.run(
             ["osascript", "-e", 'POSIX path of (path to application "WeChat")'],
@@ -92,9 +110,29 @@ def get_wechat_app_path():
     except Exception:
         pass
 
-    if os.path.isdir(DEFAULT_WECHAT_APP):
-        return DEFAULT_WECHAT_APP
     return None
+
+
+def get_wechat_build_identity(app_path=None):
+    """Return the exact app build and local architecture for scan profiles."""
+    app_path = app_path or get_wechat_app_path()
+    if not app_path:
+        return None
+    try:
+        with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException):
+        return None
+    version = str(info.get("CFBundleShortVersionString") or "").strip()
+    build = str(info.get("CFBundleVersion") or "").strip()
+    if not version or not build:
+        return None
+    return version, build, platform.machine()
+
+
+def _protected_key_memory_mask():
+    identity = get_wechat_build_identity()
+    return PROTECTED_KEY_MEMORY_MASKS.get(identity) if identity else None
 
 
 def is_required_database(rel_path):
@@ -146,8 +184,42 @@ def compile_scanner():
         return False
 
 
+def _read_keys_file(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, item in value.items() if not key.startswith("_")}
+
+
+def _atomic_write_keys(path, keys):
+    directory = os.path.dirname(path) or "."
+    ensure_private_dir(directory)
+    fd, temporary = tempfile.mkstemp(prefix=".all-keys.", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            json.dump(keys, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        ensure_private_file(path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def extract_keys():
-    """Run C scanner to extract keys, requires sudo.
+    """Run the read-only C scanner, escalating only if task access is denied.
 
     Returns:
         dict: {db_rel_path: {"enc_key": hex_string}, ...} or None.
@@ -161,77 +233,106 @@ def extract_keys():
     home_dir = os.path.expanduser("~")
     db_dir = load_config().get("db_dir", "")
     scanner_output = ""
+    cached_keys = _read_keys_file(KEYS_FILE)
+    scanner_args = [C_BINARY, str(pid), home_dir, db_dir]
+    protected_key_mask = _protected_key_memory_mask()
+    if protected_key_mask:
+        scanner_args.append(protected_key_mask.hex())
 
-    # C scanner outputs all_keys.json to cwd, so cd to DATA_DIR
-    try:
-        result = subprocess.run(
-            ["sudo", "-n", C_BINARY, str(pid), home_dir, db_dir],
-            capture_output=True, text=True,
-            cwd=DATA_DIR,
-            timeout=60,
-        )
-        scanner_output += "\n".join((result.stdout or "", result.stderr or ""))
-
-        if result.returncode != 0:
-            # Try interactive sudo via osascript dialog
-            shell_command = (
-                f"cd {shlex.quote(DATA_DIR)} && "
-                f"{shlex.quote(C_BINARY)} {pid} {shlex.quote(home_dir)} {shlex.quote(db_dir)}"
-            )
+    # The scanner owns only a private staging directory. A failed or empty scan
+    # must never truncate the cumulative canonical cache.
+    ensure_private_dir(DATA_DIR)
+    with tempfile.TemporaryDirectory(prefix=".key-scan-", dir=DATA_DIR) as scan_dir:
+        os.chmod(scan_dir, 0o700)
+        try:
             result = subprocess.run(
-                ["osascript", "-e",
-                 f"do shell script {json.dumps(shell_command)} with administrator privileges"],
+                scanner_args,
                 capture_output=True, text=True,
+                cwd=scan_dir,
                 timeout=60,
             )
             scanner_output += "\n".join((result.stdout or "", result.stderr or ""))
+
             if result.returncode != 0:
-                return None
+                result = subprocess.run(
+                    ["sudo", "-n", *scanner_args],
+                    capture_output=True,
+                    text=True,
+                    cwd=scan_dir,
+                    timeout=60,
+                )
+                scanner_output += "\n".join((result.stdout or "", result.stderr or ""))
+                if result.returncode != 0:
+                    # Last resort: one explicit macOS administrator dialog.
+                    shell_command = (
+                        f"cd {shlex.quote(scan_dir)} && "
+                        + " ".join(shlex.quote(value) for value in scanner_args)
+                    )
+                    result = subprocess.run(
+                        [
+                            "osascript",
+                            "-e",
+                            f"do shell script {json.dumps(shell_command)} "
+                            "with administrator privileges",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    scanner_output += "\n".join(
+                        (result.stdout or "", result.stderr or "")
+                    )
+                    if result.returncode != 0:
+                        return cached_keys or None
 
-    except subprocess.TimeoutExpired:
-        return None
-    except Exception:
-        return None
+        except subprocess.TimeoutExpired:
+            return cached_keys or None
+        except Exception:
+            return cached_keys or None
 
-    # Read output keys file
-    keys_path = os.path.join(DATA_DIR, "all_keys.json")
-    if not os.path.exists(keys_path):
-        if db_dir and os.path.isdir(db_dir):
-            return _rematch_keys_from_output(db_dir, scanner_output) or None
-        return None
+        keys = _read_keys_file(os.path.join(scan_dir, "all_keys.json"))
 
-    try:
-        with open(keys_path) as f:
-            keys = json.load(f)
-        # Filter out metadata fields
-        keys = {k: v for k, v in keys.items() if not k.startswith("_")}
-        ensure_private_file(keys_path)
-    except (json.JSONDecodeError, OSError):
-        return None
-
-    # If C scanner couldn't match DBs due to permission issues, re-match in Python
-    # Python runs as current user and can read sandbox files
-    if not keys and db_dir and os.path.isdir(db_dir):
-        keys = _rematch_keys_from_output(db_dir, scanner_output)
+    # Python runs as the logged-in user and authoritatively page-verifies both
+    # legacy key+salt and current key-only scanner candidates.
+    if db_dir and os.path.isdir(db_dir):
+        rematched = _rematch_keys_from_output(
+            db_dir, scanner_output, persist=False
+        )
+        keys = {**keys, **rematched}
 
     if not keys:
-        try:
-            os.remove(keys_path)
-        except OSError:
-            pass
-        return None
+        return cached_keys or None
 
-    return keys
+    merged = {**cached_keys, **keys}
+    _atomic_write_keys(KEYS_FILE, merged)
+    return merged
 
 
 def _parse_raw_keys_from_text(text):
-    """Parse all key+salt pairs found in scanner stdout/stderr text."""
-    raw_keys = []  # [(key_hex, salt_hex), ...]
+    """Parse scanner key candidates with an optional embedded DB salt."""
+    raw_keys = []  # [(key_hex, salt_hex_or_none), ...]
     for line in str(text or "").splitlines():
         line = line.strip()
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "WGO_KEY":
+            key_hex = parts[1]
+            salt_hex = None if parts[2] == "-" else parts[2]
+            if len(key_hex) != 64 or (
+                salt_hex is not None and len(salt_hex) != 32
+            ):
+                continue
+            try:
+                bytes.fromhex(key_hex)
+                if salt_hex is not None:
+                    bytes.fromhex(salt_hex)
+            except ValueError:
+                continue
+            raw_keys.append(
+                (key_hex.lower(), salt_hex.lower() if salt_hex else None)
+            )
+            continue
         # 格式: "(unknown)  <key_hex 64>  <salt_hex 32>"
         # 或:   "db_name   <key_hex 64>  <salt_hex 32>"
-        parts = line.split()
         if len(parts) < 3:
             continue
         key_hex = parts[-2]
@@ -259,8 +360,8 @@ def _parse_raw_keys_from_log(log_path=EXTRACT_LOG):
     return raw_keys
 
 
-def _rematch_keys_from_output(db_dir, scanner_output):
-    """Read db headers and match against key+salt pairs from scanner output.
+def _rematch_keys_from_output(db_dir, scanner_output, *, persist=True):
+    """Match captured key candidates against encrypted database page one.
 
     Solves the issue where root cannot read macOS sandbox files.
     """
@@ -268,14 +369,18 @@ def _rematch_keys_from_output(db_dir, scanner_output):
     if not raw_keys:
         return {}
 
-    print(f"[key_extractor] 从 scanner 输出解析到 {len(raw_keys)} 个 key+salt 对，用 Python 重新匹配...")
+    print(f"[key_extractor] 从 scanner 输出解析到 {len(raw_keys)} 个 key candidate，用 Python 重新匹配...")
 
     # Build salt -> key_hex index
     salt_to_key = {}
     for key_hex, salt_hex in raw_keys:
-        salt_to_key[salt_hex] = key_hex
+        if salt_hex:
+            salt_to_key[salt_hex] = key_hex
+    unique_candidates = sorted({key_hex for key_hex, _salt_hex in raw_keys})
+    from .decryptor import verify_page1
 
-    # Walk all .db files under db_dir, read salt
+    # Walk all required encrypted DBs. Current WeChat builds retain only the
+    # key-only literal, so page-one verification is the authoritative match.
     matched = {}
     for root, _dirs, files in os.walk(db_dir):
         for fname in files:
@@ -283,27 +388,37 @@ def _rematch_keys_from_output(db_dir, scanner_output):
                 continue
             full_path = os.path.join(root, fname)
             rel = os.path.relpath(full_path, db_dir).replace("\\", "/")
+            if not is_required_database(rel):
+                continue
             try:
                 with open(full_path, "rb") as f:
-                    header = f.read(16)
-                if len(header) < 16:
+                    page1 = f.read(SQLCIPHER_PAGE_SIZE)
+                if len(page1) != SQLCIPHER_PAGE_SIZE:
                     continue
                 # Unencrypted SQLite, skip
-                if header[:15] == b"SQLite format 3":
+                if page1.startswith(b"SQLite format 3\x00"):
                     continue
-                file_salt = header.hex().lower()
+                file_salt = page1[:16].hex().lower()
+                ordered_candidates = []
                 if file_salt in salt_to_key:
-                    matched[rel] = {"enc_key": salt_to_key[file_salt]}
-                    print(f"  ✓ 匹配: {rel}")
+                    ordered_candidates.append(salt_to_key[file_salt])
+                ordered_candidates.extend(
+                    key_hex
+                    for key_hex in unique_candidates
+                    if key_hex not in ordered_candidates
+                )
+                for key_hex in ordered_candidates:
+                    if verify_page1(bytes.fromhex(key_hex), page1):
+                        matched[rel] = {"enc_key": key_hex}
+                        print(f"  ✓ 匹配: {rel}")
+                        break
             except OSError:
                 continue
 
-    if matched:
-        # Save to all_keys.json
+    if matched and persist:
         try:
-            with open(KEYS_FILE, "w") as f:
-                json.dump(matched, f, indent=2)
-            ensure_private_file(KEYS_FILE)
+            merged = {**_read_keys_file(KEYS_FILE), **matched}
+            _atomic_write_keys(KEYS_FILE, merged)
             print(f"[key_extractor] Python 重新匹配成功: {len(matched)} 个数据库")
         except OSError:
             pass

@@ -248,6 +248,11 @@ cd we-groupchat-obsidian
 
 这一步可能会退出微信，并要求输入 Mac 登录密码。输入密码时终端不显示字符是正常的。
 
+WGO 已验证 macOS 微信 `4.1.11 (269136)` arm64 的 protected binary
+cipher-context key 读取。Protected-key profile 与精确微信 build 绑定，每个
+candidate 都必须通过相应 encrypted DB 的 page-one HMAC 验证才会写入私有
+key cache；未识别的后续 build 会 fail closed 并保留已验证 cache。
+
 ### 文档地图
 
 - `README.md` / `README.zh-CN.md`：当前用户、operator、隐私和项目概览 authority。

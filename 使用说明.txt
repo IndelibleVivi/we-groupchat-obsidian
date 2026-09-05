@@ -80,6 +80,14 @@ monitor state JSON；corrupt/symlink state 会 fail closed，不会自动跳到 
 再运行“刷新数据源”。普通健康检查默认 redacted；只有本机私下排查才考虑
 加 --sensitive。
 
+macOS WeChat 4.1.11 (269136, arm64) 已有精确 build profile：刷新程序只读扫描
+WeChat task memory 中受保护的 cipher context，按该 build 的 profile 解码候选 key，
+并用对应数据库第一页的 HMAC 逐一验证后才写入本机 private key cache。缓存按
+验证结果累计更新，不会因为一次 partial/empty scan 丢掉先前已验证的 key。
+未知的后续 WeChat build 会 fail closed 并保留旧缓存；不要手工复制猜测的 mask/key。
+如果本机 WeChat 需要 ad-hoc re-sign，只有显式允许的刷新流程才会执行，并且仅在
+它确实关闭了 WeChat 时重新打开 app。
+
 
 ============================================
     主要数据位置

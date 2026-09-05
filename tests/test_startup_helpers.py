@@ -73,6 +73,25 @@ class StartupHelperTests(unittest.TestCase):
         self.assertLess(confirmation, install_dependencies)
         self.assertIn("已取消安装，程序不会启动。", contents)
 
+    def test_refresh_reopens_wechat_after_this_launcher_resigns_it(self):
+        launcher = repo_path("launchers", "启动.command")
+        contents = launcher.read_text(encoding="utf-8")
+
+        signed = contents.index("WECHAT_RESIGNED=1")
+        refresh = contents.index('if [[ "$REFRESH_DATA_SOURCE" -eq 1 ]]')
+        reopen = contents.index('open "$app_path"', refresh)
+        execute_refresh = contents.index("scripts/refresh_data_source.py", reopen)
+        self.assertLess(signed, refresh)
+        self.assertLess(refresh, reopen)
+        self.assertLess(reopen, execute_refresh)
+
+    def test_launcher_has_no_legacy_key_cache_rewrite_block(self):
+        launcher = repo_path("launchers", "启动.command")
+        contents = launcher.read_text(encoding="utf-8")
+
+        self.assertNotIn("os.remove(keys_f)", contents)
+        self.assertNotIn("extract_keys.log", contents)
+
 
 if __name__ == "__main__":
     unittest.main()

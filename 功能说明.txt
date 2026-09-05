@@ -101,6 +101,10 @@ monitor checkpoint 倒退成“没处理过”。
 - WeChat encrypted database 是 raw source authority；项目读取本地 source 并维护自己的
   decrypted snapshot/cache，不回写微信聊天数据库。
 - Plaintext SQLite snapshot 使用 Online Backup，避免忽略 WAL 中已提交的数据。
+- macOS WeChat 4.1.11 (269136, arm64) 使用 exact build profile 只读扫描受保护的
+  cipher context；候选 key 必须通过目标数据库第一页 HMAC 验证，才会累计、原子地
+  发布到 private key cache。partial/empty/unsupported scan 保留先前已验证缓存并
+  fail closed，不持久化 raw candidates。
 - Source shards、message identity、cursor 和 attachment occurrence 都按 source root
   namespace，避免不同账号/数据根互相碰撞。
 - 可选 source guard 运行在长驻菜单 app 内，受 grace、pause、restart budget、
