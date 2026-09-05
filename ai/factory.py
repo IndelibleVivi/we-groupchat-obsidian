@@ -72,6 +72,8 @@ def create_provider(config):
             api_key=api_key,
             model=model,
             base_url=config.get("ai_base_url", ""),
+            thinking=config.get("ai_thinking"),
+            timeout_seconds=config.get("ai_timeout_seconds", 45.0),
         )
 
     else:

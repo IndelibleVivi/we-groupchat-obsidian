@@ -22,6 +22,23 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertEqual(captured["timeout"], 45.0)
         self.assertEqual(captured["max_retries"], 0)
 
+    def test_accepts_an_explicit_request_timeout(self):
+        captured = {}
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        fake_module = types.SimpleNamespace(OpenAI=FakeOpenAI)
+        with patch.dict(sys.modules, {"openai": fake_module}):
+            OpenAIProvider(
+                "test-key",
+                model="test-model",
+                timeout_seconds=90,
+            )
+
+        self.assertEqual(captured["timeout"], 90.0)
+
     def test_empty_completion_is_a_retryable_provider_failure(self):
         class FakeCompletions:
             @staticmethod

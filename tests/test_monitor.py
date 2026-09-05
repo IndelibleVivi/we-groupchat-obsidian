@@ -379,6 +379,35 @@ class TopicMonitorTests(unittest.TestCase):
         self.assertEqual(seen_configs[0]["ai_provider"], "ollama")
         self.assertFalse(seen_configs[0]["ai_thinking"])
 
+    def test_custom_monitor_uses_the_monitor_request_contract(self):
+        class FakeProvider:
+            def summarize(self, prompt):
+                return {"match": False, "score": 20, "reason": "irrelevant"}
+
+        self.config["ai_provider"] = "custom"
+        self.config["ai_model"] = "qwen-test"
+        self.config["ai_base_url"] = "https://example.invalid/v1"
+        self.config["monitor_ai_timeout_seconds"] = 120
+        save_state({"last_checked_ts": 10}, self.state_file)
+        db = FakeDB([msg(11, "普通闲聊")])
+        seen_configs = []
+
+        def fake_create_provider(config):
+            seen_configs.append(dict(config))
+            return FakeProvider()
+
+        with patch("ai.factory.create_provider", fake_create_provider):
+            result = TopicMonitor(
+                db,
+                self.config,
+                state_file=self.state_file,
+                hits_dir=self.hits_dir,
+            ).check_once()
+
+        self.assertEqual(result["status"], "no_match")
+        self.assertFalse(seen_configs[0]["ai_thinking"])
+        self.assertEqual(seen_configs[0]["ai_timeout_seconds"], 120)
+
     def test_monitor_ai_provider_can_override_summary_provider(self):
         class FakeProvider:
             def summarize(self, prompt):

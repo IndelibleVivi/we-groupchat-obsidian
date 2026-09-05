@@ -4,12 +4,23 @@ from core.api_errors import normalize_ai_error
 
 
 class OpenAIProvider(AIProvider):
-    def __init__(self, api_key, model="gpt-4o-mini", base_url=None, thinking=None):
+    def __init__(
+        self,
+        api_key,
+        model="gpt-4o-mini",
+        base_url=None,
+        thinking=None,
+        timeout_seconds=45.0,
+    ):
         from openai import OpenAI
         # TopicMonitor already owns one bounded retry and persistent backoff.
         # Avoid SDK-level retries turning a transient provider stall into a
         # multi-minute monitor lock that blocks later checkpoint pages.
-        kwargs = {"api_key": api_key, "timeout": 45.0, "max_retries": 0}
+        kwargs = {
+            "api_key": api_key,
+            "timeout": float(timeout_seconds),
+            "max_retries": 0,
+        }
         if base_url:
             kwargs["base_url"] = base_url
         self.client = OpenAI(**kwargs)
