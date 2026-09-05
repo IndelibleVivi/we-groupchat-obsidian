@@ -6,7 +6,9 @@ Status: functional, source-distributed macOS application. It has a menu-bar app,
 an optional legacy read-only MCP compatibility server, operator CLIs, durable
 local state, recovery/backup workers and a full regression suite; review the data-flow and account-safety notes before
 using it on real chat data. A bundled Python runtime or signed installer is not
-currently distributed.
+currently distributed. The current package metadata identifies the
+`v0.1.0-alpha.1` prerelease line; a source checkout, local alias build,
+installed copy, and live runtime remain separate acceptance states.
 
 Windows port status: **W0.2B.1 path-identity stage**. The repository has native
 macOS/Windows shared and exclusive lock backends plus concrete path providers
@@ -335,9 +337,9 @@ the AI provider again.
 
 - `README.md` / `README.zh-CN.md`: current user, operator, privacy, and project
   overview authority.
-- `使用说明.txt`: bundled/offline quick start; intentionally shorter than the
-  README.
-- `功能说明.txt`: concise current capability index, not an operational contract.
+- `docs/share-package-guide.zh-CN.md`: the sole tracked offline-guide template.
+  The exact-commit source-package builder emits it as `群友使用说明.md`; there
+  are no competing root-level quick-start manuals.
 - `docs/source-reliability*.md`: detailed source guard, archive, mounted backup,
   Drive, backup, and rollout contract.
 - `docs/reliability-closure.md`: shared signature/outcome interpretation,

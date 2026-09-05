@@ -211,6 +211,11 @@ installation, repository layout or ordinary commands change. Update operator
 guides for changed procedures and this file when source ownership, required
 verification or deployment gates change.
 
+`docs/share-package-guide.zh-CN.md` is the sole tracked offline-guide template.
+The share-package builder may emit it as `群友使用说明.md` inside an exact-commit
+artifact; do not recreate root `使用说明.txt` or `功能说明.txt` as competing
+documentation surfaces.
+
 ## Recovery hardening boundary
 
 - `core/key_extractor.py::recover_keys` returns a structured observed-key

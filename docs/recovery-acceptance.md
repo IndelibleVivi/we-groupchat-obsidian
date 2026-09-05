@@ -124,9 +124,33 @@ decode failure→cursor unchanged, exact re-sign binding, scanner identity,
 generation pre-admission, and event-commit→projection-repair without provider
 replay.
 
+## `v0.1.0-alpha.1` bounded native canary
+
+On 2026-09-06, public candidate `2353931a22e58ff1d1496d0224bfcc00c38924bf`
+was exercised on macOS arm64 with explicit local authorization. The exact
+WeChat `4.1.11 (269136)` target binding and running-process identity were valid,
+so no re-sign mutation was needed. A fresh recovery scan returned
+`fresh_verified`; the admitted scanner's source/compiler/architecture/flags
+and executable bytes matched its durable receipt.
+
+The catch-up canary deliberately allowed only one page per selected chat. It
+therefore finalized honestly as `partial / resume_required`, not as terminal
+success. The bounded run migrated legacy state to generation-bound shard
+cursors, committed exactly one new canonical event, produced its non-empty
+regular-file topic projection, reported zero duplicate message-hash groups,
+and passed SQLite quick/integrity plus topics/FTS parity checks. Its provisional
+and final receipt proved that the previously loaded LaunchAgent was restored;
+readback found the job loaded and running. This verifies the write/recovery
+path without claiming that the deliberately capped historical backlog reached
+EOF.
+
+The canary ran from the exact candidate checkout while preserving the existing
+installed/runtime checkout. It is live-path evidence for the candidate, not a
+claim that the candidate had already replaced the installed application.
+
 ## Still separate from source acceptance
 
-Source tests do not attest the installed `.app`, LaunchAgent checkout, current
+Source tests alone do not attest the installed `.app`, LaunchAgent checkout, current
 process, real AppKit metadata, actual App Store bundle, task-memory access, or
 real chat source. A separately authorized canary must verify:
 

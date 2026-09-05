@@ -14,7 +14,8 @@ OPTIONS = {
         "CFBundleIdentifier": "io.github.indeliblevivi.we-groupchat-obsidian",
         "CFBundleName": "WeGroupchatObsidian",
         "CFBundleDisplayName": "微信总结",
-        "CFBundleShortVersionString": "1.0.0",
+        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleVersion": "1",
         "LSUIElement": True,  # 不在 Dock 显示图标
         "NSAppDataUsageDescription": (
             "读取本机微信消息数据库来生成你选择的群聊总结与资源索引；只有显式开启文件解析时才读取附件缓存。"
@@ -39,7 +40,7 @@ OPTIONS = {
         "core",
         "ui",
     ],
-    "resources": ["c_src", "使用说明.txt"],
+    "resources": ["c_src", "resources"],
 }
 
 
@@ -107,6 +108,7 @@ def main():
     setup(
         app=APP,
         name="WeGroupchatObsidian",
+        version="0.1.0a1",
         options={"py2app": OPTIONS},
         cmdclass={"py2app": validated_alias_py2app_command()},
     )
