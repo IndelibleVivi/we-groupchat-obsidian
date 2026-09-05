@@ -56,7 +56,10 @@ class AppMonitorResilienceTests(unittest.TestCase):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
         app.config = {"monitor_notify_writes": False}
 
-        with patch("app.refresh_existing_daily_digests") as refresh:
+        with patch(
+            "app.refresh_pending_daily_digests",
+            return_value={"state": "refreshed", "written_dates": ["2026-08-02", "2026-08-03"]},
+        ) as refresh:
             app._handle_monitor_result({
                 "status": "duplicate",
                 "knowledge_event_written": True,
@@ -65,13 +68,13 @@ class AppMonitorResilienceTests(unittest.TestCase):
                 "summary": "Summary",
             })
 
-        refresh.assert_called_once_with(app.config, ["2026-08-02", "2026-08-03"])
+        refresh.assert_called_once_with(app.config)
 
     def test_status_without_canonical_write_does_not_refresh_digest(self):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
         app.config = {"monitor_notify_writes": False}
 
-        with patch("app.refresh_existing_daily_digests") as refresh:
+        with patch("app.refresh_pending_daily_digests") as refresh:
             app._handle_monitor_result({
                 "status": "notified",
                 "last_msg_ts": 1234,
@@ -89,7 +92,10 @@ class AppMonitorResilienceTests(unittest.TestCase):
         }
         app._start_attachment_archive_consumer = unittest.mock.Mock()
 
-        with patch("app.refresh_existing_daily_digests"):
+        with patch(
+            "app.refresh_pending_daily_digests",
+            return_value={"state": "idle", "written_dates": []},
+        ):
             app._handle_monitor_result({
                 "status": "duplicate",
                 "knowledge_event_written": True,
@@ -106,13 +112,14 @@ class AppMonitorResilienceTests(unittest.TestCase):
         }
         app._start_attachment_archive_consumer = unittest.mock.Mock()
 
-        with patch("app.refresh_existing_daily_digests"), patch("app._notify"):
+        with patch("app.refresh_pending_daily_digests") as refresh, patch("app._notify"):
             app._handle_monitor_result(
                 {"status": "matched", "knowledge_event_written": True},
                 dry_run=True,
             )
 
         app._start_attachment_archive_consumer.assert_not_called()
+        refresh.assert_not_called()
 
     def test_background_notification_toggle_mutes_automatic_hit_banner(self):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
@@ -181,14 +188,32 @@ class AppMonitorResilienceTests(unittest.TestCase):
             "today_risk_count": 0,
         }
 
-        with patch("app.write_daily_digest", return_value=digest) as write, \
+        with patch("app.should_run_daily_digest", return_value=True), \
+             patch("app.write_daily_digest", return_value=digest) as write, \
+             patch("app.refresh_pending_daily_digests", return_value={"state": "idle"}) as repair, \
              patch("app.mark_daily_digest_success") as mark, \
              patch("app._notify") as notify:
             app._run_daily_digest()
 
         write.assert_called_once_with(app.config)
+        repair.assert_called_once_with(app.config)
         mark.assert_called_once()
         notify.assert_not_called()
+
+    def test_not_due_timer_still_drains_durable_digest_repairs(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app.config = {"daily_digest_enabled": True}
+        app._daily_digest_lock = threading.Lock()
+
+        with patch("app.should_run_daily_digest", return_value=False), \
+             patch("app.write_daily_digest") as write, \
+             patch("app.refresh_pending_daily_digests", return_value={"state": "refreshed"}) as repair, \
+             patch("app.mark_daily_digest_success") as mark:
+            app._run_daily_digest()
+
+        write.assert_not_called()
+        repair.assert_called_once_with(app.config)
+        mark.assert_not_called()
 
 
 if __name__ == "__main__":

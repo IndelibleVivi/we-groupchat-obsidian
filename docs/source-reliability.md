@@ -97,12 +97,36 @@ username; it does not expose the username or `wxid`.
 
 An explicitly configured `db_dir` remains authoritative even when its mount or
 container is temporarily unavailable; auto-detection can fill only a still-empty
-canonical value. Message-shard identity includes the source namespace, key
-fingerprint, and stable database-generation evidence (file identity plus the
+canonical value. Cursor-shard identity includes the source namespace, key
+fingerprint, and database-generation evidence (file identity plus the
 encrypted-page salt/header prefix). Replacing or rekeying a database at the
-same relative path therefore starts a new shard cursor instead of reusing the
-old generation. A decrypted cache with no corresponding live source is marked
-`source_cache_only` and cannot produce an applicable backfill plan.
+same relative path therefore starts a new physical generation. Durable
+`source_message_id` instead uses the stable source namespace plus logical cache
+basename, so the same logical row can retain its identity across an explicitly
+reconciled cache/DB rebuild. The envelope carries the physical generation
+separately for cursor admission. A decrypted cache with no corresponding live
+source is marked `source_cache_only` and cannot produce an applicable backfill
+plan.
+
+### Re-sign and scanner identity
+
+The explicit re-sign path accepts one canonical WeChat bundle. If that bundle
+is running, its PID, launch time, executable path/inode and version/build remain
+bound through privilege acquisition, graceful termination, signing,
+independent `codesign` verification and exact-path reopen. It never terminates
+by process name and never rediscovers a default app after mutation. Multiple
+running copies require an explicit `--wechat-app=...` selection; cancellation,
+identity change, quit timeout, signing failure, hardened-runtime verification
+failure or reopen mismatch stops the operation.
+
+The read-only C scanner is only a candidate producer. A scanner build receipt
+binds the exact source digest/size, compiler path and binary digest,
+compiler/target identity, explicit `arm64|x86_64` target and flags, plus the
+output digest/size. Source, executable and receipt are completed in an
+immutable private build directory before one fsynced atomic current pointer is
+published. A missing/tampered receipt, pointer, binary or source/compiler input
+forces a rebuild; failed compilation or pointer publication preserves the old
+current pointer but does not certify it for the changed input.
 
 ### Authoritative shard inventory
 
@@ -126,9 +150,15 @@ cursor resumes and occurrence deduplication prevents duplicates.
 
 `core/monitor_source.py` turns that complete inventory into one bounded monitor
 batch. Durable `source_cursors` are keyed by logical shard and bind the current
-generation ID plus its opaque `(create_time, rowid)` token. A legacy timestamp
-checkpoint is used only once to seed missing generation cursors; an old
-generation's token is never inherited by a replacement generation.
+generation ID plus its opaque `(create_time, rowid)` token and initial boundary.
+First enablement binds every then-present shard from now. A legacy state with no
+per-shard cursor may perform its one compatibility migration. After any shard
+binding exists, a replacement generation or new logical shard is rejected
+before page reads with `source_generation_admission_required`. The returned
+content-free plan binds the exact inventory digest/revision, old/new generation
+IDs, prior cursor and bounded row limit. It is evidence for a later explicit
+continuity proof or bounded replay/reconciliation, not permission to copy a
+cursor or borrow the global timestamp.
 
 The reader keeps a bounded page for each present shard, performs a k-way merge
 by `create_time` and stable `source_message_id`, and stops at the configured raw
@@ -148,11 +178,20 @@ exactly; a run before the deadline returns `ai_backoff` without calling the
 provider. A successful retry clears both current and legacy failure metadata.
 
 Knowledge writes use a source-ID-derived `source_batch_id`; if the event commits
-but the state revision loses its CAS, the retry adopts that exact event instead
-of inserting another canonical event. Reuse normally performs no projection
-write. If the managed topic Markdown is absent, however, reuse reconstructs that
-note and the date indexes from canonical SQLite without changing the event or
-topic identity; an I/O failure remains an explicit `projection_warnings` result.
+but the state revision loses its CAS, the next run checks canonical SQLite
+before calling the provider, adopts that exact event and advances the same
+source batch without inserting another event or reinterpreting the messages.
+If that lookup fails, the cursor remains unchanged. Missing managed topic
+Markdown and date indexes are rebuilt from canonical SQLite.
+
+Every new canonical event also inserts a `daily_digest_changes` row in the same
+SQLite transaction. Existing affected Digest pages are rebuilt from canonical
+events and the exact journal prefix is acknowledged only after every page that
+existed at inspection time was atomically republished. Digest publication uses
+a same-directory private temporary file, file fsync, atomic replace and parent
+directory fsync, preserving the last-known-good file on failure. The event path
+drains immediately; the 60-second menu timer also drains while the scheduled
+Digest itself is not due, so a restart retains an independent repair trigger.
 
 ### Catch-up receipt finalization
 

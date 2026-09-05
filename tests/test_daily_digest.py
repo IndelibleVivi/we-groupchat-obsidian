@@ -2,6 +2,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -439,6 +440,40 @@ class DailyDigestTests(unittest.TestCase):
         )
         with open(digest["path"], encoding="utf-8") as handle:
             self.assertIn("# WeChat Daily Digest - 2026-06-18", handle.read())
+
+    def test_write_daily_digest_preserves_last_good_file_when_publish_fails(self):
+        path, _ = digest_output_path(
+            self.config,
+            "2026-06-18",
+            now_func=lambda: local_ts("2026-06-18 21:31"),
+        )
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("last-known-good\n")
+
+        with patch("core.daily_digest.os.replace", side_effect=OSError("interrupted")):
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                write_daily_digest(
+                    self.config,
+                    now_func=lambda: local_ts("2026-06-18 21:31"),
+                )
+
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "last-known-good\n")
+        self.assertEqual(
+            [name for name in os.listdir(os.path.dirname(path)) if name.endswith(".tmp")],
+            [],
+        )
+
+    def test_write_daily_digest_fsyncs_payload_and_parent_before_success(self):
+        with patch("core.daily_digest.os.fsync", wraps=os.fsync) as fsync:
+            digest = write_daily_digest(
+                self.config,
+                now_func=lambda: local_ts("2026-06-18 21:31"),
+            )
+
+        self.assertTrue(os.path.isfile(digest["path"]))
+        self.assertEqual(fsync.call_count, 2)
 
     def test_historical_digest_is_written_under_month_subfolder(self):
         digest = write_daily_digest(

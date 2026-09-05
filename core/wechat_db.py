@@ -847,6 +847,28 @@ class WeChatDB:
             f"wechat-db-shard-v3\0{namespace}\0{path}\0{source_identity}".encode()
         ).hexdigest()[:20]
 
+    def _source_message_shard_identity(self, rel_key, *, cache_path=""):
+        """Return a logical shard identity for durable source-message IDs.
+
+        Cursor admission continues to use the physical generation identity.
+        Keeping that generation out of the message ID lets an explicitly
+        reconciled replacement recognize the same logical source row instead
+        of manufacturing a second identity solely because cache bytes/inodes
+        were rebuilt.
+        """
+        source_path = os.path.join(self.db_dir, rel_key)
+        if cache_path:
+            identity_path = cache_path
+        elif self._is_plain_sqlite(source_path):
+            identity_path = source_path
+        else:
+            identity_path = self._cache_path(rel_key)
+        basename = os.path.basename(str(identity_path))
+        namespace = str(getattr(self, "cache_namespace", "legacy-unscoped"))
+        return hashlib.sha256(
+            f"wechat-db-shard-v2\0{namespace}\0{basename}".encode()
+        ).hexdigest()[:20]
+
     @staticmethod
     def _source_message_id(username, envelope):
         parts = ["wechat-source-message-v1", hashlib.sha256(username.encode()).hexdigest()]
@@ -985,8 +1007,10 @@ class WeChatDB:
             if ct and ct == 4 and isinstance(content, bytes):
                 try:
                     content = _zstd_dctx.decompress(content).decode("utf-8", errors="replace")
-                except Exception:
-                    content = None
+                except Exception as exc:
+                    # Failed decoding is an unreadable source row, not an
+                    # intentionally filtered envelope that may advance a cursor.
+                    raise WeChatSourceDegraded("source_message_decode_failed") from exc
             elif isinstance(content, bytes):
                 try:
                     content = content.decode("utf-8", errors="replace")
@@ -1355,9 +1379,16 @@ class WeChatDB:
             limit=page_limit + 1,
             page_forward=True,
             include_filtered=True,
-            db_shard_id=str(spec["source_shard_id"]),
+            db_shard_id=self._source_message_shard_identity(
+                spec["rel_key"],
+                cache_path=spec["cache_path"],
+            ),
             after_cursor=after_cursor,
         )
+        for message in messages:
+            envelope = message.get("source_envelope")
+            if isinstance(envelope, dict):
+                envelope["source_generation_id"] = str(spec["source_shard_id"])
         exhausted = len(messages) <= page_limit
         page = messages[:page_limit]
         next_cursor = str(cursor_token or "")
@@ -1423,7 +1454,10 @@ class WeChatDB:
             page_forward=page_forward,
             since_inclusive=since_inclusive,
             include_filtered=include_filtered,
-            db_shard_id=str(spec["source_shard_id"]),
+            db_shard_id=self._source_message_shard_identity(
+                spec["rel_key"],
+                cache_path=spec["cache_path"],
+            ),
         )
 
     def get_messages(

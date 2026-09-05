@@ -13,8 +13,9 @@ _ACTIVE_STATES = frozenset({"present", "generation_changed"})
 class MonitorSourceError(RuntimeError):
     """A path-free source batch failure."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, details: dict | None = None):
         self.code = str(code or "monitor_source_error")
+        self.details = dict(details or {})
         super().__init__(self.code)
 
 
@@ -129,7 +130,62 @@ def _normalized_state_cursors(value) -> dict[str, dict[str, str]]:
             "generation_id": generation_id,
             "cursor_token": cursor_token,
         }
+        start_cursor = item.get("start_cursor")
+        if start_cursor is not None:
+            if not isinstance(start_cursor, str):
+                raise MonitorSourceError("monitor_source_cursors_corrupt")
+            normalized[logical_id]["start_cursor"] = start_cursor
     return normalized
+
+
+def _generation_admission_plan(
+    snapshot: dict,
+    shards: tuple[dict, ...],
+    previous_cursors: dict[str, dict[str, str]],
+    *,
+    raw_limit: int,
+) -> dict | None:
+    """Describe an exact, bounded reconciliation without reading source rows.
+
+    The returned plan is deliberately non-executable: an old cursor is not
+    evidence that the replacement contains the same prefix.  It gives an
+    operator/recovery path a stable exact-inventory input while this ordinary
+    monitor run remains read-only and leaves the checkpoint untouched.
+    """
+    changes = []
+    for shard in shards:
+        logical_id = shard["logical_shard_id"]
+        generation_id = shard["generation_id"]
+        prior = previous_cursors.get(logical_id)
+        if prior is None:
+            changes.append({
+                "logical_shard_id": logical_id,
+                "previous_generation_id": "",
+                "current_generation_id": generation_id,
+                "previous_cursor_token": "",
+                "reason": "new_logical_shard",
+            })
+        elif prior["generation_id"] != generation_id:
+            changes.append({
+                "logical_shard_id": logical_id,
+                "previous_generation_id": prior["generation_id"],
+                "current_generation_id": generation_id,
+                "previous_cursor_token": prior["cursor_token"],
+                "reason": "generation_replaced",
+            })
+    if not changes:
+        return None
+    plan = {
+        "schema": "we-groupchat-obsidian.generation-admission-plan.v1",
+        "inventory_digest": str(snapshot["inventory_digest"]),
+        "inventory_revision": int(snapshot["inventory_revision"]),
+        "max_reconciliation_rows": max(1, int(raw_limit)),
+        "changes": changes,
+        "policy": "prove_stable_prefix_or_explicit_bounded_replay",
+    }
+    canonical = json.dumps(plan, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    plan["plan_id"] = "wgadmit_" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return plan
 
 
 def _message_position(message: dict, generation_id: str) -> tuple[tuple, str]:
@@ -138,7 +194,12 @@ def _message_position(message: dict, generation_id: str) -> tuple[tuple, str]:
     envelope = message.get("source_envelope")
     if not isinstance(envelope, dict):
         raise MonitorSourceError("source_envelope_invalid")
-    if str(envelope.get("db_shard_id") or "") != generation_id:
+    observed_generation = str(
+        envelope.get("source_generation_id")
+        or envelope.get("db_shard_id")
+        or ""
+    )
+    if observed_generation != generation_id:
         raise MonitorSourceError("source_generation_changed")
     source_message_id = str(
         message.get("source_message_id")
@@ -182,6 +243,7 @@ def initialize_monitor_source_state(db, checkpoint) -> dict:
         row["logical_shard_id"]: {
             "generation_id": row["generation_id"],
             "cursor_token": start,
+            "start_cursor": start,
         }
         for row in shards
     }
@@ -224,6 +286,24 @@ def read_monitor_source_batch(
     previous_checkpoint = _checkpoint(state.get("last_checked_ts"))
     previous_cursors = _normalized_state_cursors(state.get("source_cursors"))
     migration_start = _cursor_token(previous_checkpoint, 0)
+
+    # Existing installations without per-shard cursors retain their one-time
+    # compatibility migration.  Once any shard binding exists, however, a
+    # replacement or newly discovered shard must be admitted explicitly.  The
+    # ordinary monitor may not borrow a global timestamp and silently skip an
+    # older unseen row.
+    if previous_cursors:
+        admission_plan = _generation_admission_plan(
+            snapshot,
+            shards,
+            previous_cursors,
+            raw_limit=limit,
+        )
+        if admission_plan is not None:
+            raise MonitorSourceError(
+                "source_generation_admission_required",
+                details={"generation_admission_plan": admission_plan},
+            )
 
     cursors = {}
     streams = {}
@@ -290,6 +370,10 @@ def read_monitor_source_batch(
             "generation_id": generation_id,
             "cursor_token": start_cursor,
         }
+        if prior.get("start_cursor"):
+            cursors[logical_id]["start_cursor"] = prior["start_cursor"]
+        elif not prior:
+            cursors[logical_id]["start_cursor"] = migration_start
         streams[logical_id] = {
             "generation_id": generation_id,
             "fetch_cursor": start_cursor,

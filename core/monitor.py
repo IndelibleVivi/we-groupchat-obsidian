@@ -222,6 +222,16 @@ class TopicMonitor:
                 messages,
                 max_messages,
             )
+            recovered = self._recover_committed_source_batch(source_batch)
+            if recovered is not None:
+                if recovered.get("status") == "knowledge_recovery_unavailable":
+                    return recovered
+                return self._commit_monitor_result(
+                    snapshot,
+                    state,
+                    recovered,
+                    source_batch,
+                )
         else:
             query_since_ts = self._get_query_since_ts(since_ts)
             page_forward = not dry_run and since_ts > 0
@@ -411,7 +421,11 @@ class TopicMonitor:
             if isinstance(error, MonitorSourceError)
             else "monitor_source_error"
         )
-        return {"status": code, "message": code}
+        result = {"status": code, "message": code}
+        details = getattr(error, "details", None)
+        if isinstance(details, dict):
+            result.update(details)
+        return result
 
     def _commit_monitor_result(self, snapshot, state, result, source_batch=None):
         if source_batch is not None:
@@ -708,6 +722,49 @@ class TopicMonitor:
         if self.knowledge_store is not None:
             return self.knowledge_store
         return KnowledgeStore.from_config(self.config, now_func=self.now_func, read_only=dry_run)
+
+    def _recover_committed_source_batch(self, source_batch):
+        """Advance a committed batch without asking the provider a second time."""
+        if not self._knowledge_enabled() or not source_batch.source_batch_id:
+            return None
+        store = self._get_knowledge_store(dry_run=False)
+        try:
+            knowledge = store.recover_source_batch(source_batch.source_batch_id)
+        except Exception as exc:
+            return {
+                "status": "knowledge_recovery_unavailable",
+                "message": "knowledge_recovery_unavailable",
+                "error_code": type(exc).__name__,
+            }
+        if knowledge is None:
+            return None
+        source_window = {
+            "start": str(knowledge.get("window_start") or ""),
+            "end": str(knowledge.get("window_end") or ""),
+        }
+        return {
+            "status": "duplicate",
+            "message": "canonical source batch already committed",
+            "message_count": len(source_batch.visible_messages),
+            "raw_message_count": source_batch.raw_count,
+            "source_eof": source_batch.source_eof,
+            "knowledge_topic_id": knowledge.get("topic_id"),
+            "knowledge_event_id": knowledge.get("event_id"),
+            "knowledge_event_written": False,
+            "knowledge_event_reused": True,
+            "knowledge_path": knowledge.get("knowledge_path", ""),
+            "obsidian_path": knowledge.get("obsidian_path", ""),
+            "knowledge_projection_warnings": knowledge.get(
+                "projection_warnings", []
+            ),
+            "source_window": source_window,
+            "affected_dates": source_window_dates(
+                self.config,
+                source_window["start"],
+                source_window["end"],
+                fallback_ts=knowledge.get("event_created_at"),
+            ),
+        }
 
     def _get_review_queue(self):
         if self.review_queue is not None:

@@ -73,17 +73,18 @@ class StartupHelperTests(unittest.TestCase):
         self.assertLess(confirmation, install_dependencies)
         self.assertIn("已取消安装，程序不会启动。", contents)
 
-    def test_refresh_reopens_wechat_after_this_launcher_resigns_it(self):
+    def test_refresh_uses_the_exact_target_reopened_by_resign_orchestration(self):
         launcher = repo_path("launchers", "启动.command")
         contents = launcher.read_text(encoding="utf-8")
 
-        signed = contents.index("WECHAT_RESIGNED=1")
+        bound = contents.index('export WE_GROUPCHAT_OBSIDIAN_WECHAT_APP_PATH="$app_path"')
+        signed = contents.index("scripts/resign_wechat.py")
         refresh = contents.index('if [[ "$REFRESH_DATA_SOURCE" -eq 1 ]]')
-        reopen = contents.index('open "$app_path"', refresh)
-        execute_refresh = contents.index("scripts/refresh_data_source.py", reopen)
+        execute_refresh = contents.index("scripts/refresh_data_source.py", refresh)
+        self.assertLess(bound, signed)
         self.assertLess(signed, refresh)
-        self.assertLess(refresh, reopen)
-        self.assertLess(reopen, execute_refresh)
+        self.assertLess(refresh, execute_refresh)
+        self.assertNotIn('open "$app_path"', contents)
 
     def test_launcher_has_no_legacy_key_cache_rewrite_block(self):
         launcher = repo_path("launchers", "启动.command")

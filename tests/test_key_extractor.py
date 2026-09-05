@@ -72,16 +72,9 @@ class KeyExtractorTests(unittest.TestCase):
 
     def test_protected_key_mask_is_enabled_only_for_an_exact_supported_build(self):
         identity = ("4.1.11", "269136", "arm64")
-        with patch("core.key_extractor.get_wechat_build_identity", return_value=identity):
-            self.assertEqual(
-                _protected_key_memory_mask(),
-                PROTECTED_KEY_MEMORY_MASKS[identity],
-            )
-        with patch(
-            "core.key_extractor.get_wechat_build_identity",
-            return_value=("4.1.12", "future", "arm64"),
-        ):
-            self.assertIsNone(_protected_key_memory_mask())
+        self.assertEqual(_protected_key_memory_mask(identity), PROTECTED_KEY_MEMORY_MASKS[identity])
+        self.assertIsNone(_protected_key_memory_mask(("4.1.12", "future", "arm64")))
+        self.assertIsNone(_protected_key_memory_mask())
 
     def test_missing_extract_log_returns_empty_list(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,11 +151,11 @@ class KeyExtractorTests(unittest.TestCase):
                  ):
                 result = extract_keys()
 
-            self.assertEqual(result, existing)
+            self.assertIsNone(result)
             with open(keys_file, encoding="utf-8") as handle:
                 self.assertEqual(json.load(handle), existing)
 
-    def test_partial_scan_merges_with_existing_key_cache(self):
+    def test_unverified_partial_stage_preserves_existing_key_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             keys_file = os.path.join(tmp, "all_keys.json")
             existing = {
@@ -185,8 +178,9 @@ class KeyExtractorTests(unittest.TestCase):
                  ):
                 result = extract_keys()
 
-            expected = {**existing, **discovered}
-            self.assertEqual(result, expected)
+            # Staged JSON has no HMAC authority, even when nonempty.
+            expected = existing
+            self.assertIsNone(result)
             with open(keys_file, encoding="utf-8") as handle:
                 self.assertEqual(json.load(handle), expected)
 

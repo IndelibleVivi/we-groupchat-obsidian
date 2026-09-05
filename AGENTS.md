@@ -210,3 +210,46 @@ Update README EN/ZH when entrypoints, supported behavior, privacy boundaries,
 installation, repository layout or ordinary commands change. Update operator
 guides for changed procedures and this file when source ownership, required
 verification or deployment gates change.
+
+## Recovery hardening boundary
+
+- `core/key_extractor.py::recover_keys` returns a structured observed-key
+  result. Only HMAC-verified candidates may be published; C staging JSON is
+  never authority. Every publisher, including legacy rematch, uses the same
+  existing portable lock backend around fresh-read/reverify/merge/replace.
+  This adds a macOS runtime consumer, not Windows key/runtime support.
+- Profile selection binds to the selected NSRunningApplication's launch,
+  executable, bundle build and executing architecture. Diagnostic default-app
+  lookup and Python architecture must never choose the scan mask.
+- `core/wechat_resign.py` owns explicit exact-target re-sign orchestration;
+  `scripts/resign_wechat.py` and `launchers/启动.command` are thin entrypoints.
+  Bind canonical bundle, PID/launch/executable identity across sudo, graceful
+  termination, signing, independent verification and exact-path reopen. Never
+  restore process-name kill, post-mutation default-app discovery or implicit
+  re-sign permission.
+- Scanner execution authority is an immutable private build directory plus a
+  single atomic `scanner-current.json` pointer. The receipt binds source,
+  compiler, target architecture, flags and binary identity. A legacy fixed
+  binary, incomplete directory or metadata-only match is not admissible.
+- `extract_keys()` returns keys only for a freshly verified complete observed
+  set. Partial/unsupported/failed operations preserve the cache on disk and
+  do not claim refresh success. Observed keys do not prove expected inventory
+  completeness or successful monitor decoding.
+- Zstd decoding failures raise `source_message_decode_failed`; they must not
+  become empty filtered rows, advance monitor/resource cursors, or trigger AI.
+- First source enablement stays from-now. Once per-shard cursors exist, a
+  replacement generation or new logical shard must fail before page/provider
+  work with an exact content-free admission plan; never borrow the global
+  timestamp. Durable message identity is logical and generation-stable, while
+  the physical generation remains separate cursor evidence. The v1 plan does
+  not itself authorize replay or cursor translation.
+- Canonical events and `daily_digest_changes` commit in one knowledge-DB
+  transaction. Digest repair consumes canonical SQLite, atomically republishes
+  existing affected pages, and ACKs only the completed prefix. Before provider
+  replay, monitor retry must adopt an already committed `source_batch_id` and
+  advance that exact batch; lookup failure preserves the checkpoint.
+- Catch-up prints the actual `rebuild_projections` notes/actions contract;
+  tests must connect the real producer to apply/output/receipt.
+- Source acceptance and remaining migration/live gates are described in
+  `docs/recovery-acceptance.md`. Native Cocoa/C/macOS canary, installation,
+  activation and deployment consent remain separate from source tests.

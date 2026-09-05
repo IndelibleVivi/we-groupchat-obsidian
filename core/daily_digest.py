@@ -4,12 +4,18 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import tempfile
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import DATA_DIR, ensure_private_dir, ensure_private_file
-from .knowledge import _obsidian_link, ensure_obsidian_vault, safe_obsidian_subdir
+from .knowledge import (
+    KnowledgeStore,
+    _obsidian_link,
+    ensure_obsidian_vault,
+    safe_obsidian_subdir,
+)
 from .review_queue import QUEUE_ACTIONABILITIES, ReviewQueue, priority_for_item
 from .source_contract import projection_source_lines
 from .url_safety import redact_url_for_display, redact_urls_in_text
@@ -525,6 +531,38 @@ def build_daily_digest(
     return digest
 
 
+def _atomic_write_digest(path: str, text: str) -> None:
+    """Durably publish one app-owned Digest without truncating the last good file."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = ""
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
 def write_daily_digest(
     config: dict,
     now_func=time.time,
@@ -549,9 +587,7 @@ def write_daily_digest(
         os.makedirs(os.path.dirname(path), exist_ok=True)
     else:
         ensure_private_dir(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(digest["markdown"])
-    ensure_private_file(path)
+    _atomic_write_digest(path, digest["markdown"])
     digest["path"] = path
     digest["obsidian_path"] = obsidian_path
     return digest
@@ -594,6 +630,93 @@ def refresh_existing_daily_digests(
             target_date=date_label,
         ))
     return refreshed
+
+
+def refresh_pending_daily_digests(config: dict, now_func=time.time) -> dict:
+    """Repair existing Digest projections from a durable event journal.
+
+    Canonical events and invalidations commit in one SQLite transaction. A
+    crash may leave Markdown stale, but it cannot erase the repair trigger.
+    Only a successfully rewritten prefix is acknowledged.
+    """
+    store = KnowledgeStore.from_config(config)
+    if not os.path.isfile(store.db_path):
+        return {
+            "state": "idle",
+            "affected_dates": [],
+            "written_dates": [],
+            "acknowledged_changes": 0,
+        }
+    batch = store.pending_daily_digest_changes()
+    changes = list(batch.get("changes") or [])
+    if not changes:
+        return {
+            "state": "idle",
+            "affected_dates": [],
+            "written_dates": [],
+            "acknowledged_changes": 0,
+        }
+    dates = []
+    for change in changes:
+        fallback = change.get("fallback_timestamp")
+        try:
+            if float(fallback or 0) <= 0:
+                fallback = change.get("created_at")
+        except (TypeError, ValueError):
+            fallback = change.get("created_at")
+        dates.extend(source_window_dates(
+            config,
+            str(change.get("window_start") or ""),
+            str(change.get("window_end") or ""),
+            fallback_ts=fallback,
+        ))
+    affected_dates = sorted(set(dates))
+    expected_existing = []
+    for date_label in affected_dates:
+        path, _ = digest_output_path(config, date_label, now_func=now_func)
+        if os.path.isfile(path):
+            expected_existing.append(date_label)
+    try:
+        refreshed = refresh_existing_daily_digests(
+            config,
+            affected_dates,
+            now_func=now_func,
+        )
+    except Exception as exc:
+        return {
+            "state": "deferred",
+            "affected_dates": affected_dates,
+            "written_dates": [],
+            "acknowledged_changes": 0,
+            "error_code": type(exc).__name__,
+        }
+    written_dates = [item["date"] for item in refreshed]
+    if written_dates != expected_existing:
+        return {
+            "state": "deferred",
+            "affected_dates": affected_dates,
+            "written_dates": written_dates,
+            "acknowledged_changes": 0,
+            "error_code": "daily_digest_projection_changed",
+        }
+    try:
+        acknowledged = store.ack_daily_digest_changes(
+            int(batch.get("cutoff_change_id") or 0)
+        )
+    except Exception as exc:
+        return {
+            "state": "deferred",
+            "affected_dates": affected_dates,
+            "written_dates": written_dates,
+            "acknowledged_changes": 0,
+            "error_code": type(exc).__name__,
+        }
+    return {
+        "state": "refreshed",
+        "affected_dates": affected_dates,
+        "written_dates": written_dates,
+        "acknowledged_changes": acknowledged,
+    }
 
 
 def notification_summary(digest: dict) -> tuple[str, str]:

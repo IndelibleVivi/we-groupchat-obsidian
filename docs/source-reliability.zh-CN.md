@@ -82,10 +82,26 @@ source envelope 会保留 `local_id`、`server_id`、`sort_seq`、SQLite `rowid`
 `source_message_id` 由这些值和 chat username 的 hash 派生，不暴露 username 或 `wxid`。
 
 显式配置的 `db_dir` 即使 mount/container 暂时不可用也仍是 authority；auto-detect 只能填入锁内复核后
-仍为空的 canonical 值。Message shard identity 同时绑定 source namespace、key fingerprint 与稳定的
-database-generation evidence（file identity 加 encrypted-page salt/header prefix）。因此同一 relative path
-上的 DB 被替换或 rekey 后会得到新 shard cursor，不会沿用旧 generation。只有 decrypted cache、没有
-对应 live source 时会明确报告 `source_cache_only`，不能生成 applicable backfill plan。
+仍为空的 canonical 值。Cursor shard identity 绑定 source namespace、key fingerprint 与 physical
+database-generation evidence（file identity 加 encrypted-page salt/header prefix），所以同一 relative path
+上的 DB 被替换或 rekey 后会得到新 generation。Durable `source_message_id` 则使用稳定的 source
+namespace 与 logical cache basename；经过明确 reconciliation 后，同一逻辑 row 不会仅因 DB/cache 重建
+而制造第二个 identity。Envelope 另带 physical generation，专门用于 cursor admission。只有 decrypted
+cache、没有对应 live source 时仍明确报告 `source_cache_only`，不能生成 applicable backfill plan。
+
+### Re-sign 与 scanner identity
+
+显式重签路径只接受一个 canonical WeChat bundle。该 bundle 正在运行时，PID、launch time、executable
+path/inode 与 version/build 会贯穿 privilege acquisition、正常退出、签名、独立 `codesign` 验证及
+exact-path reopen。它不按进程名退出，也不会在 mutation 后重新发现“默认微信”。多个运行副本必须用
+`--wechat-app=...` 显式选择；取消、identity 变化、退出超时、签名失败、hardened runtime 验证失败或
+reopen mismatch 都会停止。
+
+Read-only C scanner 只产生 candidate。Scanner build receipt 绑定 exact source digest/size、compiler
+path/binary digest、compiler/target identity、显式 `arm64|x86_64` target、flags 与产物 digest/size。
+Source、binary、receipt 先在 private immutable build directory 内完整落盘，再 fsync 并 atomic 发布一个
+current pointer。Receipt/pointer/binary 被改，或 source/compiler input 变化，都会要求重建；compile 或
+pointer publish 失败只保留旧 pointer，不把它冒充当前 input 的合格 build。
 
 ### Authoritative shard inventory
 
@@ -105,8 +121,12 @@ namespace 加 normalized relative path 构成；文件替换或 key rotation 只
 
 `core/monitor_source.py` 把 complete inventory 变成一批 bounded monitor work。Durable
 `source_cursors` 以 logical shard 为 key，绑定当前 generation ID 与 opaque
-`(create_time, rowid)` token。Legacy timestamp checkpoint 只在某 generation 没有 cursor 时用于
-一次 seed；replacement generation 绝不会继承旧 generation 的 token。
+`(create_time, rowid)` token 和 initial boundary。第一次 enable 会把当时存在的全部 shard 从 now
+绑定；完全没有 per-shard cursor 的 legacy state 可做一次 compatibility migration。一旦已有任一
+shard binding，replacement generation 或新 logical shard 会在 page read 前返回
+`source_generation_admission_required`。Content-free plan 绑定 exact inventory digest/revision、旧/新
+generation ID、prior cursor 与 bounded row limit；它只给后续显式 continuity proof 或 bounded
+replay/reconciliation 提供 exact input，不授权复制旧 cursor 或借用 global timestamp。
 
 Reader 为每个 present shard 保留 bounded page，再按 `create_time` 与稳定 `source_message_id`
 做 k-way merge，并在 configured raw-row budget 停止。可提交 token 只从最后一条真正消费的 row
@@ -123,9 +143,15 @@ checkpoint。Deadline 之前的 run 返回 `ai_backoff`，不会调用 provider�
 legacy failure metadata。
 
 Knowledge write 使用由 source IDs 派生的 `source_batch_id`：若 event 已 commit、state revision CAS
-却失败，retry 会 adopt 同一条 event，不再插入第二条 canonical event。通常 reuse 不写 projection；
-但 managed topic Markdown 确实缺失时，会从 canonical SQLite 重建该 note 与 date indexes，不改变
-event/topic identity，I/O 失败仍以明确的 `projection_warnings` 返回。
+却失败，下一轮会在 provider 之前检查 canonical SQLite，adopt 同一 event 并推进同一 source batch，
+既不插入第二条 event，也不再次让模型解释消息。若 canonical lookup 自己失败，cursor 保持不动。
+缺失的 managed topic Markdown 与 date indexes 从 canonical SQLite 重建。
+
+每条新 canonical event 还会在同一个 SQLite transaction 插入 `daily_digest_changes`。已有 affected
+Digest 从 canonical events 重建；inspection 时存在的每个 page 都 atomic republish 成功后，才 ACK
+exact journal prefix。Digest 写入使用同目录 private temp、file fsync、atomic replace 与 parent fsync，
+失败时保住 last-known-good。Event path 会立即 drain；60 秒 menu timer 即使当天 scheduled Digest
+尚未 due，也会 drain journal，所以进程重启后仍有独立 repair trigger。
 
 ### Catch-up receipt finalization
 

@@ -113,6 +113,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/taxonomy_migration.py` | `deferred-w0.2` | Direct `fcntl` and knowledge storage. |
 | `core/url_safety.py` | `windows-import-safe` | Stdlib-only canonical URL display/export/prompt redaction. |
 | `core/wechat_db.py` | `windows-import-safe` | Existing shared crypto/query import surface; schema/source adapters are W1.1+. |
+| `core/wechat_resign.py` | `macos-only` | Exact-target AppKit/codesign/sudo re-sign orchestration; Windows key-provider authorization belongs to W1+. |
 | `core/wechat_source_guard.py` | `macos-only` | `fcntl`, macOS key/process adapter, and osascript notification behavior. |
 | `ui/__init__.py` | `windows-import-safe` | Empty reusable UI package boundary; Windows tray is W6. |
 | `scripts/__init__.py` | `windows-import-safe` | Empty operator package boundary. |
@@ -129,6 +130,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `scripts/migrate_taxonomy.py` | `operator-deferred` | Depends on W0.2 config/knowledge storage. |
 | `scripts/organize_obsidian.py` | `operator-deferred` | Depends on W0.2 path/storage and W3 projection activation. |
 | `scripts/refresh_data_source.py` | `macos-only` | Invokes the current macOS key/process adapter. |
+| `scripts/resign_wechat.py` | `macos-only` | Explicit-consent thin CLI for the exact-target macOS re-sign operation. |
 | `scripts/repair_relation_markdown.py` | `operator-deferred` | Depends on knowledge/config storage. |
 | `scripts/repair_relations.py` | `operator-deferred` | Depends on configured private relation state. |
 | `scripts/resource_backup.py` | `macos-only` | Current LaunchAgent/source/backup operator surface; Windows backup is W5. |
