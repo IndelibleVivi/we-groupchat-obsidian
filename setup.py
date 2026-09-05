@@ -6,8 +6,6 @@ import subprocess
 import sys
 import sysconfig
 
-from setuptools import setup
-
 APP = ["app.py"]
 OPTIONS = {
     "argv_emulation": False,
@@ -104,6 +102,8 @@ def validated_alias_py2app_command():
 
 
 def main():
+    from setuptools import setup
+
     setup(
         app=APP,
         name="WeGroupchatObsidian",
