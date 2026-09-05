@@ -299,7 +299,8 @@ class WeChatResignTests(unittest.TestCase):
         self.assertNotIn('tell application "WeChat" to quit', launcher)
         self.assertIn("scripts/resign_wechat.py", launcher)
         self.assertNotIn('open "$app_path"', launcher)
-        self.assertIn('grep -qx "Signature=adhoc"', launcher)
+        self.assertIn("from core.wechat_signature import inspect_wechat_signature", launcher)
+        self.assertNotIn('grep -qx "Signature=adhoc"', launcher)
 
 
 if __name__ == "__main__":

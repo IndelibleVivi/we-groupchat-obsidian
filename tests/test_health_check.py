@@ -629,7 +629,7 @@ gui/501/com.example.wechat-summary = {
                          "last_error_code": "",
                      },
                  ), \
-                 patch("scripts.health_check.check_new_databases", return_value=[]), \
+                 patch("core.key_extractor.check_new_databases", side_effect=AssertionError("health must not scan source")), \
                  patch("scripts.health_check.EXTRACT_LOG", str(key_log)):
                 output = StringIO()
                 with redirect_stdout(output):

@@ -340,6 +340,8 @@ the AI provider again.
 - `功能说明.txt`: concise current capability index, not an operational contract.
 - `docs/source-reliability*.md`: detailed source guard, archive, mounted backup,
   Drive, backup, and rollout contract.
+- `docs/reliability-closure.md`: shared signature/outcome interpretation,
+  credential redaction, sticky receipt failures, and source acceptance limits.
 - `docs/recovery-acceptance.md`: recovery hardening, migration boundaries, and
   source/installed/live acceptance status.
 - `docs/resource-capture-and-mounted-backup-spec.md`: formal resource occurrence,
