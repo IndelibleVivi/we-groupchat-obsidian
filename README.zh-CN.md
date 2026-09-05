@@ -5,7 +5,8 @@
 当前状态：可完整运行的 source-distributed macOS app。它已经拥有菜单栏 app、可选的 legacy read-only MCP compatibility Server、
 operator CLI、持久化本地状态、recovery/backup workers 和完整 regression suite；请先读完
 数据流和账号安全边界，再在真实聊天数据上使用。当前不分发 bundled Python runtime
-或已签名 installer。
+或已签名 installer。当前 package metadata 对应 `v0.1.0-alpha.1` prerelease line；
+source checkout、本地 alias build、installed copy 与 live runtime 仍是彼此独立的验收状态。
 
 Windows 迁移当前处于 **W0.2B.1 路径身份阶段**。仓库已有原生 macOS/Windows
 共享锁与独占锁，并新增 concrete path provider，明确区分展示路径、操作路径、
@@ -285,8 +286,9 @@ Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 comm
 ### 文档地图
 
 - `README.md` / `README.zh-CN.md`：当前用户、operator、隐私和项目概览 authority。
-- `使用说明.txt`：随源码和本地 `.app` bundle 保留的离线快速入门，刻意比 README 短。
-- `功能说明.txt`：当前能力的简明索引，不替代操作 contract。
+- `docs/share-package-guide.zh-CN.md`：唯一 tracked offline-guide template；
+  exact-commit source-package builder 会把它生成为 `群友使用说明.md`，根目录不再保留
+  相互竞争的快速手册。
 - `docs/source-reliability*.md`：source guard、archive、mounted backup、Drive、
   filesystem snapshot 和 safe rollout 的详细 contract。
 - `docs/reliability-closure.md`：签名与运行结果的共同判断、凭据脱敏、回执失败保留及验收边界。

@@ -26,6 +26,17 @@ class SetupPy2AppTests(unittest.TestCase):
                 return {keyword.arg for keyword in node.keywords}
         return set()
 
+    def _setup_call_keyword_values(self):
+        tree = ast.parse(repo_path("setup.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "setup":
+                return {
+                    keyword.arg: ast.literal_eval(keyword.value)
+                    for keyword in node.keywords
+                    if keyword.arg and isinstance(keyword.value, ast.Constant)
+                }
+        return {}
+
     def test_py2app_plist_declares_stable_bundle_identity(self):
         options = self._setup_options()
 
@@ -39,6 +50,8 @@ class SetupPy2AppTests(unittest.TestCase):
         self.assertEqual(plist["CFBundleName"], "WeGroupchatObsidian")
         self.assertIn("CFBundleDisplayName", plist)
         self.assertEqual(plist["CFBundleDisplayName"], "微信总结")
+        self.assertEqual(plist["CFBundleShortVersionString"], "0.1.0")
+        self.assertEqual(plist["CFBundleVersion"], "1")
         self.assertIn("NSAppDataUsageDescription", plist)
         self.assertIn("显式开启文件解析", plist["NSAppDataUsageDescription"])
         self.assertIn("NSDocumentsFolderUsageDescription", plist)
@@ -56,6 +69,13 @@ class SetupPy2AppTests(unittest.TestCase):
 
     def test_py2app_packages_operator_cli_modules(self):
         self.assertIn("scripts", self._setup_options()["packages"])
+
+    def test_alpha_release_metadata_and_resources_are_canonical(self):
+        options = self._setup_options()
+
+        self.assertEqual(self._setup_call_keyword_values()["version"], "0.1.0a1")
+        self.assertEqual(options["resources"], ["c_src", "resources"])
+        self.assertNotIn("使用说明.txt", options["resources"])
 
     def test_setup_py_keeps_dependencies_in_requirements_file(self):
         keywords = self._setup_call_keywords()
