@@ -1318,7 +1318,7 @@ lead_key 用稳定短语描述这条资源线索，便于去重；没有 resourc
 
         try:
             from ai.factory import create_provider
-            if provider_config.get("ai_provider") == "custom":
+            if provider_config.get("ai_provider") in {"custom", "qwen"}:
                 provider_config["ai_timeout_seconds"] = provider_config.get(
                     "monitor_ai_timeout_seconds",
                     90,

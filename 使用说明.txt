@@ -35,6 +35,8 @@
 支持通义千问（新安装默认）、DeepSeek、Claude、OpenAI、Ollama 和自定义
 OpenAI-compatible endpoint。API Key 存在 macOS Keychain，不写入 repo。
 云端 provider 会收到你要求总结/判断的聊天文本；需要本地 AI 时使用 Ollama。
+通义千问可在 config 的 ai_base_url 使用对应地域的 Model Studio endpoint；
+monitor 请求默认限时 90 秒，并用 Qwen 原生 enable_thinking=false 直接输出结构化结果。
 
 macOS 可能在菜单 app 启动后询问一次 WeChat App Data 访问。source guard、
 monitor 与 mounted-resource timer 都由这只长驻 app 负责，不会靠每几分钟启动

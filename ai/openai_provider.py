@@ -11,6 +11,7 @@ class OpenAIProvider(AIProvider):
         base_url=None,
         thinking=None,
         timeout_seconds=45.0,
+        thinking_parameter="thinking",
     ):
         from openai import OpenAI
         # TopicMonitor already owns one bounded retry and persistent backoff.
@@ -26,6 +27,7 @@ class OpenAIProvider(AIProvider):
         self.client = OpenAI(**kwargs)
         self.model = model
         self.thinking = thinking
+        self.thinking_parameter = thinking_parameter
 
     def summarize(self, prompt: str) -> str:
         print(f"[ai] 调用 {self.model}, prompt 长度: {len(prompt)} 字符...")
@@ -37,9 +39,12 @@ class OpenAIProvider(AIProvider):
             }
             thinking = getattr(self, "thinking", None)
             if thinking is not None:
-                request["extra_body"] = {
-                    "thinking": {"type": "enabled" if thinking else "disabled"},
-                }
+                if getattr(self, "thinking_parameter", "thinking") == "enable_thinking":
+                    request["extra_body"] = {"enable_thinking": bool(thinking)}
+                else:
+                    request["extra_body"] = {
+                        "thinking": {"type": "enabled" if thinking else "disabled"},
+                    }
             response = self.client.chat.completions.create(**request)
             result = response.choices[0].message.content
             if not isinstance(result, str) or not result.strip():

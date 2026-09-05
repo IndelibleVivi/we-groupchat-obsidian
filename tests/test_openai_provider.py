@@ -86,6 +86,30 @@ class OpenAIProviderTests(unittest.TestCase):
             {"thinking": {"type": "disabled"}},
         )
 
+    def test_can_disable_qwen_thinking_with_enable_thinking_parameter(self):
+        captured = {}
+
+        class FakeCompletions:
+            @staticmethod
+            def create(**kwargs):
+                captured.update(kwargs)
+                message = types.SimpleNamespace(content='{"match": false}')
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=message)],
+                )
+
+        provider = OpenAIProvider.__new__(OpenAIProvider)
+        provider.client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=FakeCompletions()),
+        )
+        provider.model = "qwen-test"
+        provider.thinking = False
+        provider.thinking_parameter = "enable_thinking"
+
+        provider.summarize("test prompt")
+
+        self.assertEqual(captured["extra_body"], {"enable_thinking": False})
+
 
 if __name__ == "__main__":
     unittest.main()

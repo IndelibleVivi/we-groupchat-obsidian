@@ -20,7 +20,7 @@ class AIProviderFactoryTests(unittest.TestCase):
             thinking=None,
         )
 
-    def test_custom_provider_accepts_structured_monitor_options(self):
+    def test_custom_provider_accepts_timeout_without_guessing_thinking_schema(self):
         with (
             patch("ai.factory.load_key", return_value="test-api-key"),
             patch("ai.openai_provider.OpenAIProvider") as provider_class,
@@ -38,8 +38,30 @@ class AIProviderFactoryTests(unittest.TestCase):
             api_key="test-api-key",
             model="test-model",
             base_url="https://example.invalid/v1",
+            timeout_seconds=90,
+        )
+
+    def test_qwen_accepts_regional_endpoint_and_structured_monitor_options(self):
+        with (
+            patch("ai.factory.load_key", return_value="test-api-key"),
+            patch("ai.openai_provider.OpenAIProvider") as provider_class,
+        ):
+            provider = create_provider({
+                "ai_provider": "qwen",
+                "ai_model": "qwen-test",
+                "ai_base_url": "https://example.invalid/v1",
+                "ai_thinking": False,
+                "ai_timeout_seconds": 90,
+            })
+
+        self.assertIs(provider, provider_class.return_value)
+        provider_class.assert_called_once_with(
+            api_key="test-api-key",
+            model="qwen-test",
+            base_url="https://example.invalid/v1",
             thinking=False,
             timeout_seconds=90,
+            thinking_parameter="enable_thinking",
         )
 
 
