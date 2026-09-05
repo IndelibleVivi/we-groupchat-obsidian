@@ -120,6 +120,30 @@ class HealthCheckTests(unittest.TestCase):
             )
             self.assertEqual(latest_monitor_runtime_result(log), "notified")
 
+    def test_latest_monitor_runtime_result_does_not_skip_latest_unstructured_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "out.log"
+            log.write_text(
+                "[monitor] no_messages: earlier successful cycle\n"
+                "[monitor] Synthetic Chat: 检查失败: provider timeout\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(latest_monitor_runtime_result(log), "unknown")
+
+    def test_latest_monitor_runtime_result_reports_structured_runtime_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "out.log"
+            log.write_text(
+                "[monitor] no_messages: earlier successful cycle\n"
+                "[monitor] monitor_runtime_error: redacted failure\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                latest_monitor_runtime_result(log), "monitor_runtime_error"
+            )
+
     def test_source_inventory_health_is_read_only_and_counts_degradation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

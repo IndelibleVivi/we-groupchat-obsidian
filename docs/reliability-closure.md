@@ -25,6 +25,9 @@ predicate is not an atomic filesystem identity or process-termination proof.
 URL redaction now recognizes `token`, `secret`, and `jwt` word components in
 snake_case, kebab-case, camelCase, dotted and bracketed names, plus compact
 credential suffixes. Query duplicates and routed fragments use the same helper.
+The app-level monitor error handler applies that helper before writing its
+structured `monitor_runtime_error` line or sending a notification, and monitor
+tracebacks redact URLs before reaching the error log.
 Private canonical URL identity is unchanged. Arbitrary unknown parameter names,
 path-embedded credentials, and credentials outside URLs are not made safe by
 this finite name policy; do not advertise universal secret detection.
@@ -46,8 +49,10 @@ failure after rename has an ambiguous durability outcome: inspect the recorded
 receipt and command outcome before retrying; visible bytes alone are not proof
 that the failed publication completed durably. The receipt schema stays v1.
 
-Health preserves the newest bounded result code, including unfamiliar stop
-codes, without substituting an older success. Its direct
+Health treats the newest monitor event as authoritative. It preserves a bounded
+result code, including unfamiliar stop codes, and reports an unstructured event
+as `unknown` without substituting an older success. App-level failures use the
+bounded `monitor_runtime_error` code. Its direct
 `check_new_databases()` import/call is removed. Key coverage comes from the
 existing durable inventory; current page-one verification belongs to explicit
 refresh. Other health subsystems are unchanged by this patch.

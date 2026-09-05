@@ -214,11 +214,16 @@ def latest_monitor_runtime_result(
         return "unknown"
     for line in reversed(lines):
         text = line.strip()
+        if not text.startswith("[monitor]"):
+            continue
         if text.startswith("[monitor] 命中["):
             return "notified"
         match = re.match(r"^\[monitor\]\s+([a-z][a-z0-9_]*)(?::|$)", text)
         if match:
             return monitor_status(match.group(1))
+        # The newest monitor event is authoritative. An unstructured event is
+        # unknown, never permission to reuse an older healthy result.
+        return "unknown"
     return "unknown"
 
 

@@ -1,5 +1,7 @@
 import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from app import WeGroupchatObsidianApp
@@ -149,6 +151,59 @@ class AppMonitorResilienceTests(unittest.TestCase):
 
             app._handle_monitor_error("manual provider timeout", manual=True)
             notify.assert_called_once()
+
+    def test_monitor_error_redacts_compound_credentials_in_log_and_notification(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app.config = {"background_notifications_enabled": True}
+        app._monitor_last_error = ""
+        output = StringIO()
+
+        with redirect_stdout(output), patch("app._notify") as notify:
+            app._handle_monitor_error(
+                "检查失败: https://example.test/callback?shareToken=PRIVATE_SENTINEL",
+                manual=False,
+            )
+
+        self.assertNotIn("PRIVATE_SENTINEL", output.getvalue())
+        self.assertIn("monitor_runtime_error", output.getvalue())
+        notify.assert_called_once()
+        self.assertNotIn("PRIVATE_SENTINEL", str(notify.call_args))
+        self.assertIn("shareToken=REDACTED", str(notify.call_args))
+        self.assertNotIn("PRIVATE_SENTINEL", app._monitor_last_error)
+
+    def test_monitor_traceback_redacts_compound_credentials(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app._monitor_lock = threading.Lock()
+        app.config = {"background_notifications_enabled": False}
+        app._monitor_last_error = ""
+        app.db = RefreshingDB()
+        app._monitor_chats = lambda: [
+            {"username": "synthetic@chatroom", "name": "Synthetic"},
+        ]
+        app._handle_monitor_result = unittest.mock.Mock()
+
+        class FailingMonitor:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def check_once(self, dry_run=False):
+                raise RuntimeError(
+                    "https://example.test/callback?accessJWT2=PRIVATE_SENTINEL"
+                )
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("app.TopicMonitor", FailingMonitor),
+            patch("app._notify"),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            app._run_monitor_check(manual=False, dry_run=False)
+
+        rendered = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn("PRIVATE_SENTINEL", rendered)
+        self.assertIn("accessJWT2=REDACTED", rendered)
 
     def test_toggle_background_notifications_keeps_monitor_running(self):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
