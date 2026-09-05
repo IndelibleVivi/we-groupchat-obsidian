@@ -82,12 +82,14 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/google_drive_file_sync.py` | `deferred-w0.2` | Direct `fcntl` and attachment/config dependencies; Windows activation is later. |
 | `core/image_decoder.py` | `windows-import-safe` | Platform-neutral byte decoding. |
 | `core/key_extractor.py` | `macos-only` | macOS process scanner, codesign, sudo, and osascript source adapter. |
+| `core/wechat_signature.py` | `macos-only` | Shared read-only macOS codesign predicate; injectable runner only, no Windows signature or key support. |
 | `core/keychain.py` | `macos-only` | macOS `security` adapter; shared secret contract is defined for W0.3 wiring. |
 | `core/knowledge.py` | `deferred-w0.2` | Transitively imports ConfigStore/path/private storage; Windows activation is W3. |
 | `core/launch_agent.py` | `macos-only` | macOS LaunchAgent adapter; Windows autostart is W6. |
 | `core/link_preview.py` | `windows-import-safe` | Platform-neutral exact URL extraction plus inert zero-network compatibility receipts; remote preview is retired. |
 | `core/mcp_config.py` | `windows-import-safe` | Pure configuration rendering; Windows command emission is activated later. |
 | `core/monitor.py` | `deferred-w0.2` | Transitively imports config/knowledge/review storage; Windows activation is W3. |
+| `core/monitor_result.py` | `windows-import-safe` | Pure bounded outcome interpretation; unknown results block catch-up. No platform or product activation. |
 | `core/monitor_source.py` | `windows-import-safe` | Pure bounded source-cursor merge helper; platform storage remains owned by callers. |
 | `core/monitor_state.py` | `windows-import-safe` | W0.2A shared/exclusive locking and revision CAS are portable; Windows monitor activation remains W3. |
 | `core/notification_identity.py` | `macos-only` | Foundation/app-bundle notification identity diagnostics. |

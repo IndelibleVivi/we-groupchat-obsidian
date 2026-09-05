@@ -250,6 +250,21 @@ verification or deployment gates change.
   advance that exact batch; lookup failure preserves the checkpoint.
 - Catch-up prints the actual `rebuild_projections` notes/actions contract;
   tests must connect the real producer to apply/output/receipt.
+- `core/wechat_signature.py` owns the read-only strict/ad-hoc/no-runtime
+  predicate. Startup, Python runtime, and explicit re-sign verification share
+  it. `get_wechat_app_path()` honors the session-bound target first; an invalid
+  explicit binding never selects a different installation.
+- `core/monitor_result.py` owns catch-up outcome interpretation. Only the
+  existing post-commit progress codes may consume page budget; new/unknown
+  codes block. EOF must be the literal verified boolean. Health reports the
+  newest bounded code without falling back to old success. Preflight retains
+  source error reasons in the same reconciliation receipt schema.
+- A failed provisional receipt is sticky for the entire catch-up run, even
+  after a final receipt succeeds. Restore is still attempted; no retry may
+  erase missing recovery evidence or report the run complete.
+- Health must not call the protected-source key scanner. Keep native checks
+  and limits in `docs/reliability-closure.md`; source-window unit evidence is
+  not complete-repository or live macOS acceptance.
 - Source acceptance and remaining migration/live gates are described in
   `docs/recovery-acceptance.md`. Native Cocoa/C/macOS canary, installation,
   activation and deployment consent remain separate from source tests.

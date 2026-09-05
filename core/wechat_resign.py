@@ -205,38 +205,10 @@ def verify_resigned_wechat_bundle(
     *,
     runner=subprocess.run,
 ) -> WeChatBundleIdentity:
-    verify = runner(
-        [
-            "codesign", "--verify", "--deep", "--strict", "--verbose=2",
-            expected.app_path,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if verify.returncode:
-        raise WeChatResignError("wechat_signature_invalid")
-    display = runner(
-        ["codesign", "--display", "--verbose=4", expected.app_path],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if display.returncode:
-        raise WeChatResignError("wechat_signature_invalid")
-    detail = "\n".join((display.stdout or "", display.stderr or ""))
-    signature = next(
-        (line.strip() for line in detail.splitlines() if line.strip().startswith("Signature=")),
-        "",
-    )
-    flags = next(
-        (line.strip() for line in detail.splitlines() if re.search(r"\bflags=", line)),
-        "",
-    )
-    if signature != "Signature=adhoc":
-        raise WeChatResignError("wechat_signature_not_adhoc")
-    if not flags or re.search(r"\bruntime\b", flags, flags=re.IGNORECASE):
-        raise WeChatResignError("wechat_hardened_runtime_still_enabled")
+    from .wechat_signature import inspect_wechat_signature
+    status = inspect_wechat_signature(expected.app_path, runner=runner)
+    if not status.ok:
+        raise WeChatResignError(status.code)
     observed = inspect_wechat_bundle(expected.app_path)
     if not _same_post_sign_bundle(expected, observed):
         raise WeChatResignError("wechat_target_changed")

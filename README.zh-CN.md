@@ -289,6 +289,7 @@ Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 comm
 - `功能说明.txt`：当前能力的简明索引，不替代操作 contract。
 - `docs/source-reliability*.md`：source guard、archive、mounted backup、Drive、
   filesystem snapshot 和 safe rollout 的详细 contract。
+- `docs/reliability-closure.md`：签名与运行结果的共同判断、凭据脱敏、回执失败保留及验收边界。
 - `docs/recovery-acceptance.md`：恢复 hardening、migration boundary，以及
   source / installed / live 验收状态。
 - `docs/resource-capture-and-mounted-backup-spec.md`：resource occurrence、selection、

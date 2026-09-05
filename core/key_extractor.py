@@ -98,7 +98,14 @@ def is_wechat_running():
 
 
 def get_wechat_app_path():
-    """Get WeChat.app path, preferring system-installed location."""
+    """Resolve the session-bound app first; an invalid binding never falls back."""
+    variable = "WE_GROUPCHAT_OBSIDIAN_WECHAT_APP_PATH"
+    if variable in os.environ:
+        bound = os.environ[variable].strip()
+        if not bound or "\0" in bound:
+            return None
+        bound = os.path.realpath(os.path.expanduser(bound))
+        return bound if os.path.isdir(bound) else None
     if os.path.isdir(DEFAULT_WECHAT_APP):
         return DEFAULT_WECHAT_APP
     try:
@@ -348,23 +355,10 @@ def is_required_database(rel_path):
 
 
 def is_wechat_signed():
-    """Check if WeChat has been re-signed (hardened runtime removed)."""
+    """Apply the shared strict signature check to the session-bound target."""
+    from .wechat_signature import inspect_wechat_signature
     app_path = get_wechat_app_path()
-    if not app_path:
-        return False
-
-    try:
-        result2 = subprocess.run(
-            ["codesign", "-dvv", app_path],
-            capture_output=True, text=True,
-        )
-        if result2.returncode != 0:
-            return False
-        flags = result2.stderr
-        # Hardened runtime shows "runtime" in flags
-        return "runtime" not in flags.lower()
-    except Exception:
-        return False
+    return bool(app_path and inspect_wechat_signature(app_path).ok)
 
 
 _SCANNER_RECEIPT_SCHEMA = "we-groupchat-obsidian.scanner-build.v1"
@@ -721,10 +715,12 @@ def recover_keys():
         cached_keys = _read_keys_file(KEYS_FILE)
     except (OSError, KeyCacheError):
         return KeyRecoveryResult("failed", reason="key_cache_unreadable")
-    expected_app = str(
-        os.environ.get("WE_GROUPCHAT_OBSIDIAN_WECHAT_APP_PATH") or ""
-    ).strip()
-    target = select_wechat_scan_target(expected_app or None)
+    expected_app = None
+    if "WE_GROUPCHAT_OBSIDIAN_WECHAT_APP_PATH" in os.environ:
+        expected_app = get_wechat_app_path()
+        if expected_app is None:
+            return KeyRecoveryResult("failed", reason="target_identity_unavailable")
+    target = select_wechat_scan_target(expected_app)
     if target is None:
         return KeyRecoveryResult("failed", reason="target_identity_unavailable")
     pid = target.pid

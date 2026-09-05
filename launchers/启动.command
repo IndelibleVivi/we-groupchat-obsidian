@@ -20,8 +20,11 @@ BACKFILL_HISTORY=0
 ORGANIZE_OBSIDIAN=0
 HEALTH_CHECK=0
 REFRESH_DATA_SOURCE=0
-WECHAT_APP_PATH_ARG=""
+WECHAT_APP_PATH_ARG="${WE_GROUPCHAT_OBSIDIAN_WECHAT_APP_PATH-}"
 WECHAT_EXPLICIT_TARGET=0
+if [[ "${WE_GROUPCHAT_OBSIDIAN_WECHAT_APP_PATH+x}" == "x" ]]; then
+    WECHAT_EXPLICIT_TARGET=1
+fi
 INSTALL_AUTOSTART=0
 UNINSTALL_AUTOSTART=0
 AUTOSTART_MODE=0
@@ -67,6 +70,12 @@ for arg in "$@"; do
     esac
 done
 
+# Carry the same binding into health/refresh entrypoints too. An explicit empty
+# value is retained so the shared resolver rejects it instead of rediscovering.
+if [[ "$WECHAT_EXPLICIT_TARGET" -eq 1 ]]; then
+    export WE_GROUPCHAT_OBSIDIAN_WECHAT_APP_PATH="$WECHAT_APP_PATH_ARG"
+fi
+
 pause_and_exit() {
     local exit_code="$1"
     if [[ "${WE_GROUPCHAT_OBSIDIAN_NO_PAUSE:-${WECHAT_SUMMARY_NO_PAUSE:-0}}" == "1" || "$AUTOSTART_MODE" -eq 1 ]]; then
@@ -77,24 +86,14 @@ pause_and_exit() {
 }
 
 get_wechat_app_path() {
-    local app_path=""
-    if [[ -n "$WECHAT_APP_PATH_ARG" ]]; then
-        if [[ -d "$WECHAT_APP_PATH_ARG" ]]; then
-            (cd "$WECHAT_APP_PATH_ARG" && pwd -P)
-            return 0
-        fi
-        return 1
-    fi
-    app_path="$(osascript -e 'POSIX path of (path to application "WeChat")' 2>/dev/null | tr -d '\r')"
-    if [[ -n "$app_path" && -d "$app_path" ]]; then
-        printf '%s\n' "${app_path%/}"
-        return 0
-    fi
-    if [[ -d "/Applications/WeChat.app" ]]; then
-        printf '%s\n' "/Applications/WeChat.app"
-        return 0
-    fi
-    return 1
+    "$PYTHON_BIN" -c '
+from core.key_extractor import get_wechat_app_path
+import sys
+path = get_wechat_app_path()
+if not path:
+    sys.exit(1)
+print(path)
+'
 }
 
 ensure_xcode_cli() {
@@ -249,26 +248,11 @@ ensure_venv() {
 }
 
 is_wechat_signed() {
-    local app_path="$1"
-    local codesign_output=""
-
-    if ! codesign --verify --deep --strict "$app_path" &>/dev/null; then
-        return 1
-    fi
-
-    if ! codesign_output="$(codesign -dvv "$app_path" 2>&1)"; then
-        return 1
-    fi
-
-    if printf '%s\n' "$codesign_output" | grep -qi "runtime"; then
-        return 1
-    fi
-
-    if ! printf '%s\n' "$codesign_output" | grep -qx "Signature=adhoc"; then
-        return 1
-    fi
-
-    return 0
+    "$PYTHON_BIN" -c '
+from core.wechat_signature import inspect_wechat_signature
+import sys
+sys.exit(0 if inspect_wechat_signature(sys.argv[1]).ok else 1)
+' "$1"
 }
 
 ensure_wechat_signed() {

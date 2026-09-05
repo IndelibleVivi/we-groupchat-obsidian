@@ -22,7 +22,6 @@ from core.knowledge import TAXONOMY_PROFILES
 from core.link_preview import LINK_PREVIEW_STATE
 from core.key_extractor import (
     EXTRACT_LOG,
-    check_new_databases,
     get_cached_keys,
     is_wechat_running,
     is_wechat_signed,
@@ -54,23 +53,7 @@ from core.wechat_source_guard import source_guard_status
 AUTOSTART_ERR_LOG = Path(DATA_DIR) / "logs" / "autostart.err.log"
 AUTOSTART_OUT_LOG = Path(DATA_DIR) / "logs" / "autostart.out.log"
 
-_MONITOR_RUNTIME_STATES = frozenset({
-    "ai_backoff",
-    "cooldown",
-    "duplicate",
-    "initialized",
-    "missing_topic",
-    "monitor_source_cursors_corrupt",
-    "monitor_state_conflict",
-    "monitor_state_corrupt",
-    "monitor_state_missing_checkpoint",
-    "no_match",
-    "no_messages",
-    "notified",
-    "source_advanced_no_visible",
-    "source_generation_changed",
-    "source_inventory_incomplete",
-})
+# Outcome codes are normalized by core.monitor_result, not a second allowlist.
 
 
 def ok(value: bool) -> str:
@@ -221,7 +204,8 @@ def _sensitive_log_status(delete: bool = False) -> tuple[str, bool]:
 def latest_monitor_runtime_result(
     path: str | os.PathLike[str] = AUTOSTART_OUT_LOG,
 ) -> str:
-    """Return the last content-free monitor result code from the app log."""
+    """Return the latest code without falling back to an older healthy outcome."""
+    from core.monitor_result import monitor_status
     try:
         lines = Path(path).read_text(
             encoding="utf-8", errors="replace"
@@ -230,11 +214,16 @@ def latest_monitor_runtime_result(
         return "unknown"
     for line in reversed(lines):
         text = line.strip()
+        if not text.startswith("[monitor]"):
+            continue
         if text.startswith("[monitor] 命中["):
             return "notified"
         match = re.match(r"^\[monitor\]\s+([a-z][a-z0-9_]*)(?::|$)", text)
-        if match and match.group(1) in _MONITOR_RUNTIME_STATES:
-            return match.group(1)
+        if match:
+            return monitor_status(match.group(1))
+        # The newest monitor event is authoritative. An unstructured event is
+        # unknown, never permission to reuse an older healthy result.
+        return "unknown"
     return "unknown"
 
 
@@ -681,13 +670,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{ok(not key_log_warn)}] Sensitive key extraction log: {key_log_status}")
     print("")
 
-    if keys and db_dir and os.path.isdir(db_dir):
-        missing = check_new_databases(db_dir, keys)
-        if missing:
-            print(f"[WARN] New encrypted DBs missing keys: {len(missing)} 个")
-            print("      微信更新/新增数据库后，可能需要重新运行 ./启动.command 提取 key。")
-        else:
-            print("[OK] New encrypted DBs missing keys: 0 个")
+    print("Source key coverage: durable inventory only; no protected-source scan performed.")
     return 0
 
 

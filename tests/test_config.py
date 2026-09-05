@@ -9,6 +9,7 @@ from core.config import (
     ConfigConflictError,
     ConfigError,
     ConfigStore,
+    DATA_DIR,
     DEFAULT_CONFIG,
     _sanitize_config,
     active_monitor_chats,
@@ -211,11 +212,21 @@ class ConfigTests(unittest.TestCase):
             [{"username": "current@chatroom", "name": "Current Room"}],
         )
 
-    def test_default_runtime_paths_use_new_project_data_dir(self):
-        self.assertIn(".we-groupchat-obsidian", DEFAULT_CONFIG["keys_file"])
-        self.assertIn(".we-groupchat-obsidian", DEFAULT_CONFIG["decrypted_dir"])
-        self.assertIn(".we-groupchat-obsidian", DEFAULT_CONFIG["monitor_knowledge_db"])
-        self.assertIn(".we-groupchat-obsidian", DEFAULT_CONFIG["monitor_obsidian_root"])
+    def test_default_runtime_paths_follow_effective_project_data_dir(self):
+        self.assertEqual(
+            DEFAULT_CONFIG["keys_file"], os.path.join(DATA_DIR, "all_keys.json")
+        )
+        self.assertEqual(
+            DEFAULT_CONFIG["decrypted_dir"], os.path.join(DATA_DIR, "decrypted")
+        )
+        self.assertEqual(
+            DEFAULT_CONFIG["monitor_knowledge_db"],
+            os.path.join(DATA_DIR, "monitor_knowledge.db"),
+        )
+        self.assertEqual(
+            DEFAULT_CONFIG["monitor_obsidian_root"],
+            os.path.join(DATA_DIR, "obsidian_knowledge"),
+        )
 
     def test_legacy_default_paths_are_rebased_to_new_data_dir(self):
         with tempfile.TemporaryDirectory() as tmp:

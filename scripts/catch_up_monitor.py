@@ -200,6 +200,7 @@ def drain_monitors(
     max_minutes: int,
     monotonic=time.monotonic,
 ) -> dict:
+    from core.monitor_result import classify_monitor_result
     deadline = monotonic() + max_minutes * 60
     page_counts = Counter()
     statuses = Counter()
@@ -238,35 +239,21 @@ def drain_monitors(
             try:
                 result = monitor.check_once()
             except Exception as exc:
-                block(username, f"{type(exc).__name__}: {exc}")
+                block(username, type(exc).__name__)
                 continue
 
-            status = str(result.get("status") or "unknown")
+            outcome = classify_monitor_result(result)
+            status = outcome.code
             statuses[status] += 1
             chat_statuses = Counter(per_chat[username]["statuses"])
             chat_statuses[status] += 1
             per_chat[username]["statuses"] = dict(chat_statuses)
-            if status == "no_messages":
-                if result.get("source_eof") is True:
-                    complete.add(username)
-                    per_chat[username]["outcome"] = "complete"
-                else:
-                    block(username, "source_eof_unverified")
+            if outcome.action == "complete":
+                complete.add(username)
+                per_chat[username]["outcome"] = "complete"
                 continue
-            if status in {
-                "ai_backoff",
-                "initialized",
-                "missing_topic",
-                "monitor_state_conflict",
-                "monitor_source_cursors_corrupt",
-                "source_generation_changed",
-                "source_inventory_incomplete",
-                "source_inventory_invalid",
-                "source_inventory_unavailable",
-                "source_shard_unavailable",
-                "source_message_decode_failed",
-            }:
-                block(username, status)
+            if outcome.action == "blocked":
+                block(username, outcome.reason)
                 continue
 
             page_counts[username] += 1
@@ -564,13 +551,15 @@ def validate_knowledge_db(config: dict) -> dict:
 
 
 def _print_audit(rows: list[dict]) -> None:
+    from core.monitor_result import monitor_status
     print("补跑审计（只读）")
     total = 0
     unknown = False
     for row in rows:
         if row["count"] is None:
             unknown = True
-            value = "无法补跑：缺少 checkpoint"
+            reason = monitor_status(row.get("reason") or "missing_checkpoint")
+            value = f"无法补跑：{reason}"
         else:
             total += row["count"]
             value = f"{row['count']}{'+' if row['capped'] else ''} 条待处理"
@@ -614,13 +603,29 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
     _print_audit(audit)
     missing = [row["name"] for row in audit if row["count"] is None]
     if missing:
+        from core.monitor_result import monitor_status
+        blocked = {
+            row["username"]: monitor_status(row.get("reason") or "missing_checkpoint")
+            for row in audit if row["count"] is None
+        }
+        preflight_error = (
+            "missing_checkpoint"
+            if set(blocked.values()) == {"missing_checkpoint"}
+            else "source_preflight_blocked"
+        )
         receipt = build_reconciliation_receipt(
             run_id=run_id,
             started_at=started_at,
             chats=chats,
             audit=audit,
             checkpoints_after={chat["username"]: _checkpoint_for_chat(chat["username"]) for chat in chats},
-            result=None,
+            result={
+                "blocked": blocked,
+                "per_chat": {
+                    username: {"outcome": "blocked", "blocked_reason": reason}
+                    for username, reason in blocked.items()
+                },
+            },
             projections=None,
             validation=None,
             backup_path=None,
@@ -631,11 +636,11 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
                 "restored": None,
                 "error": "",
             },
-            transaction_error="missing_checkpoint",
-            outcome_override="missing_checkpoint",
+            transaction_error=preflight_error,
+            outcome_override=preflight_error,
         )
         receipt_path = write_reconciliation_receipt(receipt)
-        print("拒绝写入：这些群没有可恢复 checkpoint：" + "、".join(missing))
+        print("拒绝推进：" + ", ".join(sorted(set(blocked.values()))))
         print(f"reconciliation receipt: {receipt_path}")
         return 2
     if all(row["count"] == 0 for row in audit):
@@ -674,6 +679,7 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
     receipt_path = None
     receipt = None
     provisional_receipt = None
+    provisional_receipt_failed = False
     result = None
     projections = None
     validation = None
@@ -700,8 +706,12 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
             validation=validation,
             backup_path=backup_path,
             launch_agent=launch_agent,
-            transaction_error=transaction_error,
-            outcome_override=outcome_override,
+            transaction_error=transaction_error or (
+                "provisional_receipt_failed" if provisional_receipt_failed else ""
+            ),
+            outcome_override=outcome_override or (
+                "provisional_receipt_failed" if provisional_receipt_failed else ""
+            ),
         )
 
     try:
@@ -749,9 +759,11 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
         try:
             receipt_path = write_reconciliation_receipt(provisional_receipt)
         except Exception as exc:
-            receipt_error = f"{type(exc).__name__}: {exc}"
+            provisional_receipt_failed = True
+            receipt_error = f"provisional_receipt_failed:{type(exc).__name__}"
     except Exception as exc:
-        receipt_error = f"{type(exc).__name__}: {exc}"
+        provisional_receipt_failed = True
+        receipt_error = f"provisional_receipt_failed:{type(exc).__name__}"
     finally:
         try:
             if instance_lock is not None:
@@ -767,16 +779,21 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
                     launch_agent["restored"] = False
                     launch_agent["error"] = restore_error
 
-    if original_status and original_status.loaded:
+    if (original_status and original_status.loaded) or provisional_receipt_failed:
         try:
             final_receipt = current_receipt()
             final_path = write_reconciliation_receipt(final_receipt)
         except Exception as exc:
-            receipt_error = f"{type(exc).__name__}: {exc}"
+            receipt_error = receipt_error or f"final_receipt_failed:{type(exc).__name__}"
+            # Never print an in-memory complete result after publication failed.
+            if receipt is not None:
+                receipt = dict(receipt)
+                receipt["state"] = "partial" if result else "failed"
+                receipt["outcome"] = "receipt_publication_failed"
         else:
             receipt = final_receipt
             receipt_path = final_path
-            receipt_error = ""
+            # A later successful write cannot supply the missing locked receipt.
 
     if receipt is None:
         print("补跑结果不可用：reconciliation_receipt_failed")

@@ -87,6 +87,7 @@ from core.notification_target import (
     target_path_from_notification,
 )
 from core.keychain import save_key, load_key
+from core.url_safety import redact_urls_in_text
 from core.key_extractor import (
     is_wechat_running,
     is_wechat_signed,
@@ -1888,7 +1889,11 @@ class WeGroupchatObsidianApp(rumps.App):
                     self._handle_monitor_result(result, manual=manual, dry_run=dry_run)
                 except Exception as e:
                     had_error = True
-                    traceback.print_exc()
+                    print(
+                        redact_urls_in_text(traceback.format_exc()),
+                        file=sys.stderr,
+                        end="",
+                    )
                     self._handle_monitor_error(
                         f"{chat['name']}: 检查失败: {e}",
                         manual,
@@ -1898,7 +1903,11 @@ class WeGroupchatObsidianApp(rumps.App):
         except MonitorConfigError as e:
             self._handle_monitor_error(str(e), manual)
         except Exception as e:
-            traceback.print_exc()
+            print(
+                redact_urls_in_text(traceback.format_exc()),
+                file=sys.stderr,
+                end="",
+            )
             self._handle_monitor_error(f"检查失败: {e}", manual)
         finally:
             self._monitor_lock.release()
@@ -2030,11 +2039,12 @@ class WeGroupchatObsidianApp(rumps.App):
             print(f"[attachment-archive] consumer failed: {type(exc).__name__}")
 
     def _handle_monitor_error(self, message, manual=False):
-        print(f"[monitor] {message}")
+        safe_message = redact_urls_in_text(message)
+        print(f"[monitor] monitor_runtime_error: {safe_message}")
         notifications_enabled = self.config.get("background_notifications_enabled", True)
-        if manual or (notifications_enabled and message != self._monitor_last_error):
-            _notify("关注推送", "检查失败", message[:180])
-        self._monitor_last_error = message
+        if manual or (notifications_enabled and safe_message != self._monitor_last_error):
+            _notify("关注推送", "检查失败", safe_message[:180])
+        self._monitor_last_error = safe_message
 
     def _configure_daily_digest_timer(self):
         if self._daily_digest_timer:

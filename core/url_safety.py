@@ -93,6 +93,16 @@ def sensitive_url_key(value) -> bool:
         return False
     if compact in _SENSITIVE_COMPACT_KEYS:
         return True
+    # Preserve word boundaries before case folding: shareToken, JWTToken,
+    # download_token and my-secret are credential names too. Matching whole
+    # components avoids redacting ordinary words such as tokenization.
+    words = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", str(value or ""))
+    words = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", words)
+    components = set(re.findall(r"[a-z0-9]+", words.casefold()))
+    if any(re.fullmatch(r"(?:token|secret|jwt)[0-9]*", word) for word in components):
+        return True
+    if re.search(r"(?:token|secret|jwt)[0-9]*$", compact):
+        return True
     return any(
         marker in compact
         for marker in (
