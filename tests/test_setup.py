@@ -63,6 +63,16 @@ class SetupPy2AppTests(unittest.TestCase):
         self.assertNotIn("install_requires", keywords)
         self.assertNotIn("setup_requires", keywords)
 
+    def test_setup_py_imports_py2app_only_inside_command_factory(self):
+        tree = ast.parse(repo_path("setup.py").read_text(encoding="utf-8"))
+        top_level_imports = {
+            node.module
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom)
+        }
+
+        self.assertNotIn("py2app.build_app", top_level_imports)
+
 
 @unittest.skipUnless(sys.platform == "darwin", "py2app alias builds are macOS-only")
 class AliasAppBuildTests(unittest.TestCase):

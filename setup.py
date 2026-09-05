@@ -6,7 +6,6 @@ import subprocess
 import sys
 import sysconfig
 
-from py2app.build_app import py2app as py2app_command
 from setuptools import setup
 
 APP = ["app.py"]
@@ -44,17 +43,6 @@ OPTIONS = {
     ],
     "resources": ["c_src", "使用说明.txt"],
 }
-
-
-class ValidatedAliasPy2App(py2app_command):
-    """Repair Python 3.13 alias links before the final local signature check."""
-
-    def run(self):
-        super().run()
-        if not self.alias:
-            return
-
-        finalize_alias_bundle(Path(self.dist_dir) / "WeGroupchatObsidian.app")
 
 
 def finalize_alias_bundle(bundle, *, config_target=None, runner=subprocess.run):
@@ -98,12 +86,29 @@ def finalize_alias_bundle(bundle, *, config_target=None, runner=subprocess.run):
     runner(["codesign", "--verify", str(bundle)], check=True)
 
 
+def validated_alias_py2app_command():
+    """Load the optional build dependency only for an actual py2app command."""
+    from py2app.build_app import py2app as py2app_command
+
+    class ValidatedAliasPy2App(py2app_command):
+        """Repair alias links before the final local signature check."""
+
+        def run(self):
+            super().run()
+            if not self.alias:
+                return
+
+            finalize_alias_bundle(Path(self.dist_dir) / "WeGroupchatObsidian.app")
+
+    return ValidatedAliasPy2App
+
+
 def main():
     setup(
         app=APP,
         name="WeGroupchatObsidian",
         options={"py2app": OPTIONS},
-        cmdclass={"py2app": ValidatedAliasPy2App},
+        cmdclass={"py2app": validated_alias_py2app_command()},
     )
 
 
