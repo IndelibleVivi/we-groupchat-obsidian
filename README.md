@@ -268,6 +268,12 @@ quick-start file and omits internal handoff docs such as
 
 Supported AI providers: Qwen, DeepSeek, Claude, OpenAI, Ollama.
 
+The Qwen provider accepts `ai_base_url` for a regional Model Studio
+OpenAI-compatible endpoint. Structured monitor calls use
+`monitor_ai_timeout_seconds` (90 seconds by default) and send Qwen's native
+`enable_thinking=false`; custom OpenAI-compatible providers inherit the same
+monitor timeout without WGO guessing a provider-specific thinking schema.
+
 When DeepSeek is selected without an explicit `ai_model`, the current default
 is `deepseek-v4-flash`; a different compatible model can still be configured.
 
@@ -290,6 +296,12 @@ If WeChat was updated or key extraction needs a fresh authorization:
 ```bash
 ./启动.command --allow-wechat-resign
 ```
+
+WGO has verified protected binary cipher-context key recovery for macOS WeChat
+`4.1.11 (269136)` on arm64. Protected-key profiles are bound to an exact WeChat
+build, and every candidate must pass page-one HMAC verification against its
+encrypted database before entering the private key cache. An unknown future
+build fails closed and preserves the previously verified cache.
 
 ### Documentation map
 

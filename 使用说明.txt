@@ -35,6 +35,8 @@
 支持通义千问（新安装默认）、DeepSeek、Claude、OpenAI、Ollama 和自定义
 OpenAI-compatible endpoint。API Key 存在 macOS Keychain，不写入 repo。
 云端 provider 会收到你要求总结/判断的聊天文本；需要本地 AI 时使用 Ollama。
+通义千问可在 config 的 ai_base_url 使用对应地域的 Model Studio endpoint；
+monitor 请求默认限时 90 秒，并用 Qwen 原生 enable_thinking=false 直接输出结构化结果。
 
 macOS 可能在菜单 app 启动后询问一次 WeChat App Data 访问。source guard、
 monitor 与 mounted-resource timer 都由这只长驻 app 负责，不会靠每几分钟启动
@@ -79,6 +81,14 @@ monitor state JSON；corrupt/symlink state 会 fail closed，不会自动跳到 
 微信更新后先跑“健康检查”，只有它提示 DB key / re-sign / missing shard 问题时，
 再运行“刷新数据源”。普通健康检查默认 redacted；只有本机私下排查才考虑
 加 --sensitive。
+
+macOS WeChat 4.1.11 (269136, arm64) 已有精确 build profile：刷新程序只读扫描
+WeChat task memory 中受保护的 cipher context，按该 build 的 profile 解码候选 key，
+并用对应数据库第一页的 HMAC 逐一验证后才写入本机 private key cache。缓存按
+验证结果累计更新，不会因为一次 partial/empty scan 丢掉先前已验证的 key。
+未知的后续 WeChat build 会 fail closed 并保留旧缓存；不要手工复制猜测的 mask/key。
+如果本机 WeChat 需要 ad-hoc re-sign，只有显式允许的刷新流程才会执行，并且仅在
+它确实关闭了 WeChat 时重新打开 app。
 
 
 ============================================

@@ -69,6 +69,12 @@
   `link_export_mode=full` migrates to `redacted`; only `redacted|off` may be
   selected. Do not add a crawler or another local redaction implementation.
 - `ai/` owns provider adapters; `ui/` owns reusable UI components.
+- `core/key_extractor.py` owns WeChat build-profile selection, page-one key
+  verification and cumulative atomic key-cache publication;
+  `c_src/find_keys_macos.c` owns the read-only task-memory scan. Protected-key
+  masks are exact version/build/architecture profiles, never guesses. An empty,
+  partial or unsupported scan preserves the existing verified cache, and raw
+  candidates must not be persisted in logs.
 - `scripts/` contains thin operator entrypoints and compatibility cleanup
   commands. Put
   reusable behavior in the owning package rather than duplicating it in a CLI.

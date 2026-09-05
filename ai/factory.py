@@ -52,7 +52,13 @@ def create_provider(config):
         return OpenAIProvider(
             api_key=api_key,
             model=model or "qwen-turbo",
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            base_url=(
+                config.get("ai_base_url")
+                or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            ),
+            thinking=config.get("ai_thinking"),
+            timeout_seconds=config.get("ai_timeout_seconds", 45.0),
+            thinking_parameter="enable_thinking",
         )
 
     elif provider == "ollama":
@@ -72,6 +78,7 @@ def create_provider(config):
             api_key=api_key,
             model=model,
             base_url=config.get("ai_base_url", ""),
+            timeout_seconds=config.get("ai_timeout_seconds", 45.0),
         )
 
     else:

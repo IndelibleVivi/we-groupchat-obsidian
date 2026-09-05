@@ -1,18 +1,20 @@
 /*
  * find_all_keys_macos.c - macOS WeChat memory key scanner
  *
- * Scans WeChat process memory for SQLCipher encryption keys in the
- * x'<key_hex><salt_hex>' format used by WeChat 4.x on macOS.
+ * Scans WeChat process memory for SQLCipher encryption keys in both the
+ * legacy x'<key_hex><salt_hex>' / x'<key_hex>' forms and the protected
+ * binary cipher context used by WeChat 4.1.11.
  *
  * Prerequisites:
  *   - WeChat must be ad-hoc signed (or SIP disabled)
- *   - Must run as root (sudo)
+ *   - The target must permit task inspection; the Python wrapper retries with
+ *     sudo only when the ordinary scan is denied
  *
  * Build:
  *   cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
  *
  * Usage:
- *   sudo ./find_all_keys_macos [pid]
+ *   ./find_all_keys_macos [pid]
  *   If pid is omitted, automatically finds WeChat PID.
  *
  * Output: JSON file at ./all_keys.json (compatible with decrypt_db.py)
@@ -26,6 +28,7 @@
 #include <ftw.h>
 #include <limits.h>
 #include <pwd.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -33,8 +36,20 @@
 #define MAX_KEYS 256
 #define KEY_SIZE 32
 #define SALT_SIZE 16
-#define HEX_PATTERN_LEN 96  /* 64 hex (key) + 32 hex (salt) */
+#define KEY_HEX_LEN 64
+#define SALT_HEX_LEN 32
+#define COMBINED_HEX_LEN (KEY_HEX_LEN + SALT_HEX_LEN)
+#define MAX_PATTERN_BYTES (COMBINED_HEX_LEN + 3)
+#define CODEC_CTX_SIZE 136
+#define SCAN_OVERLAP CODEC_CTX_SIZE
 #define CHUNK_SIZE (2 * 1024 * 1024)
+
+/* Current WeChat builds keep SQLCipher pass/key buffers XOR-protected while
+ * idle. Python supplies the exact build-profile mask as the final argument;
+ * the scanner never guesses it. Page-one HMAC verification remains the
+ * authority for every decoded candidate. */
+static unsigned char g_memory_mask[KEY_SIZE];
+static int g_memory_mask_enabled = 0;
 
 typedef struct {
     char key_hex[65];
@@ -44,6 +59,105 @@ typedef struct {
 
 /* Forward declaration */
 static int read_db_salt(const char *path, char *salt_hex_out);
+
+static int read_remote(mach_port_t task, mach_vm_address_t address,
+                       void *buffer, mach_vm_size_t size) {
+    mach_vm_size_t read_size = 0;
+    kern_return_t kr = mach_vm_read_overwrite(
+        task, address, size, (mach_vm_address_t)buffer, &read_size);
+    return kr == KERN_SUCCESS && read_size == size ? 0 : -1;
+}
+
+static int read_i32(const unsigned char *buffer, size_t offset) {
+    int value;
+    memcpy(&value, buffer + offset, sizeof(value));
+    return value;
+}
+
+static uint64_t read_u64(const unsigned char *buffer, size_t offset) {
+    uint64_t value;
+    memcpy(&value, buffer + offset, sizeof(value));
+    return value;
+}
+
+static void bytes_to_hex(const unsigned char *bytes, size_t size, char *out) {
+    for (size_t i = 0; i < size; i++)
+        sprintf(out + i * 2, "%02x", bytes[i]);
+    out[size * 2] = '\0';
+}
+
+static int add_key(key_entry_t *keys, int *key_count,
+                   const unsigned char key[KEY_SIZE], const char *salt_hex) {
+    char key_hex[KEY_HEX_LEN + 1];
+    bytes_to_hex(key, KEY_SIZE, key_hex);
+    const char *salt = salt_hex ? salt_hex : "";
+
+    for (int i = 0; i < *key_count; i++) {
+        if (strcmp(keys[i].key_hex, key_hex) == 0 &&
+            strcmp(keys[i].salt_hex, salt) == 0)
+            return 0;
+    }
+    if (*key_count >= MAX_KEYS)
+        return -1;
+
+    key_entry_t *entry = &keys[*key_count];
+    strcpy(entry->key_hex, key_hex);
+    strcpy(entry->salt_hex, salt);
+    snprintf(entry->full_pragma, sizeof(entry->full_pragma),
+             "x'%s%s'", key_hex, salt);
+    (*key_count)++;
+    return 1;
+}
+
+static int looks_like_wechat_4_1_11_codec(const unsigned char *ctx) {
+    return read_i32(ctx, 4) == 256000 &&
+           read_i32(ctx, 8) == 2 &&
+           read_i32(ctx, 12) == 16 &&
+           read_i32(ctx, 16) == 32 &&
+           read_i32(ctx, 20) == 16 &&
+           read_i32(ctx, 24) == 16 &&
+           read_i32(ctx, 28) == 4096 &&
+           read_i32(ctx, 32) == 99 &&
+           read_i32(ctx, 36) == 80 &&
+           read_i32(ctx, 40) == 64 &&
+           read_i32(ctx, 44) == 0 &&
+           read_i32(ctx, 48) == 2 &&
+           read_i32(ctx, 52) == 2 &&
+           read_i32(ctx, 64) == 3;
+}
+
+static void collect_codec_keys(mach_port_t task, const unsigned char *ctx,
+                               key_entry_t *keys, int *key_count) {
+    unsigned char salt[SALT_SIZE];
+    char salt_hex[SALT_HEX_LEN + 1];
+    salt_hex[0] = '\0';
+    uint64_t salt_ptr = read_u64(ctx, 72);
+    if (salt_ptr && read_remote(task, salt_ptr, salt, sizeof(salt)) == 0)
+        bytes_to_hex(salt, sizeof(salt), salt_hex);
+
+    const size_t cipher_offsets[] = {104, 112};
+    for (size_t index = 0;
+         index < sizeof(cipher_offsets) / sizeof(cipher_offsets[0]); index++) {
+        uint64_t cipher_ptr = read_u64(ctx, cipher_offsets[index]);
+        unsigned char cipher_ctx[40];
+        if (!cipher_ptr ||
+            read_remote(task, cipher_ptr, cipher_ctx, sizeof(cipher_ctx)) != 0)
+            continue;
+        uint64_t key_ptr = read_u64(cipher_ctx, 8);
+        unsigned char stored_key[KEY_SIZE];
+        unsigned char decoded_key[KEY_SIZE];
+        if (!key_ptr ||
+            read_remote(task, key_ptr, stored_key, sizeof(stored_key)) != 0)
+            continue;
+        for (size_t i = 0; i < KEY_SIZE; i++)
+            decoded_key[i] = stored_key[i] ^ g_memory_mask[i];
+
+        /* Usually decoded_key is the useful candidate. Keep stored_key too:
+         * a concurrent codec operation may have temporarily unmasked it. */
+        add_key(keys, key_count, decoded_key, salt_hex);
+        add_key(keys, key_count, stored_key, salt_hex);
+    }
+}
 
 /* nftw callback state for collecting DB files */
 #define MAX_DBS 256
@@ -92,6 +206,21 @@ static int nftw_collect_db(const char *fpath, const struct stat *sb,
 
 static int is_hex_char(unsigned char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static int parse_memory_mask(const char *hex) {
+    if (!hex || strlen(hex) != KEY_HEX_LEN)
+        return -1;
+    for (int i = 0; i < KEY_SIZE; i++) {
+        unsigned int value;
+        if (!is_hex_char((unsigned char)hex[i * 2]) ||
+            !is_hex_char((unsigned char)hex[i * 2 + 1]) ||
+            sscanf(hex + i * 2, "%2x", &value) != 1)
+            return -1;
+        g_memory_mask[i] = (unsigned char)value;
+    }
+    g_memory_mask_enabled = 1;
+    return 0;
 }
 
 static pid_t run_pgrep_first(const char *cmd) {
@@ -151,6 +280,11 @@ int main(int argc, char *argv[]) {
         override_home = argv[2];
     if (argc >= 4 && argv[3][0] != '\0')
         override_db_root = argv[3];
+    if (argc >= 5 && argv[4][0] != '\0' &&
+        parse_memory_mask(argv[4]) != 0) {
+        fprintf(stderr, "Invalid protected-key memory mask\n");
+        return 1;
+    }
 
     if (pid <= 0) {
         fprintf(stderr, "WeChat not running or invalid PID\n");
@@ -263,22 +397,45 @@ int main(int argc, char *argv[]) {
                     unsigned char *buf = (unsigned char *)data;
                     total_scanned += dc;
 
-                    for (size_t i = 0; i + HEX_PATTERN_LEN + 3 < dc; i++) {
+                    for (size_t i = 0; i + KEY_HEX_LEN + 3 <= dc; i++) {
                         if (buf[i] == 'x' && buf[i + 1] == '\'') {
-                            /* Check if followed by 96 hex chars and closing ' */
-                            int valid = 1;
-                            for (int j = 0; j < HEX_PATTERN_LEN; j++) {
-                                if (!is_hex_char(buf[i + 2 + j])) { valid = 0; break; }
+                            int hex_len = 0;
+                            if (i + COMBINED_HEX_LEN + 3 <= dc) {
+                                int combined_valid = 1;
+                                for (int j = 0; j < COMBINED_HEX_LEN; j++) {
+                                    if (!is_hex_char(buf[i + 2 + j])) {
+                                        combined_valid = 0;
+                                        break;
+                                    }
+                                }
+                                if (combined_valid &&
+                                    buf[i + 2 + COMBINED_HEX_LEN] == '\'') {
+                                    hex_len = COMBINED_HEX_LEN;
+                                }
                             }
-                            if (!valid) continue;
-                            if (buf[i + 2 + HEX_PATTERN_LEN] != '\'') continue;
+                            if (hex_len == 0) {
+                                int key_valid = 1;
+                                for (int j = 0; j < KEY_HEX_LEN; j++) {
+                                    if (!is_hex_char(buf[i + 2 + j])) {
+                                        key_valid = 0;
+                                        break;
+                                    }
+                                }
+                                if (key_valid && buf[i + 2 + KEY_HEX_LEN] == '\'') {
+                                    hex_len = KEY_HEX_LEN;
+                                }
+                            }
+                            if (hex_len == 0) continue;
 
-                            /* Extract key and salt hex */
                             char key_hex[65], salt_hex[33];
-                            memcpy(key_hex, buf + i + 2, 64);
-                            key_hex[64] = '\0';
-                            memcpy(salt_hex, buf + i + 2 + 64, 32);
-                            salt_hex[32] = '\0';
+                            memcpy(key_hex, buf + i + 2, KEY_HEX_LEN);
+                            key_hex[KEY_HEX_LEN] = '\0';
+                            salt_hex[0] = '\0';
+                            if (hex_len == COMBINED_HEX_LEN) {
+                                memcpy(salt_hex, buf + i + 2 + KEY_HEX_LEN,
+                                       SALT_HEX_LEN);
+                                salt_hex[SALT_HEX_LEN] = '\0';
+                            }
 
                             /* Convert to lowercase for comparison */
                             for (int j = 0; key_hex[j]; j++)
@@ -301,18 +458,29 @@ int main(int argc, char *argv[]) {
                             if (key_count < MAX_KEYS) {
                                 strcpy(keys[key_count].key_hex, key_hex);
                                 strcpy(keys[key_count].salt_hex, salt_hex);
-                                snprintf(keys[key_count].full_pragma, sizeof(keys[key_count].full_pragma),
+                                snprintf(keys[key_count].full_pragma,
+                                    sizeof(keys[key_count].full_pragma),
                                     "x'%s%s'", key_hex, salt_hex);
                                 key_count++;
                             }
                         }
                     }
+
+                    /* Supported current builds protect the persistent binary
+                     * key while idle. Decode only when Python supplied an
+                     * exact build-profile mask. */
+                    if (g_memory_mask_enabled) {
+                        for (size_t i = 0; i + CODEC_CTX_SIZE <= dc; i++) {
+                            if (looks_like_wechat_4_1_11_codec(buf + i))
+                                collect_codec_keys(
+                                    task, buf + i, keys, &key_count);
+                        }
+                    }
                     mach_vm_deallocate(mach_task_self(), data, dc);
                 }
-                /* Advance with overlap to catch patterns spanning chunk boundaries.
-                 * Pattern is x'<96 hex chars>' = 99 bytes total. */
-                if (cs > HEX_PATTERN_LEN + 3)
-                    ca += cs - (HEX_PATTERN_LEN + 3);
+                /* Advance with overlap for the longest supported literal. */
+                if (cs > SCAN_OVERLAP)
+                    ca += cs - SCAN_OVERLAP;
                 else
                     ca += cs;
             }
@@ -323,27 +491,19 @@ int main(int argc, char *argv[]) {
     printf("\nScan complete: %zuMB scanned, %d regions, %d unique keys\n",
            total_scanned / 1024 / 1024, region_count, key_count);
 
-    /* Match keys to DBs */
-    printf("\n%-25s %-66s %s\n", "Database", "Key", "Salt");
-    printf("%-25s %-66s %s\n",
-        "-------------------------",
-        "------------------------------------------------------------------",
-        "--------------------------------");
-
     int matched = 0;
     for (int i = 0; i < key_count; i++) {
-        const char *db = NULL;
         for (int j = 0; j < g_db_count; j++) {
             if (strcmp(keys[i].salt_hex, g_db_salts[j]) == 0) {
-                db = g_db_names[j];
                 matched++;
                 break;
             }
         }
-        printf("%-25s %-66s %s\n",
-            db ? db : "(unknown)",
+        /* Machine-readable lines are captured in-memory by the Python owner;
+         * WGO never persists this raw stream as a log. */
+        printf("WGO_KEY %s %s\n",
             keys[i].key_hex,
-            keys[i].salt_hex);
+            keys[i].salt_hex[0] ? keys[i].salt_hex : "-");
     }
     printf("\nMatched %d/%d keys to known DBs\n", matched, key_count);
 

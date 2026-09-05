@@ -28,6 +28,21 @@ def _config_patch_worker(path, field, value, start_event, iterations=1):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_monitor_ai_timeout_defaults_and_is_sanitized(self):
+        self.assertEqual(DEFAULT_CONFIG["monitor_ai_timeout_seconds"], 90)
+        self.assertEqual(
+            _sanitize_config({"monitor_ai_timeout_seconds": 120})[
+                "monitor_ai_timeout_seconds"
+            ],
+            120,
+        )
+        self.assertEqual(
+            _sanitize_config({"monitor_ai_timeout_seconds": 0})[
+                "monitor_ai_timeout_seconds"
+            ],
+            90,
+        )
+
     def test_auto_detect_install_does_not_overwrite_concurrent_explicit_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.json")

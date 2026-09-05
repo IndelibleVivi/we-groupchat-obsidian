@@ -227,6 +227,12 @@ internal continuity docs。
 - OpenAI
 - Ollama 本地模型
 
+通义千问 provider 可通过 `ai_base_url` 指向 Model Studio 对应地域的
+OpenAI-compatible endpoint。结构化 monitor 调用使用
+`monitor_ai_timeout_seconds`（默认 90 秒），并发送 Qwen 原生的
+`enable_thinking=false`；自定义 OpenAI-compatible provider 继承同一 monitor
+timeout，但 WGO 不猜测第三方的 thinking schema。
+
 选择 DeepSeek 且没有显式填写 `ai_model` 时，当前默认使用
 `deepseek-v4-flash`；仍可在配置中指定其他兼容 model。
 
@@ -247,6 +253,11 @@ cd we-groupchat-obsidian
 ```
 
 这一步可能会退出微信，并要求输入 Mac 登录密码。输入密码时终端不显示字符是正常的。
+
+WGO 已验证 macOS 微信 `4.1.11 (269136)` arm64 的 protected binary
+cipher-context key 读取。Protected-key profile 与精确微信 build 绑定，每个
+candidate 都必须通过相应 encrypted DB 的 page-one HMAC 验证才会写入私有
+key cache；未识别的后续 build 会 fail closed 并保留已验证 cache。
 
 ### 文档地图
 

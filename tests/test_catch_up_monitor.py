@@ -322,7 +322,17 @@ class CatchUpMonitorTests(unittest.TestCase):
             "statuses": {"notified": 1},
             "affected_dates": ["2026-08-02", "2026-08-03"],
         }
-        projection_result = {"indexes": {"written_count": 2}, "digests": []}
+        projection_result = {
+            "indexes": {"written_count": 2},
+            "digests": [{
+                "date": "2026-08-02",
+                "events": 3,
+                "touched_topics": 2,
+                "new_topics": 1,
+                "actions": 4,
+                "path": "/tmp/digest.md",
+            }],
+        }
         validation = {"ok": True, "quick_check": "ok", "integrity_check": "ok"}
 
         with (

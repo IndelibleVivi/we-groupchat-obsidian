@@ -20,6 +20,7 @@ BACKFILL_HISTORY=0
 ORGANIZE_OBSIDIAN=0
 HEALTH_CHECK=0
 REFRESH_DATA_SOURCE=0
+WECHAT_RESIGNED=0
 INSTALL_AUTOSTART=0
 UNINSTALL_AUTOSTART=0
 AUTOSTART_MODE=0
@@ -298,6 +299,7 @@ ensure_wechat_signed() {
 
     if sudo codesign --force --deep --sign - "$app_path"; then
         echo "  ✓ 微信已重签名"
+        WECHAT_RESIGNED=1
         return 0
     fi
 
@@ -379,55 +381,19 @@ if [[ "$ORGANIZE_OBSIDIAN" -eq 1 ]]; then
 fi
 
 if [[ "$REFRESH_DATA_SOURCE" -eq 1 ]]; then
+    if [[ "$WECHAT_RESIGNED" -eq 1 ]]; then
+        app_path="$(get_wechat_app_path)"
+        echo "正在重新打开微信以加载数据库..."
+        open "$app_path"
+        for _ in {1..30}; do
+            if pgrep -x "WeChat" &>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+    fi
     exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/refresh_data_source.py"
 fi
-
-# ── 修复密钥：C 扫描器以 root 运行无法读取 sandbox 文件，
-#    用 Python（用户权限）重新匹配 ──
-"$PYTHON_BIN" -c "
-import os, json, sys
-DATA = os.environ.get('WE_GROUPCHAT_OBSIDIAN_DATA_DIR') or os.path.expanduser('~/.we-groupchat-obsidian')
-log_f  = os.path.join(DATA, 'extract_keys.log')
-keys_f = os.path.join(DATA, 'all_keys.json')
-cfg_f  = os.path.join(DATA, 'config.json')
-if not os.path.exists(log_f) or not os.path.exists(cfg_f):
-    sys.exit()
-# 检查 all_keys.json 是否已有内容
-try:
-    ks = {k:v for k,v in json.load(open(keys_f)).items() if not k.startswith('_')}
-    if ks: sys.exit()
-except: pass
-# 从日志解析 key+salt
-raw = []
-for line in open(log_f):
-    p = line.split()
-    if len(p)>=3 and len(p[-2])==64 and len(p[-1])==32:
-        try: bytes.fromhex(p[-2]); bytes.fromhex(p[-1]); raw.append((p[-2].lower(),p[-1].lower()))
-        except: pass
-if not raw: sys.exit()
-# 匹配 DB 文件头 salt
-s2k = {s:k for k,s in raw}
-db_dir = json.load(open(cfg_f)).get('db_dir','')
-if not db_dir or not os.path.isdir(db_dir): sys.exit()
-matched = {}
-for root,_,files in os.walk(db_dir):
-    for fn in files:
-        if not fn.endswith('.db'): continue
-        fp = os.path.join(root, fn)
-        try:
-            h = open(fp,'rb').read(16)
-            if len(h)<16 or h[:15]==b'SQLite format 3': continue
-            salt = h.hex().lower()
-            if salt in s2k: matched[os.path.relpath(fp,db_dir)] = {'enc_key': s2k[salt]}
-        except: pass
-if matched:
-    try: os.remove(keys_f)
-    except: pass
-    with open(keys_f,'w') as f: json.dump(matched,f,indent=2)
-    try: os.chmod(keys_f, 0o600)
-    except: pass
-    print(f'[fix] 自动修复了 {len(matched)} 个数据库密钥')
-" 2>/dev/null || true
 
 echo "正在启动微信总结..."
 echo "菜单栏会出现 💬 图标"
