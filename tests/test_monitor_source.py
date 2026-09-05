@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from core.knowledge import KnowledgeStore
 from core.monitor import TopicMonitor, load_state, save_state
@@ -352,6 +353,7 @@ class MonitorSourceCursorTests(unittest.TestCase):
             {
                 "generation_id": "generation-a",
                 "cursor_token": "[1000,0]",
+                "start_cursor": "[1000,0]",
             },
         )
 
@@ -457,7 +459,12 @@ class MonitorSourceCursorTests(unittest.TestCase):
             "topic_key": "source-cursor-retry",
             "category": "工具更新",
         }
-        monitor = self.monitor(db, lambda *_: decision, knowledge_store=knowledge)
+        provider_calls = []
+        monitor = self.monitor(
+            db,
+            lambda *_: provider_calls.append(True) or decision,
+            knowledge_store=knowledge,
+        )
 
         first = monitor.check_once()
         second = monitor.check_once()
@@ -465,6 +472,7 @@ class MonitorSourceCursorTests(unittest.TestCase):
         self.assertEqual(first["status"], "monitor_state_conflict")
         self.assertEqual(second["status"], "duplicate")
         self.assertTrue(second["knowledge_event_reused"])
+        self.assertEqual(provider_calls, [True])
         conn = knowledge.connect()
         try:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
@@ -474,6 +482,35 @@ class MonitorSourceCursorTests(unittest.TestCase):
             load_state(self.state_file)["source_cursors"]["logical-a"]["cursor_token"],
             "[11,1]",
         )
+
+    def test_committed_batch_lookup_failure_preserves_cursor_without_provider(self):
+        self.config.update({
+            "monitor_knowledge_enabled": True,
+            "monitor_knowledge_db": os.path.join(self.tmp.name, "knowledge.db"),
+            "monitor_obsidian_root": os.path.join(self.tmp.name, "obsidian"),
+        })
+        save_state({"last_checked_ts": 10}, self.state_file)
+        original = Path(self.state_file).read_bytes()
+        db = CursorDB({
+            "logical-a": (
+                "generation-a",
+                [raw_message("generation-a", 1, 11, "值得记录的新内容")],
+            ),
+        })
+        store = mock.Mock()
+        store.recover_source_batch.side_effect = OSError("fixture lookup failure")
+        provider_calls = []
+
+        result = self.monitor(
+            db,
+            lambda *_: provider_calls.append(True),
+            knowledge_store=store,
+        ).check_once()
+
+        self.assertEqual(result["status"], "knowledge_recovery_unavailable")
+        self.assertEqual(result["error_code"], "OSError")
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(Path(self.state_file).read_bytes(), original)
 
     def test_new_generation_never_inherits_old_generation_cursor(self):
         save_state({
@@ -492,16 +529,59 @@ class MonitorSourceCursorTests(unittest.TestCase):
             ),
         })
 
+        original = Path(self.state_file).read_bytes()
+        provider_calls = []
         result = self.monitor(
             db,
-            lambda *_: {"match": False, "score": 20},
+            lambda *_: provider_calls.append(True) or {"match": False, "score": 20},
         ).check_once()
 
-        self.assertEqual(result["status"], "no_match")
-        self.assertEqual(db.page_calls[0]["cursor_token"], "[10,0]")
+        self.assertEqual(result["status"], "source_generation_admission_required")
+        self.assertEqual(db.page_calls, [])
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(Path(self.state_file).read_bytes(), original)
+        plan = result["generation_admission_plan"]
+        self.assertEqual(plan["inventory_digest"], db.get_source_inventory()["inventory_digest"])
+        self.assertEqual(plan["max_reconciliation_rows"], 2)
+        self.assertEqual(plan["changes"], [{
+            "logical_shard_id": "logical-a",
+            "previous_generation_id": "generation-old",
+            "current_generation_id": "generation-new",
+            "previous_cursor_token": "[99,999]",
+            "reason": "generation_replaced",
+        }])
+        self.assertRegex(plan["plan_id"], r"^wgadmit_[0-9a-f]{64}$")
+
+    def test_new_logical_shard_requires_admission_before_any_page_read(self):
+        save_state({
+            "last_checked_ts": 10,
+            "source_cursors": {
+                "logical-a": {
+                    "generation_id": "generation-a",
+                    "cursor_token": "[10,0]",
+                },
+            },
+        }, self.state_file)
+        original = Path(self.state_file).read_bytes()
+        db = CursorDB({
+            "logical-a": ("generation-a", []),
+            "logical-b": (
+                "generation-b",
+                [raw_message("generation-b", 1, 1, "late-discovered older row")],
+            ),
+        })
+
+        result = self.monitor(
+            db,
+            lambda *_: self.fail("provider must not run before admission"),
+        ).check_once()
+
+        self.assertEqual(result["status"], "source_generation_admission_required")
+        self.assertEqual(db.page_calls, [])
+        self.assertEqual(Path(self.state_file).read_bytes(), original)
         self.assertEqual(
-            load_state(self.state_file)["source_cursors"]["logical-a"],
-            {"generation_id": "generation-new", "cursor_token": "[11,1]"},
+            result["generation_admission_plan"]["changes"][0]["reason"],
+            "new_logical_shard",
         )
 
     def test_generation_change_during_ai_aborts_before_cursor_commit(self):

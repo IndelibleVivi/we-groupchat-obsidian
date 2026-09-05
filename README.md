@@ -211,7 +211,7 @@ independently deployed microservices. Editable sources:
   bodies/XML, `source_message_id`, `wxid`, and WeChat cache paths are not Drive
   metadata. The project does not delete Drive files, WeChat cache, or local CAS
   objects.
-- Extracting database keys may require ad-hoc re-signing `WeChat.app`. The regular double-click flow does not silently do this; commands that perform it are explicit.
+- Extracting database keys may require ad-hoc re-signing `WeChat.app`. The regular double-click flow does not silently do this; commands that perform it are explicit. Re-signing binds one canonical bundle path and, when running, its exact PID/launch/executable identity through privilege acquisition, graceful termination, signing, independent verification, and exact-path reopen. Ambiguity or identity change stops the operation.
 - macOS may ask once per menu-app process for access to WeChat App Data. The
   project does not schedule short-lived source/resource workers that would make
   that process-lifetime consent recur; attachment-byte resolution is a separate
@@ -297,11 +297,39 @@ If WeChat was updated or key extraction needs a fresh authorization:
 ./启动.command --allow-wechat-resign
 ```
 
+If more than one WeChat installation exists, bind the intended bundle instead
+of relying on LaunchServices discovery:
+
+```bash
+./启动.command --allow-wechat-resign --wechat-app=/Applications/WeChat.app
+```
+
 WGO has verified protected binary cipher-context key recovery for macOS WeChat
 `4.1.11 (269136)` on arm64. Protected-key profiles are bound to an exact WeChat
 build, and every candidate must pass page-one HMAC verification against its
 encrypted database before entering the private key cache. An unknown future
 build fails closed and preserves the previously verified cache.
+
+The scanner executable is admitted only from an immutable build directory
+whose receipt binds the C source digest, compiler binary/version/target,
+explicit target architecture, flags, and produced binary digest. A single
+atomic `scanner-current.json` pointer selects the complete build; an old fixed
+binary or a partially published build is never executed.
+
+First monitor enablement still starts from now. After per-shard cursors exist,
+a replacement generation or newly discovered logical shard is blocked before
+any page read or AI call with `source_generation_admission_required`. The
+returned content-free plan binds the exact inventory and old/new generations;
+ordinary monitoring never borrows a global timestamp to skip older unseen
+rows. An explicit continuity proof or bounded replay/reconciliation remains an
+operator migration step.
+
+Daily Digest Markdown uses durable atomic publication. Canonical event commits
+also enqueue a SQLite invalidation in the same transaction; the menu timer and
+event path rebuild existing affected Digests before acknowledging that journal.
+If an event committed before its monitor cursor, retry adopts the stable
+`source_batch_id`, repairs projections, and advances the batch without calling
+the AI provider again.
 
 ### Documentation map
 
@@ -312,6 +340,8 @@ build fails closed and preserves the previously verified cache.
 - `功能说明.txt`: concise current capability index, not an operational contract.
 - `docs/source-reliability*.md`: detailed source guard, archive, mounted backup,
   Drive, backup, and rollout contract.
+- `docs/recovery-acceptance.md`: recovery hardening, migration boundaries, and
+  source/installed/live acceptance status.
 - `docs/resource-capture-and-mounted-backup-spec.md`: formal resource occurrence,
   selection, projection, handoff, status, and failure semantics.
 

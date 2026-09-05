@@ -704,6 +704,79 @@ class WeChatSourceEnvelopeTests(unittest.TestCase):
         self.assertNotEqual(identities[0], other["source_message_id"])
 
 
+class WeChatStableSourceMessageIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.old_cache_dir = WeChatDB.CACHE_DIR
+        self.addCleanup(setattr, WeChatDB, "CACHE_DIR", self.old_cache_dir)
+        WeChatDB.CACHE_DIR = os.path.join(self.tmp.name, "cache")
+        self.root = os.path.join(self.tmp.name, "source")
+        self.rel_key = "message/message_0.db"
+        self.source_path = os.path.join(self.root, self.rel_key)
+        self.username = "stable-room@chatroom"
+        self.table = f"Msg_{hashlib.md5(self.username.encode()).hexdigest()}"
+
+    def _write_source(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(f"""
+                CREATE TABLE [{self.table}] (
+                    local_id INTEGER, server_id INTEGER, sort_seq INTEGER,
+                    local_type INTEGER, create_time INTEGER,
+                    message_content TEXT, WCDB_CT_message_content INTEGER,
+                    status INTEGER, packed_info_data BLOB
+                )
+            """)
+            conn.execute(
+                f"INSERT INTO [{self.table}] VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (7, 7007, 70, 1, 100, "sender:\nstable row", None, 0, None),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _prepare(db):
+        db._contacts = {"sender": "成员"}
+        db._contacts_full = []
+        db._nick_to_remark = {}
+        db._load_contacts = lambda: None
+        return db
+
+    def test_physical_generation_changes_but_message_identity_stays_logical(self):
+        self._write_source(self.source_path)
+        db = self._prepare(WeChatDB(self.root, keys={}))
+        first_generation = db.get_message_shards(self.username)[0]
+        first = db.get_cursor_page_for_shard(
+            self.username, first_generation, limit=1,
+        )["messages"][0]
+
+        replacement = os.path.join(self.root, "replacement.db")
+        self._write_source(replacement)
+        os.replace(replacement, self.source_path)
+        second_generation = db.get_message_shards(self.username)[0]
+        second = db.get_cursor_page_for_shard(
+            self.username, second_generation, limit=1,
+        )["messages"][0]
+
+        self.assertNotEqual(first_generation, second_generation)
+        self.assertEqual(first["source_message_id"], second["source_message_id"])
+        self.assertEqual(
+            first["source_envelope"]["db_shard_id"],
+            second["source_envelope"]["db_shard_id"],
+        )
+        self.assertEqual(
+            first["source_envelope"]["source_generation_id"],
+            first_generation,
+        )
+        self.assertEqual(
+            second["source_envelope"]["source_generation_id"],
+            second_generation,
+        )
+
+
 class WeChatImageDecoderTests(unittest.TestCase):
     def test_v2_image_data_decodes_with_saved_key(self):
         key = b"1234567890abcdef"

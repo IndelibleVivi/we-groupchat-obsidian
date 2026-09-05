@@ -158,7 +158,7 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
 这个项目适合个人本地使用。它涉及微信本地数据库和进程内 key 提取，所以公开使用前请先理解这些边界：
 
 - 程序读取本机微信数据库副本，不修改微信聊天数据库。
-- 首次提取数据库 key，或微信更新后重新提取 key，可能需要对 `WeChat.app` 做 ad-hoc re-sign。脚本不会在普通双击启动时偷偷执行这一步，必须显式运行带 `--allow-wechat-resign` 的命令。
+- 首次提取数据库 key，或微信更新后重新提取 key，可能需要对 `WeChat.app` 做 ad-hoc re-sign。脚本不会在普通双击启动时偷偷执行这一步，必须显式运行带 `--allow-wechat-resign` 的命令。重签会把一次操作绑定到 canonical bundle path，以及运行时的 exact PID、launch 与 executable identity；取得 sudo 后会复核，只正常退出该 target，再对同一 bundle 签名、独立验签并按 exact path reopen。歧义、超时或 identity 变化都会停止。
 - macOS 可能在每次菜单 app 进程启动时询问一次 WeChat App Data 权限。项目不会再调度短命 source/resource
   worker 反复消耗这个 process-lifetime consent；附件 bytes 解析是仅存在于内存、本次 app 会话有效的
   显式授权，重启后必定归零，也不会从 config 恢复；关闭后，in-flight resolver 会在下一次读取附件
@@ -252,12 +252,35 @@ cd we-groupchat-obsidian
 ./启动.command --allow-wechat-resign
 ```
 
+若本机并存多个 WeChat 安装副本，请显式绑定目标：
+
+```bash
+./启动.command --allow-wechat-resign --wechat-app=/Applications/WeChat.app
+```
+
 这一步可能会退出微信，并要求输入 Mac 登录密码。输入密码时终端不显示字符是正常的。
 
 WGO 已验证 macOS 微信 `4.1.11 (269136)` arm64 的 protected binary
 cipher-context key 读取。Protected-key profile 与精确微信 build 绑定，每个
 candidate 都必须通过相应 encrypted DB 的 page-one HMAC 验证才会写入私有
 key cache；未识别的后续 build 会 fail closed 并保留已验证 cache。
+
+实际执行的 scanner 必须来自 immutable build directory；receipt 精确绑定 C source
+digest、compiler binary/version/target、显式 target architecture、flags 与产物 digest，
+再由单个 atomic `scanner-current.json` pointer 选择完整 build。历史 fixed binary 或只发布
+了一半的 build 都不会被执行。
+
+Monitor 第一次 enable 仍采用 from-now。已有 per-shard cursor 后，如果 physical generation
+被替换，或 inventory 新增 logical shard，系统会在任何 page read / AI call 之前返回
+`source_generation_admission_required`；content-free plan 绑定 exact inventory、旧/新
+generation 与 bounded reconciliation 上限。普通 monitor 不会再借用全局 timestamp 跳过
+较旧但未消费的 row；continuity proof 或 bounded replay/reconciliation 仍是显式 operator
+migration。
+
+Daily Digest Markdown 通过 durable atomic replace 发布；canonical event 与 Digest
+invalidation 在同一 SQLite transaction 提交，event path 与 menu timer 重建现有 affected
+Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 commit，retry 会按稳定
+`source_batch_id` 直接复用 canonical event、修 projection 并推进原 batch，不再次调用 AI。
 
 ### 文档地图
 
@@ -266,6 +289,8 @@ key cache；未识别的后续 build 会 fail closed 并保留已验证 cache。
 - `功能说明.txt`：当前能力的简明索引，不替代操作 contract。
 - `docs/source-reliability*.md`：source guard、archive、mounted backup、Drive、
   filesystem snapshot 和 safe rollout 的详细 contract。
+- `docs/recovery-acceptance.md`：恢复 hardening、migration boundary，以及
+  source / installed / live 验收状态。
 - `docs/resource-capture-and-mounted-backup-spec.md`：resource occurrence、selection、
   projection、handoff、status 与 failure semantics 的 formal spec。
 

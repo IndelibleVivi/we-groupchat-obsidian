@@ -326,9 +326,7 @@ class CatchUpMonitorTests(unittest.TestCase):
             "indexes": {"written_count": 2},
             "digests": [{
                 "date": "2026-08-02",
-                "events": 3,
-                "touched_topics": 2,
-                "new_topics": 1,
+                "notes": 1,
                 "actions": 4,
                 "path": "/tmp/digest.md",
             }],

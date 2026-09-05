@@ -789,6 +789,42 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.assertEqual(len(self.rows("topics")), 1)
         self.assertEqual(len(self.rows("events")), 1)
 
+    def test_event_and_daily_digest_invalidation_commit_together(self):
+        result = self.store.apply_event(
+            candidate(links=[]),
+            self.messages,
+            self.config,
+            {"relation": "new"},
+        )
+
+        changes = self.rows("daily_digest_changes")
+        self.assertEqual(result["event_id"], 1)
+        self.assertEqual(len(self.rows("events")), 1)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["change_kind"], "canonical_event")
+        self.assertEqual(changes[0]["window_start"], "2026-05-29 03:16")
+        self.assertEqual(changes[0]["window_end"], "2026-05-29 03:17")
+
+    def test_daily_digest_invalidation_rolls_back_with_event(self):
+        with patch.object(
+            self.store,
+            "_register_attachment_mentions",
+            side_effect=sqlite3.OperationalError("fixture transaction failure"),
+        ):
+            with self.assertRaisesRegex(
+                sqlite3.OperationalError,
+                "fixture transaction failure",
+            ):
+                self.store.apply_event(
+                    candidate(links=[]),
+                    self.messages,
+                    self.config,
+                    {"relation": "new"},
+                )
+
+        self.assertEqual(self.rows("events"), [])
+        self.assertEqual(self.rows("daily_digest_changes"), [])
+
     def test_apply_event_reports_topic_markdown_failure_without_writing_indexes(self):
         failure = OSError(errno.EIO, "I/O error")
 

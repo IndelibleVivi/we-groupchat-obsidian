@@ -20,7 +20,8 @@ BACKFILL_HISTORY=0
 ORGANIZE_OBSIDIAN=0
 HEALTH_CHECK=0
 REFRESH_DATA_SOURCE=0
-WECHAT_RESIGNED=0
+WECHAT_APP_PATH_ARG=""
+WECHAT_EXPLICIT_TARGET=0
 INSTALL_AUTOSTART=0
 UNINSTALL_AUTOSTART=0
 AUTOSTART_MODE=0
@@ -59,6 +60,10 @@ for arg in "$@"; do
         --allow-wechat-resign)
             ALLOW_WECHAT_RESIGN=1
             ;;
+        --wechat-app=*)
+            WECHAT_APP_PATH_ARG="${arg#--wechat-app=}"
+            WECHAT_EXPLICIT_TARGET=1
+            ;;
     esac
 done
 
@@ -73,6 +78,13 @@ pause_and_exit() {
 
 get_wechat_app_path() {
     local app_path=""
+    if [[ -n "$WECHAT_APP_PATH_ARG" ]]; then
+        if [[ -d "$WECHAT_APP_PATH_ARG" ]]; then
+            (cd "$WECHAT_APP_PATH_ARG" && pwd -P)
+            return 0
+        fi
+        return 1
+    fi
     app_path="$(osascript -e 'POSIX path of (path to application "WeChat")' 2>/dev/null | tr -d '\r')"
     if [[ -n "$app_path" && -d "$app_path" ]]; then
         printf '%s\n' "${app_path%/}"
@@ -240,6 +252,10 @@ is_wechat_signed() {
     local app_path="$1"
     local codesign_output=""
 
+    if ! codesign --verify --deep --strict "$app_path" &>/dev/null; then
+        return 1
+    fi
+
     if ! codesign_output="$(codesign -dvv "$app_path" 2>&1)"; then
         return 1
     fi
@@ -248,22 +264,11 @@ is_wechat_signed() {
         return 1
     fi
 
+    if ! printf '%s\n' "$codesign_output" | grep -qx "Signature=adhoc"; then
+        return 1
+    fi
+
     return 0
-}
-
-quit_wechat_if_running() {
-    if ! pgrep -x "WeChat" &>/dev/null; then
-        return 0
-    fi
-
-    echo "  检测到微信正在运行，正在退出..."
-    osascript -e 'tell application "WeChat" to quit' 2>/dev/null || true
-    sleep 2
-    if pgrep -x "WeChat" &>/dev/null; then
-        killall WeChat 2>/dev/null || true
-        sleep 1
-    fi
-    echo "  ✓ 微信已退出"
 }
 
 ensure_wechat_signed() {
@@ -273,6 +278,8 @@ ensure_wechat_signed() {
         pause_and_exit 1
     fi
 
+    export WE_GROUPCHAT_OBSIDIAN_WECHAT_APP_PATH="$app_path"
+
     if is_wechat_signed "$app_path"; then
         echo "[2/3] 微信授权状态正常"
         return 0
@@ -280,13 +287,16 @@ ensure_wechat_signed() {
 
     echo "[2/3] 检测到微信需要重新授权..."
     echo "  为了读取本地微信数据库，本项目需要对 WeChat.app 做 ad-hoc re-sign。"
-    echo "  这是高影响操作：会修改 /Applications/WeChat.app 的签名，微信更新后可能失效。"
+    echo "  这是高影响操作：会修改下列 exact target 的签名，微信更新后可能失效。"
+    echo "  Target: $app_path"
     echo ""
     if [[ "$ALLOW_WECHAT_RESIGN" != "1" ]]; then
         echo "  privacy-first 版本不会在双击启动时自动执行这一步。"
         echo "  确认要继续时，请在项目目录手动运行："
         echo ""
         echo "    ./启动.command --allow-wechat-resign"
+        echo "  多个 WeChat.app 并存时，请显式绑定："
+        echo "    ./启动.command --allow-wechat-resign --wechat-app=/exact/path/WeChat.app"
         echo ""
         echo "  或仅做环境检查："
         echo ""
@@ -294,12 +304,18 @@ ensure_wechat_signed() {
         pause_and_exit 1
     fi
 
-    echo "  即将执行重签名，需要输入电脑登录密码；输入时终端不会显示字符，这是正常的"
-    quit_wechat_if_running
+    echo "  即将对上述 target 执行重签名，需要输入电脑登录密码；输入时终端不会显示字符，这是正常的"
+    local resign_args=(
+        "$PROJECT_DIR/scripts/resign_wechat.py"
+        --app "$app_path"
+        --allow-wechat-resign
+    )
+    if [[ "$WECHAT_EXPLICIT_TARGET" -eq 1 ]]; then
+        resign_args+=(--explicit-target)
+    fi
 
-    if sudo codesign --force --deep --sign - "$app_path"; then
-        echo "  ✓ 微信已重签名"
-        WECHAT_RESIGNED=1
+    if "$PYTHON_BIN" "${resign_args[@]}"; then
+        echo "  ✓ 微信 exact target 已重签名、验签并重新打开"
         return 0
     fi
 
@@ -308,12 +324,9 @@ ensure_wechat_signed() {
     echo "  ❌ 微信重新授权失败"
     echo "============================================"
     echo ""
-    echo "请按下面步骤处理后，再重新双击「启动.command」："
-    echo "  1. 打开「系统设置」"
-    echo "  2. 进入「隐私与安全性」"
-    echo "  3. 找到「App 管理」或「完全磁盘访问权限」"
-    echo "  4. 打开「终端」的开关"
-    echo "  5. 重新运行本脚本"
+    echo "Target 没有被当作重签成功，也不会自动扩大权限。"
+    echo "如果错误是 macOS 拒绝修改 app，请在「系统设置 → 隐私与安全性 → App 管理」"
+    echo "检查当前终端的权限后重试；不要为这一步默认开启「完全磁盘访问权限」。"
     pause_and_exit 1
 }
 
@@ -381,17 +394,6 @@ if [[ "$ORGANIZE_OBSIDIAN" -eq 1 ]]; then
 fi
 
 if [[ "$REFRESH_DATA_SOURCE" -eq 1 ]]; then
-    if [[ "$WECHAT_RESIGNED" -eq 1 ]]; then
-        app_path="$(get_wechat_app_path)"
-        echo "正在重新打开微信以加载数据库..."
-        open "$app_path"
-        for _ in {1..30}; do
-            if pgrep -x "WeChat" &>/dev/null; then
-                break
-            fi
-            sleep 1
-        done
-    fi
     exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/refresh_data_source.py"
 fi
 

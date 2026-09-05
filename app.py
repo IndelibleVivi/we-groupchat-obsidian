@@ -77,8 +77,7 @@ from core.daily_digest import (
     DAILY_DIGEST_STATE_FILE,
     mark_daily_digest_success,
     notification_summary,
-    refresh_existing_daily_digests,
-    source_window_dates,
+    refresh_pending_daily_digests,
     should_run_daily_digest,
     write_daily_digest,
 )
@@ -93,7 +92,6 @@ from core.key_extractor import (
     is_wechat_signed,
     extract_keys,
     get_cached_keys,
-    compile_scanner,
     check_new_databases,
 )
 from core.wechat_db import WeChatDB
@@ -1920,34 +1918,20 @@ class WeGroupchatObsidianApp(rumps.App):
             )
             print(f"[monitor] projection warning; canonical event saved: {summary}")
 
-        event_written = bool(result.get("knowledge_event_written")) or result.get("knowledge_event_id") is not None
-        if event_written:
-            affected_dates = list(result.get("affected_dates") or [])
-            if not affected_dates:
-                source_window = result.get("source_window") or {}
-                affected_dates = source_window_dates(
-                    self.config,
-                    source_window.get("start", ""),
-                    source_window.get("end", ""),
-                    fallback_ts=result.get("last_msg_ts"),
+        event_written = bool(result.get("knowledge_event_written"))
+        event_reused = bool(result.get("knowledge_event_reused"))
+        if not dry_run and (event_written or event_reused):
+            digest_refresh = refresh_pending_daily_digests(self.config)
+            for date_label in digest_refresh.get("written_dates") or []:
+                print(
+                    "[daily-digest] refreshed after canonical event: "
+                    f"{date_label}"
                 )
-            if affected_dates:
-                try:
-                    refreshed_digests = refresh_existing_daily_digests(
-                        self.config,
-                        affected_dates,
-                    )
-                    for refreshed_digest in refreshed_digests:
-                        print(
-                            "[daily-digest] refreshed after canonical event: "
-                            f"{refreshed_digest['date']} "
-                            f"notes={refreshed_digest['new_notes_count']}"
-                        )
-                except Exception as exc:
-                    print(
-                        "[daily-digest] canonical-event refresh failed: "
-                        f"{type(exc).__name__}"
-                    )
+            if digest_refresh.get("state") == "deferred":
+                print(
+                    "[daily-digest] canonical-event refresh deferred: "
+                    f"{digest_refresh.get('error_code', 'unknown')}"
+                )
             if not dry_run and self.config.get("attachment_archive_enabled", False):
                 self._start_attachment_archive_consumer()
 
@@ -2072,33 +2056,39 @@ class WeGroupchatObsidianApp(rumps.App):
     def _on_daily_digest_timer(self, _):
         if not self.config.get("daily_digest_enabled", True):
             return
-        if not should_run_daily_digest(DAILY_DIGEST_STATE_FILE, self.config):
-            return
         threading.Thread(target=self._run_daily_digest, daemon=True).start()
 
     def _run_daily_digest(self):
         if not self._daily_digest_lock.acquire(blocking=False):
             return
         try:
-            digest = write_daily_digest(self.config)
-            mark_daily_digest_success(DAILY_DIGEST_STATE_FILE, self.config)
-            print(
-                f"[daily-digest] 写入: {digest['path']} "
-                f"notes={digest['new_notes_count']} "
-                f"actions={digest.get('today_action_count', 0)} "
-                f"risk={digest.get('today_risk_count', 0)}"
-            )
-            if (
-                self.config.get("background_notifications_enabled", True)
-                and self.config.get("daily_digest_notify", True)
-            ):
-                subtitle, message = notification_summary(digest)
-                _notify(
-                    "关注推送 Daily Digest",
-                    subtitle,
-                    message,
-                    data=notification_data_for_path(digest.get("path")),
+            due = should_run_daily_digest(DAILY_DIGEST_STATE_FILE, self.config)
+            digest = write_daily_digest(self.config) if due else None
+            repair = refresh_pending_daily_digests(self.config)
+            if repair.get("state") == "deferred":
+                raise RuntimeError(
+                    "daily_digest_repair_deferred:"
+                    + str(repair.get("error_code") or "unknown")
                 )
+            if digest is not None:
+                mark_daily_digest_success(DAILY_DIGEST_STATE_FILE, self.config)
+                print(
+                    f"[daily-digest] 写入: {digest['path']} "
+                    f"notes={digest['new_notes_count']} "
+                    f"actions={digest.get('today_action_count', 0)} "
+                    f"risk={digest.get('today_risk_count', 0)}"
+                )
+                if (
+                    self.config.get("background_notifications_enabled", True)
+                    and self.config.get("daily_digest_notify", True)
+                ):
+                    subtitle, message = notification_summary(digest)
+                    _notify(
+                        "关注推送 Daily Digest",
+                        subtitle,
+                        message,
+                        data=notification_data_for_path(digest.get("path")),
+                    )
         except Exception as e:
             traceback.print_exc()
             if self.config.get("background_notifications_enabled", True):
@@ -2753,10 +2743,6 @@ class WeGroupchatObsidianApp(rumps.App):
                 return
             if not signed:
                 _notify("微信总结", "微信需要重新授权", _wechat_signing_message())
-                self._set_status(ICON_ERROR)
-                return
-            if not compile_scanner():
-                _notify("微信总结", "编译失败", "需安装 Xcode CLI Tools")
                 self._set_status(ICON_ERROR)
                 return
             _notify("微信总结", "首次运行", "正在同步数据源...")

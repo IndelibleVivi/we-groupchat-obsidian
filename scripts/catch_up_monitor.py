@@ -264,6 +264,7 @@ def drain_monitors(
                 "source_inventory_invalid",
                 "source_inventory_unavailable",
                 "source_shard_unavailable",
+                "source_message_decode_failed",
             }:
                 block(username, status)
                 continue
@@ -595,6 +596,17 @@ def _load_runtime() -> tuple[dict, list[dict], WeChatDB]:
     return config, chats, db
 
 
+def _print_projection_summary(projections):
+    """Print the real producer contract; do not invent event/topic counters."""
+    if projections:
+        print(f"  date indexes: {projections['indexes'].get('written_count', 0)}")
+        for digest in projections["digests"]:
+            print(
+                f"  Digest {digest['date']}: {digest['notes']} notes / "
+                f"{digest['actions']} actions"
+            )
+
+
 def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
     started_at = datetime.now().astimezone().isoformat(timespec="seconds")
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000:06d}"
@@ -779,15 +791,7 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
         print(f"  完成群聊: {len(result['complete'])}/{len(chats)}")
         if result["blocked"]:
             print(f"  未完成: {result['blocked']}")
-    if projections:
-        print(f"  date indexes: {projections['indexes'].get('written_count', 0)}")
-        for digest in projections["digests"]:
-            print(
-                f"  Digest {digest['date']}: {digest['events']} events / "
-                f"{digest['touched_topics']} touched topics / "
-                f"{digest['new_topics']} new topics / "
-                f"{digest['actions']} actions"
-            )
+    _print_projection_summary(projections)
     if validation:
         print(
             "  canonical: "

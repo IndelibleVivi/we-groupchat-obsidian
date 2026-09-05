@@ -1009,6 +1009,15 @@ class KnowledgeStore:
             CREATE INDEX IF NOT EXISTS idx_events_topic_id ON events(topic_id);
             CREATE INDEX IF NOT EXISTS idx_events_message_hash ON events(message_hash);
 
+            CREATE TABLE IF NOT EXISTS daily_digest_changes (
+                change_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                window_start TEXT NOT NULL DEFAULT '',
+                window_end TEXT NOT NULL DEFAULT '',
+                fallback_timestamp REAL NOT NULL DEFAULT 0,
+                change_kind TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS relations (
                 relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_topic_id INTEGER NOT NULL,
@@ -1263,6 +1272,13 @@ class KnowledgeStore:
                 config,
                 now,
             )
+            self._record_daily_digest_change(
+                conn,
+                ctx,
+                messages,
+                "canonical_event",
+                now,
+            )
             if relation in {"update", "contradiction"} and linked_topic_id:
                 self._bump_new_topic_event_count(conn, topic_id, now)
                 rel_name = "updates" if relation == "update" else "contradicts"
@@ -1328,7 +1344,9 @@ class KnowledgeStore:
     def _source_batch_result(self, conn, source_batch_id):
         row = conn.execute(
             """
-            SELECT e.event_id, e.topic_id, e.relation, t.obsidian_path
+            SELECT e.event_id, e.topic_id, e.relation,
+                   e.window_start, e.window_end, e.created_at,
+                   t.obsidian_path
             FROM events AS e
             JOIN topics AS t ON t.topic_id = e.topic_id
             WHERE e.source_batch_id = ?
@@ -1347,25 +1365,44 @@ class KnowledgeStore:
             "knowledge_path": self.full_obsidian_path(obsidian_path),
             "projection_warnings": [],
             "reused": True,
+            "window_start": str(row["window_start"] or ""),
+            "window_end": str(row["window_end"] or ""),
+            "event_created_at": float(row["created_at"] or 0),
         }
+
+    def recover_source_batch(self, source_batch_id):
+        """Return and repair an already committed batch without model replay."""
+        batch_id = str(source_batch_id or "").strip()[:96]
+        if not batch_id:
+            return None
+        conn = self.connect()
+        try:
+            existing = self._source_batch_result(conn, batch_id)
+            if existing is None:
+                return None
+            return self._repair_reused_source_batch_projection(conn, existing)
+        finally:
+            conn.close()
 
     def _repair_reused_source_batch_projection(self, conn, result):
         repaired = dict(result)
         knowledge_path = str(repaired.get("knowledge_path") or "")
-        if knowledge_path and os.path.isfile(knowledge_path):
-            return repaired
-
         projection_warnings = []
-        try:
-            self._write_topic_markdown(conn, int(repaired["topic_id"]))
-        except OSError as exc:
-            projection_warnings.append({
-                "surface": "topic_markdown",
-                "error_type": type(exc).__name__,
-                "errno": exc.errno,
-            })
-            repaired["knowledge_path"] = ""
-        else:
+        topic_ready = bool(knowledge_path and os.path.isfile(knowledge_path))
+        if not topic_ready:
+            try:
+                self._write_topic_markdown(conn, int(repaired["topic_id"]))
+            except OSError as exc:
+                projection_warnings.append({
+                    "surface": "topic_markdown",
+                    "error_type": type(exc).__name__,
+                    "errno": exc.errno,
+                })
+                repaired["knowledge_path"] = ""
+            else:
+                topic_ready = True
+
+        if topic_ready:
             try:
                 self.write_date_indexes()
             except OSError as exc:
@@ -1377,6 +1414,78 @@ class KnowledgeStore:
 
         repaired["projection_warnings"] = projection_warnings
         return repaired
+
+    @staticmethod
+    def _record_daily_digest_change(conn, ctx, messages, change_kind, now):
+        """Journal a Digest invalidation in the canonical-event transaction."""
+        fallback_timestamp = float(now)
+        for message in reversed(messages or []):
+            try:
+                candidate = float(message.get("timestamp") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if candidate > 0:
+                fallback_timestamp = candidate
+                break
+        conn.execute(
+            """
+            INSERT INTO daily_digest_changes(
+                window_start, window_end, fallback_timestamp,
+                change_kind, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(ctx.get("window_start") or ""),
+                str(ctx.get("window_end") or ""),
+                fallback_timestamp,
+                str(change_kind or "knowledge"),
+                now,
+            ),
+        )
+
+    def pending_daily_digest_changes(self, limit=5000):
+        """Peek one durable invalidation prefix without acknowledging it."""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT change_id, window_start, window_end,
+                       fallback_timestamp, change_kind, created_at
+                FROM daily_digest_changes
+                ORDER BY change_id
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return {"cutoff_change_id": 0, "changes": []}
+        return {
+            "cutoff_change_id": int(rows[-1]["change_id"]),
+            "changes": [dict(row) for row in rows],
+        }
+
+    def ack_daily_digest_changes(self, cutoff_change_id):
+        """Acknowledge only the exact invalidation prefix already refreshed."""
+        if self.read_only:
+            raise RuntimeError("knowledge store is read-only")
+        cutoff = max(0, int(cutoff_change_id or 0))
+        if cutoff == 0:
+            return 0
+        conn = self.connect()
+        try:
+            cursor = conn.execute(
+                "DELETE FROM daily_digest_changes WHERE change_id <= ?",
+                (cutoff,),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     @staticmethod
     def _register_attachment_mentions(conn, event_id, topic_id, messages, config, now):
