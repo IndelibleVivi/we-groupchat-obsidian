@@ -159,7 +159,7 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
 这个项目适合个人本地使用。它涉及微信本地数据库和进程内 key 提取，所以公开使用前请先理解这些边界：
 
 - 程序读取本机微信数据库副本，不修改微信聊天数据库。
-- 首次提取数据库 key，或微信更新后重新提取 key，可能需要对 `WeChat.app` 做 ad-hoc re-sign。脚本不会在普通双击启动时偷偷执行这一步，必须显式运行带 `--allow-wechat-resign` 的命令。重签会把一次操作绑定到 canonical bundle path，以及运行时的 exact PID、launch 与 executable identity；取得 sudo 后会复核，只正常退出该 target，再对同一 bundle 签名、独立验签并按 exact path reopen。歧义、超时或 identity 变化都会停止。
+- 首次提取数据库 key，或微信更新后重新提取 key，可能需要对 `WeChat.app` 重签。脚本不会在普通双击启动时偷偷执行这一步，必须显式运行带 `--allow-wechat-resign` 的命令。重签会把一次操作绑定到 canonical bundle path，以及运行时的 exact PID、launch 与 executable identity；只在 bundle 不可写时才用 sudo 把该 exact target chown 回当前用户，随后正常退出该 target、对同一 bundle 签名、独立验签并按 exact path reopen。歧义、超时或 identity 变化都会停止。签名使用首次运行时自动创建的本机持久自签身份 `WGO WeChat Stable Identity`（keychain 位于 `~/Library/Keychains/wgo-wechat-identity.keychain-db`，密码 sidecar `wgo-wechat-identity.pw` 权限 0600）；macOS 会跨重启记住授予这只稳定身份的授权，而裸 ad-hoc 签名会被系统反复索要授权。微信更新会恢复官方签名，每次更新后需要重新显式执行重签。
 - macOS 可能在每次菜单 app 进程启动时询问一次 WeChat App Data 权限。项目不会再调度短命 source/resource
   worker 反复消耗这个 process-lifetime consent；附件 bytes 解析是仅存在于内存、本次 app 会话有效的
   显式授权，重启后必定归零，也不会从 config 恢复；关闭后，in-flight resolver 会在下一次读取附件

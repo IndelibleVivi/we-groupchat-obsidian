@@ -1,7 +1,7 @@
 """No platform process or network calls: the codesign runner is always mocked."""
 import subprocess
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qsl, urlsplit
 
 from core.monitor_result import classify_monitor_result, monitor_status
@@ -81,12 +81,81 @@ class SignaturePredicateTests(unittest.TestCase):
         for detail in (
             'Signature=adhoc\n',
             'CodeDirectory flags=garbage\nSignature=adhoc\n',
-            'CodeDirectory flags=0x2(adhoc)\nSignature size=500\n',
             'CodeDirectory flags=0x2(adhoc)\nSignature=adhoc\nSignature=other\n',
             'CodeDirectory flags=0x2(adhoc)\nCodeDirectory flags=0x10002\nSignature=adhoc\n',
         ):
             with self.subTest(detail=detail):
                 self.assertFalse(inspect_wechat_signature('/fixture/WeChat.app', runner=self.runner(detail)).ok)
+        with patch(
+            'core.wechat_signing_identity.managed_certificate_root_hash',
+            return_value=None,
+        ):
+            detail = 'CodeDirectory flags=0x2(adhoc)\nSignature size=500\n'
+            self.assertFalse(inspect_wechat_signature('/fixture/WeChat.app', runner=self.runner(detail)).ok)
+
+    def test_managed_stable_identity_is_accepted(self):
+        path = '/fixture/runtime directory/WeChat.app'
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, '', ''),
+            subprocess.CompletedProcess(
+                [], 0, '',
+                'CodeDirectory v=20500 size=755 flags=0x0(none) hashes=14+2 location=embedded\n'
+                'Signature size=1840\n',
+            ),
+            subprocess.CompletedProcess(
+                [], 0, '',
+                'Executable=/fixture/WeChat\n'
+                'designated => identifier "com.tencent.xinWeChat" and '
+                'certificate root = H"0123abcdef"\n',
+            ),
+        ])
+        result = inspect_wechat_signature(
+            path, runner=runner, expected_certificate_root='0123ABCDEF',
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(len(runner.call_args_list), 3)
+        for call in runner.call_args_list:
+            self.assertNotIn('sudo', call.args[0])
+            self.assertNotIn('--sign', call.args[0])
+
+    def test_foreign_certificate_is_rejected(self):
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, '', ''),
+            subprocess.CompletedProcess(
+                [], 0, '',
+                'CodeDirectory v=20500 size=755 flags=0x0(none) hashes=14+2 location=embedded\n'
+                'Signature size=8979\n',
+            ),
+            subprocess.CompletedProcess(
+                [], 0, '',
+                'designated => identifier "com.tencent.xinWeChat" and anchor apple generic\n',
+            ),
+        ])
+        result = inspect_wechat_signature(
+            '/fixture/WeChat.app', runner=runner,
+            expected_certificate_root='0123abcdef',
+        )
+        self.assertEqual(result.code, 'wechat_signature_not_stable_identity')
+
+    def test_adhoc_is_rejected_when_stable_identity_is_required(self):
+        runner = self.runner('CodeDirectory flags=0x2(adhoc)\nSignature=adhoc\n')
+        result = inspect_wechat_signature(
+            '/fixture/WeChat.app', runner=runner,
+            expected_certificate_root='0123abcdef',
+        )
+        self.assertEqual(result.code, 'wechat_signature_not_stable_identity')
+        self.assertEqual(len(runner.call_args_list), 2)
+
+    def test_certificate_signature_without_managed_identity_fails_closed(self):
+        runner = self.runner(
+            'CodeDirectory flags=0x0(none)\nSignature size=1840\n'
+        )
+        with patch(
+            'core.wechat_signing_identity.managed_certificate_root_hash',
+            return_value=None,
+        ):
+            result = inspect_wechat_signature('/fixture/WeChat.app', runner=runner)
+        self.assertEqual(result.code, 'wechat_signature_not_stable_identity')
 
     def test_failed_display_is_not_success(self):
         runner = self.runner('CodeDirectory flags=0x2(adhoc)\nSignature=adhoc\n', display_code=1)

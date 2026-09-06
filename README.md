@@ -213,7 +213,7 @@ independently deployed microservices. Editable sources:
   bodies/XML, `source_message_id`, `wxid`, and WeChat cache paths are not Drive
   metadata. The project does not delete Drive files, WeChat cache, or local CAS
   objects.
-- Extracting database keys may require ad-hoc re-signing `WeChat.app`. The regular double-click flow does not silently do this; commands that perform it are explicit. Re-signing binds one canonical bundle path and, when running, its exact PID/launch/executable identity through privilege acquisition, graceful termination, signing, independent verification, and exact-path reopen. Ambiguity or identity change stops the operation.
+- Extracting database keys may require re-signing `WeChat.app`. The regular double-click flow does not silently do this; commands that perform it are explicit. Re-signing binds one canonical bundle path and, when running, its exact PID/launch/executable identity through privilege acquisition, graceful termination, signing, independent verification, and exact-path reopen. Ambiguity or identity change stops the operation. Signing uses a persistent per-machine self-signed identity (`WGO WeChat Stable Identity`) created on first use in `~/Library/Keychains/wgo-wechat-identity.keychain-db` with a mode-0600 password sidecar; macOS retains consent granted to that stable identity across restarts, while a bare ad-hoc signature is re-prompted repeatedly. A WeChat update restores the official signature, so the explicit re-sign step must be run again after each update.
 - macOS may ask once per menu-app process for access to WeChat App Data. The
   project does not schedule short-lived source/resource workers that would make
   that process-lifetime consent recur; attachment-byte resolution is a separate
