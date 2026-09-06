@@ -52,8 +52,12 @@ bundled Python runtime。
 ./launchers/整理Obsidian输出.command
 ./launchers/安装自动启动.command
 ./launchers/卸载自动启动.command
-./launchers/补跑遗漏笔记.command
+./launchers/补跑遗漏笔记.command --allow-transient-wechat-source-read
 ```
+
+补跑（包括只读 audit）会读取受保护的微信数据目录，所以必须显式加
+`--allow-transient-wechat-source-read`；macOS 可能为这次单独运行弹一次文件权限窗。
+没有这个 flag 时命令会在读取前直接退出。
 
 ## 建议先跑一次健康检查
 

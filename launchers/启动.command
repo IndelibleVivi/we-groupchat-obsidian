@@ -12,6 +12,8 @@ VENV_DIR="$PROJECT_DIR/.venv"
 PYTHON_BIN="$VENV_DIR/bin/python"
 REQ_FILE="$PROJECT_DIR/requirements.txt"
 REQ_STAMP="$VENV_DIR/.requirements.sha256"
+APP_BUNDLE="$PROJECT_DIR/dist/WeGroupchatObsidian.app"
+APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/WeGroupchatObsidian"
 USER_DATA_DIR="$HOME/.we-groupchat-obsidian"
 PYTHON3_CMD="python3"
 SETUP_ONLY=0
@@ -247,6 +249,38 @@ ensure_venv() {
     fi
 }
 
+app_bundle_is_valid() {
+    [[ -x "$APP_EXECUTABLE" ]] && /usr/bin/codesign --verify "$APP_BUNDLE" >/dev/null 2>&1
+}
+
+ensure_app_bundle() {
+    if app_bundle_is_valid; then
+        echo "[app] 稳定本地 app bundle 已就绪"
+        return 0
+    fi
+
+    if [[ -e "$APP_BUNDLE" ]]; then
+        echo "❌ 现有 app bundle 未通过签名/可执行验证，不会自动覆盖："
+        echo "   $APP_BUNDLE"
+        echo "   请先确认菜单 app 已退出，再手动移开这个 derived bundle 后重试。"
+        pause_and_exit 1
+    fi
+
+    if [[ "$AUTOSTART_MODE" -eq 1 ]]; then
+        echo "❌ 旧 source-mode LaunchAgent 找不到稳定 app bundle；为避免在后台构建或重复触发权限，本次停止。"
+        echo "   请在 Finder/Terminal 中显式运行 ./启动.command 完成一次本地 bundle 构建。"
+        exit 1
+    fi
+
+    echo "[app] 首次构建稳定本地 app identity..."
+    "$PYTHON_BIN" "$PROJECT_DIR/setup.py" py2app --alias
+    if ! app_bundle_is_valid; then
+        echo "❌ 本地 app bundle 构建后未通过验证，程序不会回退到短命 Python 进程。"
+        pause_and_exit 1
+    fi
+    echo "[app] 稳定本地 app bundle 构建完成"
+}
+
 is_wechat_signed() {
     "$PYTHON_BIN" -c '
 from core.wechat_signature import inspect_wechat_signature
@@ -351,7 +385,8 @@ if [[ "$HEALTH_CHECK" -eq 1 || "$INSTALL_AUTOSTART" -eq 1 || "$UNINSTALL_AUTOSTA
         exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/health_check.py"
     fi
     if [[ "$INSTALL_AUTOSTART" -eq 1 ]]; then
-        exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/autostart.py" install
+        ensure_app_bundle
+        exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/autostart.py" install --app-bundle "$APP_BUNDLE"
     fi
     if [[ "$UNINSTALL_AUTOSTART" -eq 1 ]]; then
         exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/autostart.py" uninstall
@@ -361,7 +396,8 @@ fi
 run_setup
 
 if [[ "$SETUP_ONLY" -eq 1 ]]; then
-    echo "配置完成。后续直接双击「启动.command」即可。"
+    ensure_app_bundle
+    echo "配置与本地 app bundle 已就绪。后续直接双击「启动.command」即可。"
     pause_and_exit 0
 fi
 
@@ -378,11 +414,19 @@ if [[ "$ORGANIZE_OBSIDIAN" -eq 1 ]]; then
 fi
 
 if [[ "$REFRESH_DATA_SOURCE" -eq 1 ]]; then
-    exec "$PYTHON_BIN" "$PROJECT_DIR/scripts/refresh_data_source.py"
+    ensure_app_bundle
+    echo "已用稳定 app identity 打开微信总结。"
+    echo "请在菜单栏点击「🔄 刷新数据源」；不再为这个 Finder 入口启动另一只短命 Python 进程。"
+    /usr/bin/open "$APP_BUNDLE"
+    pause_and_exit 0
 fi
 
+ensure_app_bundle
 echo "正在启动微信总结..."
 echo "菜单栏会出现 💬 图标"
-echo "（关闭此窗口会退出程序，Ctrl+C 也可退出）"
+echo "（本窗口关闭不会退出菜单 app；请从菜单退出）"
 echo ""
-exec "$PYTHON_BIN" "$PROJECT_DIR/app.py"
+if [[ "$AUTOSTART_MODE" -eq 1 ]]; then
+    exec "$APP_EXECUTABLE" --autostart
+fi
+exec /usr/bin/open "$APP_BUNDLE"

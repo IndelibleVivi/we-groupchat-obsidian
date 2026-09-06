@@ -49,7 +49,8 @@
   unknown, separate Direct Drive verification, disabled link preview, legacy
   read-only/send-retired MCP, and the Windows W0.2B.1 lock-and-path-only boundary.
   Health inspection must not scan source, initialize/migrate the source
-  inventory, open CAS payload objects, or promote mounted evidence to remote
+  inventory, open CAS payload objects, `stat` the protected WeChat container,
+  or promote mounted evidence to remote
   verification. Local details require explicit `--sensitive`.
 - `setup.py` is the py2app packaging entrypoint. These are the only Python
   files that belong at repository root.
@@ -78,6 +79,11 @@
 - `scripts/` contains thin operator entrypoints and compatibility cleanup
   commands. Put
   reusable behavior in the owning package rather than duplicating it in a CLI.
+  Transient maintenance CLIs that would read the protected WeChat source
+  (`refresh_data_source.py`, `catch_up_monitor.py`) must fail closed before any
+  source open/stat unless the operator explicitly passes
+  `--allow-transient-wechat-source-read`; the flag authorizes only that one
+  short-lived process, which may still get its own macOS App Data prompt.
 - Source-guard and mounted-resource timers run inside the long-lived py2app
   menu-bar process. macOS App Data consent is process-lifetime access, so their
   retired short-lived LaunchAgent modes must remain no-op cleanup surfaces and
@@ -92,6 +98,11 @@
 - `launchers/` owns the canonical Finder-friendly `.command` entrypoints. The
   root `启动.command` is a compatibility stub for deployed source-mode
   LaunchAgents and must not grow a second implementation.
+  `launchers/启动.command` builds and validates the ad-hoc-signed local alias
+  bundle `dist/WeGroupchatObsidian.app` and launches through that stable bundle
+  identity; it must never fall back to a short-lived `python app.py`, and new
+  autostart installs bind the same bundle via
+  `scripts/autostart.py install --app-bundle`.
 - `tests/` is an importable unittest package. New tests belong there and use
   `tests.<module>` for focused invocation.
 

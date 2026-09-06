@@ -834,6 +834,14 @@ def apply_catch_up(config: dict, chats: list[dict], db, args) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit or safely catch up missed monitor notes.")
     parser.add_argument("--apply", action="store_true", help="Pause, back up, write notes, rebuild projections, and restore the monitor.")
+    parser.add_argument(
+        "--allow-transient-wechat-source-read",
+        action="store_true",
+        help=(
+            "Explicitly allow this one short-lived process to read the protected "
+            "WeChat source; macOS may show one App Data consent prompt."
+        ),
+    )
     parser.add_argument("--audit-limit", type=int, default=100000, help="Maximum pending messages counted per chat in audit mode.")
     parser.add_argument("--max-pages-per-chat", type=int, default=100, help="Safety bound for TopicMonitor pages per chat.")
     parser.add_argument("--max-minutes", type=int, default=45, help="Transaction runtime safety bound.")
@@ -841,12 +849,25 @@ def main(argv: list[str] | None = None) -> int:
     args.audit_limit = max(1, args.audit_limit)
     args.max_pages_per_chat = max(1, args.max_pages_per_chat)
     args.max_minutes = max(1, args.max_minutes)
+    if not args.allow_transient_wechat_source_read:
+        print(
+            "已在读取 WeChat source 之前停止：这个 maintenance CLI 会启动一只短命进程，"
+            "macOS 可能因此另外弹出一次 App Data 权限。\n"
+            "确定要运行本次 audit/apply 时，显式加上 "
+            "--allow-transient-wechat-source-read。",
+            file=sys.stderr,
+        )
+        return 2
     try:
         config, chats, db = _load_runtime()
         if args.apply:
             return apply_catch_up(config, chats, db, args)
         _print_audit(audit_pending(db, chats, limit=args.audit_limit))
-        print("\n只做了 audit，没有写入。执行补跑：./launchers/补跑遗漏笔记.command --apply")
+        print(
+            "\n只做了 audit，没有写入。执行补跑："
+            "./launchers/补跑遗漏笔记.command "
+            "--allow-transient-wechat-source-read --apply"
+        )
         return 0
     except Exception as exc:
         print(f"补跑入口不可用: {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Refresh WeChat database keys without using the menu bar UI.
+# Open the stable menu app after any required exact-target re-sign.
 
 set -euo pipefail
 

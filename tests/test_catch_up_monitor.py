@@ -4,6 +4,8 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +21,7 @@ from scripts.catch_up_monitor import (
     rebuild_projections,
     validate_knowledge_db,
     write_reconciliation_receipt,
+    main,
 )
 
 
@@ -53,6 +56,33 @@ class CatchUpMonitorTests(unittest.TestCase):
 
     def tearDown(self):
         self.instance_lock_patcher.stop()
+
+    def test_cli_requires_explicit_transient_source_consent_before_loading_runtime(self):
+        stderr = StringIO()
+        with (
+            patch("scripts.catch_up_monitor._load_runtime") as load_runtime,
+            redirect_stderr(stderr),
+        ):
+            code = main([])
+
+        self.assertEqual(code, 2)
+        load_runtime.assert_not_called()
+        self.assertIn("--allow-transient-wechat-source-read", stderr.getvalue())
+
+    def test_cli_explicit_transient_source_consent_allows_audit(self):
+        with (
+            patch(
+                "scripts.catch_up_monitor._load_runtime",
+                return_value=({}, [{"username": "chat", "name": "Chat"}], object()),
+            ) as load_runtime,
+            patch("scripts.catch_up_monitor.audit_pending", return_value=[]) as audit,
+            patch("scripts.catch_up_monitor._print_audit"),
+        ):
+            code = main(["--allow-transient-wechat-source-read"])
+
+        self.assertEqual(code, 0)
+        load_runtime.assert_called_once_with()
+        audit.assert_called_once()
 
     def test_pending_messages_preserves_unprocessed_same_timestamp_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

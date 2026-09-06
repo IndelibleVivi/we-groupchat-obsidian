@@ -565,6 +565,12 @@ gui/501/com.example.wechat-summary = {
                     "last_exit_code": "1",
                 },
             )()
+            real_isdir = os.path.isdir
+
+            def reject_protected_source_stat(path):
+                if os.fspath(path) == str(db_dir):
+                    raise AssertionError("health must not stat protected source")
+                return real_isdir(path)
 
             with patch("scripts.health_check.load_config", return_value=config), \
                  patch("scripts.health_check.get_cached_keys", return_value={"message/message_0.db": {"enc_key": "x"}}), \
@@ -654,6 +660,7 @@ gui/501/com.example.wechat-summary = {
                      },
                  ), \
                  patch("core.key_extractor.check_new_databases", side_effect=AssertionError("health must not scan source")), \
+                 patch("scripts.health_check.os.path.isdir", side_effect=reject_protected_source_stat), \
                  patch("scripts.health_check.EXTRACT_LOG", str(key_log)):
                 output = StringIO()
                 with redirect_stdout(output):

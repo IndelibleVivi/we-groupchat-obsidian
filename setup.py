@@ -1,4 +1,4 @@
-"""py2app 打包配置（可选；默认仍推荐源码目录 + 启动.command 分发）"""
+"""Build the stable local alias app used by source-distributed installs."""
 import os
 from pathlib import Path
 import py_compile
@@ -50,8 +50,8 @@ def finalize_alias_bundle(bundle, *, config_target=None, runner=subprocess.run):
     resources = bundle / "Contents" / "Resources"
     python_lib = resources / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
 
-    # py2app 0.28.10 creates ../../site.pyc but omits its target on
-    # Python 3.13. Compile the bundled alias bootstrap at that target.
+    # Some py2app/Python combinations create ../../site.pyc but omit its
+    # target. Compile the bundled alias bootstrap at that target.
     site_source = resources / "site.py"
     site_target = resources / "site.pyc"
     py_compile.compile(str(site_source), cfile=str(site_target), doraise=True)

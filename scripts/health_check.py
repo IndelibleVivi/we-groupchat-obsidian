@@ -423,7 +423,11 @@ def main(argv: list[str] | None = None) -> int:
     print("")
     db_dir = config.get("db_dir") or ""
     db_label = db_dir if args.sensitive else _path_status(db_dir)
-    print(f"[{ok(bool(db_dir and os.path.isdir(db_dir)))}] WeChat DB: {db_label}")
+    # Health is a durable-state inspection surface. Do not stat the protected
+    # WeChat container from this short-lived CLI process: doing so can trigger a
+    # separate macOS App Data consent prompt. Source reachability belongs to the
+    # long-lived menu app and is represented here by its durable inventory.
+    print(f"[{ok(bool(str(db_dir).strip()))}] WeChat DB: {db_label}")
     print(f"[{ok(bool(keys))}] DB keys cache: {len(keys)} 个数据库 key")
     if api_key_available:
         ai_note = "Keychain 可读取"
