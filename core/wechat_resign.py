@@ -14,10 +14,16 @@ import plistlib
 import re
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 
 from . import key_extractor
+from .wechat_signing_identity import (
+    WeChatSigningIdentityError,
+    ensure_stable_signing_identity,
+    unlock_signing_keychain,
+)
 
 
 class WeChatResignError(RuntimeError):
@@ -204,9 +210,14 @@ def verify_resigned_wechat_bundle(
     expected: WeChatBundleIdentity,
     *,
     runner=subprocess.run,
+    expected_certificate_root=None,
 ) -> WeChatBundleIdentity:
     from .wechat_signature import inspect_wechat_signature
-    status = inspect_wechat_signature(expected.app_path, runner=runner)
+    status = inspect_wechat_signature(
+        expected.app_path,
+        runner=runner,
+        expected_certificate_root=expected_certificate_root,
+    )
     if not status.ok:
         raise WeChatResignError(status.code)
     observed = inspect_wechat_bundle(expected.app_path)
@@ -264,6 +275,42 @@ def reopen_wechat_target(
     return target
 
 
+def _wechat_bundle_writable(bundle: WeChatBundleIdentity) -> bool:
+    return os.access(bundle.app_path, os.W_OK) and os.access(
+        bundle.executable_path, os.W_OK
+    )
+
+
+def _write_resign_entitlements(app_path: str, *, runner=subprocess.run) -> str:
+    entitlements = {}
+    try:
+        dumped = runner(
+            ["/usr/bin/codesign", "-d", "--entitlements", ":-", app_path],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        dumped = None
+    if dumped is not None and dumped.returncode == 0:
+        try:
+            parsed = plistlib.loads((dumped.stdout or "").encode("utf-8"))
+            if isinstance(parsed, dict):
+                entitlements = parsed
+        except (ValueError, plistlib.InvalidFileException):
+            entitlements = {}
+    entitlements["com.apple.security.get-task-allow"] = True
+    try:
+        descriptor, path = tempfile.mkstemp(
+            prefix="wgo-resign-entitlements-", suffix=".plist"
+        )
+        try:
+            os.write(descriptor, plistlib.dumps(entitlements))
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise WeChatResignError("wechat_entitlements_unavailable") from exc
+    return path
+
+
 def resign_wechat_bundle(
     app_path,
     *,
@@ -277,9 +324,15 @@ def resign_wechat_bundle(
         app_path,
         explicit_target=explicit_target,
     )
-    privilege = runner(["sudo", "-v"], timeout=60)
-    if privilege.returncode:
-        raise WeChatResignError("wechat_privilege_unavailable")
+    try:
+        identity = ensure_stable_signing_identity(runner=runner)
+    except WeChatSigningIdentityError as exc:
+        raise WeChatResignError(exc.code) from exc
+    needs_ownership = not _wechat_bundle_writable(target.bundle)
+    if needs_ownership:
+        privilege = runner(["sudo", "-v"], timeout=60)
+        if privilege.returncode:
+            raise WeChatResignError("wechat_privilege_unavailable")
     target = revalidate_wechat_resign_target(
         target,
         explicit_target=explicit_target,
@@ -287,18 +340,49 @@ def resign_wechat_bundle(
     terminate_wechat_target(target.running)
     if inspect_wechat_bundle(target.bundle.app_path) != target.bundle:
         raise WeChatResignError("wechat_target_changed")
-    try:
-        signed = runner(
+    if needs_ownership:
+        chown = runner(
             [
-                "sudo", "-n", "codesign", "--force", "--deep", "--sign", "-",
+                "sudo", "-n", "chown", "-R",
+                f"{os.getuid()}:{os.getgid()}",
                 target.bundle.app_path,
             ],
-            timeout=120,
+            timeout=60,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise WeChatResignError("wechat_resign_outcome_ambiguous") from exc
-    if signed.returncode:
-        raise WeChatResignError("wechat_resign_failed")
-    verified = verify_resigned_wechat_bundle(target.bundle, runner=runner)
+        if chown.returncode:
+            raise WeChatResignError("wechat_ownership_change_failed")
+    try:
+        unlock_signing_keychain(identity, runner=runner)
+    except WeChatSigningIdentityError as exc:
+        raise WeChatResignError(exc.code) from exc
+    entitlements_path = _write_resign_entitlements(
+        target.bundle.app_path, runner=runner
+    )
+    try:
+        try:
+            signed = runner(
+                [
+                    "/usr/bin/codesign", "--force", "--deep",
+                    "--sign", identity.common_name,
+                    "--keychain", identity.keychain_path,
+                    "--entitlements", entitlements_path,
+                    target.bundle.app_path,
+                ],
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise WeChatResignError("wechat_resign_outcome_ambiguous") from exc
+        if signed.returncode:
+            raise WeChatResignError("wechat_resign_failed")
+    finally:
+        try:
+            os.unlink(entitlements_path)
+        except OSError:
+            pass
+    verified = verify_resigned_wechat_bundle(
+        target.bundle,
+        runner=runner,
+        expected_certificate_root=identity.certificate_root,
+    )
     reopened = reopen_wechat_target(verified, previous=target.running)
     return WeChatResignOutcome(verified, reopened)

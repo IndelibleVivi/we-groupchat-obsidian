@@ -15,9 +15,13 @@ changed, and a separately launched process does not inherit it automatically.
 
 `core/wechat_signature.py` provides the common read-only predicate for the
 launcher, `is_wechat_signed()`, and explicit re-sign verification. It invokes
-`/usr/bin/codesign`, requires strict verification and exactly one ad-hoc
-signature result, and reads the numeric `CS_RUNTIME` bit from CodeDirectory
-flags. Paths containing the word `runtime` do not cause a false rejection.
+`/usr/bin/codesign`, requires strict verification, reads the numeric
+`CS_RUNTIME` bit from CodeDirectory flags, and accepts either one legacy
+ad-hoc signature or a signature whose designated requirement anchors the
+managed stable identity from `core/wechat_signing_identity.py`. Explicit
+re-sign verification passes the expected certificate root, so ad-hoc output
+and foreign certificates are rejected there. Paths containing the word
+`runtime` do not cause a false rejection.
 Missing or malformed verification evidence fails closed with a bounded code.
 The caller still owns exact bundle/process binding around mutation. This
 predicate is not an atomic filesystem identity or process-termination proof.

@@ -239,10 +239,19 @@ documentation surfaces.
   lookup and Python architecture must never choose the scan mask.
 - `core/wechat_resign.py` owns explicit exact-target re-sign orchestration;
   `scripts/resign_wechat.py` and `launchers/启动.command` are thin entrypoints.
-  Bind canonical bundle, PID/launch/executable identity across sudo, graceful
-  termination, signing, independent verification and exact-path reopen. Never
-  restore process-name kill, post-mutation default-app discovery or implicit
-  re-sign permission.
+  Bind canonical bundle, PID/launch/executable identity across privilege
+  acquisition, graceful termination, signing, independent verification and
+  exact-path reopen. Signing must use the persistent per-machine self-signed
+  identity from `core/wechat_signing_identity.py`
+  (`~/Library/Keychains/wgo-wechat-identity.keychain-db` plus its mode-0600
+  password sidecar); never fall back to a bare ad-hoc `codesign --sign -`,
+  because macOS TCC cannot retain consent granted to a bare cdhash. sudo is
+  acquired only to chown the exact target bundle back to the operator when it
+  is not writable; signing itself runs unprivileged against the managed
+  keychain, and post-sign verification must require the designated
+  requirement to anchor the managed certificate root and reject ad-hoc
+  output. Never restore process-name kill, post-mutation default-app
+  discovery or implicit re-sign permission.
 - Scanner execution authority is an immutable private build directory plus a
   single atomic `scanner-current.json` pointer. The receipt binds source,
   compiler, target architecture, flags and binary identity. A legacy fixed
@@ -266,8 +275,12 @@ documentation surfaces.
   advance that exact batch; lookup failure preserves the checkpoint.
 - Catch-up prints the actual `rebuild_projections` notes/actions contract;
   tests must connect the real producer to apply/output/receipt.
-- `core/wechat_signature.py` owns the read-only strict/ad-hoc/no-runtime
-  predicate. Startup, Python runtime, and explicit re-sign verification share
+- `core/wechat_signature.py` owns the read-only strict/identity/no-runtime
+  predicate: strict verification must pass, the CS_RUNTIME bit must be
+  absent, and the signature must be either legacy ad-hoc or anchored to the
+  managed stable signing identity; explicit re-sign verification passes the
+  expected certificate root so ad-hoc output is rejected there. Startup,
+  Python runtime, and explicit re-sign verification share
   it. `get_wechat_app_path()` honors the session-bound target first; an invalid
   explicit binding never selects a different installation.
 - `core/monitor_result.py` owns catch-up outcome interpretation. Only the

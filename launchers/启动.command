@@ -304,7 +304,9 @@ ensure_wechat_signed() {
     fi
 
     echo "[2/3] 检测到微信需要重新授权..."
-    echo "  为了读取本地微信数据库，本项目需要对 WeChat.app 做 ad-hoc re-sign。"
+    echo "  为了读取本地微信数据库，本项目需要用本机稳定签名身份重签 WeChat.app。"
+    echo "  首次会自动创建自签证书（WGO WeChat Stable Identity），存入"
+    echo "  ~/Library/Keychains/wgo-wechat-identity.keychain-db，之后 macOS 会记住授权。"
     echo "  这是高影响操作：会修改下列 exact target 的签名，微信更新后可能失效。"
     echo "  Target: $app_path"
     echo ""
