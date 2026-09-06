@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Refresh observed WeChat keys; report source completeness separately."""
 from __future__ import annotations
+import argparse
 from dataclasses import dataclass
 import sys
 from pathlib import Path
@@ -44,7 +45,25 @@ def refresh_data_source() -> RefreshResult:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Refresh verified WeChat database keys.")
+    parser.add_argument(
+        "--allow-transient-wechat-source-read",
+        action="store_true",
+        help=(
+            "Explicitly allow this one short-lived process to read the protected "
+            "WeChat source; macOS may show one App Data consent prompt."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if not args.allow_transient_wechat_source_read:
+        print(
+            "已在读取 WeChat source 之前停止：请优先在长驻菜单 app 里点击「🔄 刷新数据源」。\n"
+            "只有确定要让这只短命 CLI 进程读取时，才加上 "
+            "--allow-transient-wechat-source-read；macOS 可能另外弹出一次 App Data 权限。",
+            file=sys.stderr,
+        )
+        return 2
     result = refresh_data_source()
     print("微信总结 数据源 key 验证")
     print(f"state: {result.status}")

@@ -245,7 +245,9 @@ cd we-groupchat-obsidian
 ./启动.command
 ```
 
-第一次运行或 `requirements.txt` 更新时，`启动.command` 会先询问是否创建/更新 `.venv` 并安装 dependencies；只有明确输入 `y` 才会继续，不同意则直接退出。项目是 source-distributed macOS menu-bar app，目前不提供已签名 installer、`.dmg` 或 bundled Python runtime。若 macOS 阻止打开 `.command` 文件，右键它，选择“打开”，再确认打开。
+第一次运行或 `requirements.txt` 更新时，`启动.command` 会先询问是否创建/更新 `.venv` 并安装 dependencies；只有明确输入 `y` 才会继续，不同意则直接退出。首次成功 setup 还会构建并 ad-hoc sign `dist/WeGroupchatObsidian.app` 这只本机 alias bundle，之后普通启动与新安装的 LaunchAgent 都复用它的稳定 bundle identity；启动器不会再回退成 `python app.py`。Alias bundle 仍依赖当前源码目录与 `.venv`，所以项目依然是 source-distributed macOS menu-bar app，目前不提供已签名 installer、`.dmg` 或 bundled Python runtime。若 macOS 阻止打开 `.command` 文件，右键它，选择“打开”，再确认打开。
+
+macOS 可能在每只长驻 menu-app process 第一次读取 WeChat App Data 时请求授权。普通 monitor、source guard 与 resource timer 都留在同一只 app 内，不会每个 interval 启动新 Python。默认 health 也不会 `stat` 受保护的 WeChat container。只有显式运行带 `--allow-transient-wechat-source-read` 的 maintenance CLI，才允许另一只短命进程读取 source；这类单次操作仍可能产生自己的一次系统授权窗。
 
 如果提示微信需要重新授权，请阅读终端说明后手动运行：
 
@@ -308,8 +310,8 @@ source install 与 LaunchAgent 继续使用。
 | `./启动.command` | 启动菜单栏应用 |
 | `./启动.command --setup-only` | 只检查环境和依赖，不启动 app |
 | `./launchers/配置关注推送.command` | 不依赖菜单栏，配置监控群聊、关注描述、AI Key 和 Obsidian 输出 |
-| `./launchers/健康检查.command` | 打印 redacted-by-default 状态；只有本地排查时才加 `--sensitive` |
-| `./launchers/刷新数据源.command` | 微信更新后刷新数据库 key，不需要找到菜单栏图标 |
+| `./launchers/健康检查.command` | 打印 redacted-by-default durable 状态；不会探测受保护的 WeChat container |
+| `./launchers/刷新数据源.command` | 微信更新后处理 exact-target 重签并打开稳定 app；随后在菜单点 `🔄 刷新数据源` |
 | `./launchers/历史总结到Obsidian.command` | 把历史消息按天总结并导出到 Obsidian |
 | `./launchers/整理Obsidian输出.command` | 只整理/重导出知识库 Markdown，不调用 AI |
 | `./launchers/安装自动启动.command` | 安装 macOS LaunchAgent 登录自启 |
@@ -481,21 +483,16 @@ App 与 CLI 共用这套 coverage classifier。为兼容现有 automation，`com
 心跳、后台错误和 Digest 通知；手动操作反馈与“测试系统通知”仍会显示。
 
 如果系统级通知一直不出现，先看 `./launchers/健康检查.command` 里的
-`Notification identity`。源码目录 + virtualenv 启动时，进程可能显示为
-`Python / org.python.python`；这种情况下 rumps 可以成功 schedule 通知，但
-macOS 可能不会给项目一个稳定的通知设置入口，也不一定弹 banner。正式 `.app`
-打包应使用 `io.github.indeliblevivi.we-groupchat-obsidian` 作为通知 bundle
-identity，并使用仓库里的 `resources/app_icon.icns`，避免通知中心显示 py2app
-默认的 Python 图标。
+`Notification identity`。当前普通 `启动.command` 会构建并复用
+`dist/WeGroupchatObsidian.app`，其 bundle ID 是
+`io.github.indeliblevivi.we-groupchat-obsidian`，并使用仓库里的
+`resources/app_icon.icns`；如果 health 仍显示 `Python / org.python.python`，
+说明正在运行旧 source-mode process，应先从旧菜单退出，再通过普通启动器打开稳定 app。
 
-如果想让登录自启直接走本地 `.app` 身份：
+新安装的登录自启同样会绑定这只本地 `.app`。若要写入 plist 并立即加载：
 
 ```bash
-.venv/bin/python -m pip install py2app
-# 如果这个 virtualenv 的 pip 不可用：
-# uv pip install --python .venv/bin/python py2app
-.venv/bin/python setup.py py2app --alias
-.venv/bin/python scripts/autostart.py install --app-bundle dist/WeGroupchatObsidian.app --load-now
+./launchers/安装自动启动.command --load-now
 ```
 
 这里的 `--alias` app 依赖当前源码目录和 `.venv`，适合本机 LaunchAgent /
@@ -565,9 +562,14 @@ Review Queue 文件保存在 `~/.we-groupchat-obsidian/review_queue/`；里面�
 不要手改 state：
 
 ```bash
-./launchers/补跑遗漏笔记.command          # 只读 audit
-./launchers/补跑遗漏笔记.command --apply  # 显式写入补跑
+./launchers/补跑遗漏笔记.command --allow-transient-wechat-source-read
+./launchers/补跑遗漏笔记.command --allow-transient-wechat-source-read --apply
 ```
+
+即使是 read-only pending audit 也会读取受保护的 WeChat source，因此必须显式给出
+`--allow-transient-wechat-source-read`。Flag 只授权这一只 maintenance process；
+macOS 仍可能为它显示一次 App Data 权限窗。没有 flag 时命令会在 load config 后、
+打开/`stat` source 之前退出。
 
 Monitor state 现在由 locked、revisioned、atomic store 持有。只有 state 文件真的不存在时
 才会初始化到 now；corrupt JSON、symlink 或 non-regular file 一律 fail closed。Canonical

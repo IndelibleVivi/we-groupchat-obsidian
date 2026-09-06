@@ -1,7 +1,9 @@
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from unittest.mock import patch
 from core.key_extractor import KeyRecoveryResult
-from scripts.refresh_data_source import refresh_data_source
+from scripts.refresh_data_source import main, refresh_data_source
 
 
 class RefreshDataSourceTests(unittest.TestCase):
@@ -41,3 +43,35 @@ class RefreshDataSourceTests(unittest.TestCase):
 
     def test_empty_fresh_result_cannot_claim_success(self):
         self.assertFalse(self.run_result(KeyRecoveryResult('fresh_verified',verified_count=1)).ok)
+
+    def test_cli_requires_explicit_transient_source_consent_before_refresh(self):
+        stderr = StringIO()
+        with patch("scripts.refresh_data_source.refresh_data_source") as refresh, \
+             redirect_stderr(stderr):
+            code = main([])
+
+        self.assertEqual(code, 2)
+        refresh.assert_not_called()
+        self.assertIn("--allow-transient-wechat-source-read", stderr.getvalue())
+
+    def test_cli_explicit_transient_source_consent_runs_refresh(self):
+        outcome = type(
+            "Outcome",
+            (),
+            {
+                "ok": True,
+                "status": "fresh_verified",
+                "message": "verified",
+                "reason": "",
+                "key_count": 1,
+                "missing_databases": [],
+            },
+        )()
+        with patch(
+            "scripts.refresh_data_source.refresh_data_source",
+            return_value=outcome,
+        ) as refresh:
+            code = main(["--allow-transient-wechat-source-read"])
+
+        self.assertEqual(code, 0)
+        refresh.assert_called_once_with()

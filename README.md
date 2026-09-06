@@ -289,9 +289,21 @@ cd we-groupchat-obsidian
 
 On the first run, or after `requirements.txt` changes, `启动.command` asks before
 creating/updating `.venv` and installing dependencies. It proceeds only after an
-explicit `y`; declining exits without installing anything. This is a
-source-distributed macOS menu-bar app, with no signed installer, `.dmg`, or
-bundled Python runtime.
+explicit `y`; declining exits without installing anything. A successful first
+setup also builds and ad-hoc signs the machine-local alias bundle at
+`dist/WeGroupchatObsidian.app`. Ordinary starts and newly installed LaunchAgents
+reuse that stable bundle identity; the launcher no longer falls back to
+`python app.py`. The alias bundle still depends on this checkout and its
+`.venv`, so this remains a source-distributed macOS menu-bar app with no signed
+installer, `.dmg`, or bundled Python runtime.
+
+macOS may request access when each long-lived menu-app process first reads
+WeChat App Data. The ordinary monitor, source guard, and resource timers stay
+inside that process instead of spawning a Python process per interval. Default
+health inspection does not `stat` the protected WeChat container. A separate
+short-lived maintenance process may read the source only when
+`--allow-transient-wechat-source-read` is explicit, and macOS may show that
+one-shot process its own consent prompt.
 
 If WeChat was updated or key extraction needs a fresh authorization:
 
@@ -359,8 +371,8 @@ entrypoint for existing source installs and LaunchAgents.
 | --- | --- |
 | `./启动.command` | Start the menu bar app |
 | `./launchers/配置关注推送.command` | Configure topic monitoring without using the menu bar UI |
-| `./launchers/健康检查.command` | Redacted-by-default health check; use `--sensitive` only for local debugging |
-| `./launchers/刷新数据源.command` | Refresh WeChat database keys after updates |
+| `./launchers/健康检查.command` | Redacted durable-state health check; it does not probe the protected WeChat container |
+| `./launchers/刷新数据源.command` | Handle any exact-target re-sign, open the stable app, then use `🔄 刷新数据源` in its menu |
 | `./launchers/历史总结到Obsidian.command` | Backfill historical summaries into Markdown |
 | `./launchers/整理Obsidian输出.command` | Re-export and organize Markdown notes |
 | `./launchers/安装自动启动.command` | Install LaunchAgent autostart |
@@ -598,21 +610,18 @@ them off does not stop monitoring, knowledge writes, or Daily Digest generation;
 manual action feedback and the explicit notification test remain available.
 
 If system notifications do not appear, check the `Notification identity` line
-in `./launchers/健康检查.command`. Source installs launched through a virtualenv can run as
-`Python / org.python.python`, which may schedule notifications without showing a
-stable app entry in macOS notification settings. A bundled `.app` build should
-use `io.github.indeliblevivi.we-groupchat-obsidian` as its notification bundle
-identity. The py2app build also uses `resources/app_icon.icns`, so macOS
-Notification Center shows the project icon instead of py2app's default Python icon.
+in `./launchers/健康检查.command`. Ordinary startup now builds and reuses
+`dist/WeGroupchatObsidian.app`, whose bundle ID is
+`io.github.indeliblevivi.we-groupchat-obsidian` and whose icon comes from
+`resources/app_icon.icns`. If health still reports
+`Python / org.python.python`, an old source-mode process is still running; exit
+that menu process and reopen WGO through the ordinary launcher.
 
-For a local app-bundle LaunchAgent identity:
+New autostart installs bind to the same local app bundle. To write the plist and
+load it immediately:
 
 ```bash
-.venv/bin/python -m pip install py2app
-# If this virtualenv's pip is unavailable:
-# uv pip install --python .venv/bin/python py2app
-.venv/bin/python setup.py py2app --alias
-.venv/bin/python scripts/autostart.py install --app-bundle dist/WeGroupchatObsidian.app --load-now
+./launchers/安装自动启动.command --load-now
 ```
 
 The `--alias` app points back to this source checkout and its `.venv`; it is
@@ -648,11 +657,15 @@ The topic monitor is designed to preserve useful signal without turning every in
 If WeChat or the provider was unavailable and the monitor has a checkpointed backlog, use the guarded catch-up entry instead of advancing state by hand:
 
 ```bash
-./launchers/补跑遗漏笔记.command          # read-only pending audit
-./launchers/补跑遗漏笔记.command --apply  # pause, back up, drain, rebuild, validate, restore
+./launchers/补跑遗漏笔记.command --allow-transient-wechat-source-read
+./launchers/补跑遗漏笔记.command --allow-transient-wechat-source-read --apply
 ```
 
-Write mode requires the explicit `--apply` flag. It refuses chats without recoverable state and uses the normal paginated `TopicMonitor` path. Monitor state is a locked, revisioned atomic file: only a truly absent file initializes to now; corrupt JSON, symlinks, and non-regular files fail closed. Canonical progress is `source_cursors` per chat and logical-shard generation, using opaque raw-row tokens; `last_checked_ts` remains only a derived compatibility/diagnostic value. Each bounded batch reads every shard under one complete inventory, merges raw envelopes by `create_time` then `source_message_id`, and advances only rows actually consumed. Here “complete source” means the expected logical-shard inventory is complete, every generation remains the one bound to the batch, and all required reads succeed. Filtered/system rows advance the source cursor but never enter the AI prompt; `source_advanced_no_visible` is therefore progress, while `no_messages` means verified raw EOF. AI failure, source-generation change, or stale state revision commits no cursor. A retryable provider failure CAS-writes only a content-free failure count/code/timestamp and bounded backoff deadline against the revision that was read; source cursors, inventory bindings and checkpoints remain unchanged, and an interval inside that backoff makes no provider call. If a Knowledge event commits before a state CAS conflict, the retry reuses its source-batch identity instead of inserting a duplicate canonical event; if its managed topic Markdown is missing, the same reuse repairs that projection and the date indexes without changing event identity. Catch-up stops the managed LaunchAgent, then must acquire the same menu-app singleton lock before any backup, state, database, or projection write. `menu_app_active` means a manually started app still owns that lock, so catch-up writes no canonical data. With ownership established, it stores a private partial-recovery backup under `~/.we-groupchat-obsidian/backups/monitor-catch-up/`, drains to verified raw EOF under an unchanged complete inventory, rebuilds affected source-date indexes and historical Daily Digests, validates SQLite/FTS/hash parity, and durably writes a provisional reconciliation receipt while still holding the lock. It then releases ownership, restores a previously loaded LaunchAgent, and atomically finalizes the same `run_id` receipt with the observed restore result.
+Even the read-only pending audit reads the protected WeChat source, so
+`--allow-transient-wechat-source-read` is required for audit and apply. The flag
+authorizes only that maintenance process; macOS may still show it one App Data
+consent prompt. Without the flag, the command exits before opening or `stat`ing
+the source. Write mode additionally requires the explicit `--apply` flag. It refuses chats without recoverable state and uses the normal paginated `TopicMonitor` path. Monitor state is a locked, revisioned atomic file: only a truly absent file initializes to now; corrupt JSON, symlinks, and non-regular files fail closed. Canonical progress is `source_cursors` per chat and logical-shard generation, using opaque raw-row tokens; `last_checked_ts` remains only a derived compatibility/diagnostic value. Each bounded batch reads every shard under one complete inventory, merges raw envelopes by `create_time` then `source_message_id`, and advances only rows actually consumed. Here “complete source” means the expected logical-shard inventory is complete, every generation remains the one bound to the batch, and all required reads succeed. Filtered/system rows advance the source cursor but never enter the AI prompt; `source_advanced_no_visible` is therefore progress, while `no_messages` means verified raw EOF. AI failure, source-generation change, or stale state revision commits no cursor. A retryable provider failure CAS-writes only a content-free failure count/code/timestamp and bounded backoff deadline against the revision that was read; source cursors, inventory bindings and checkpoints remain unchanged, and an interval inside that backoff makes no provider call. If a Knowledge event commits before a state CAS conflict, the retry reuses its source-batch identity instead of inserting a duplicate canonical event; if its managed topic Markdown is missing, the same reuse repairs that projection and the date indexes without changing event identity. Catch-up stops the managed LaunchAgent, then must acquire the same menu-app singleton lock before any backup, state, database, or projection write. `menu_app_active` means a manually started app still owns that lock, so catch-up writes no canonical data. With ownership established, it stores a private partial-recovery backup under `~/.we-groupchat-obsidian/backups/monitor-catch-up/`, drains to verified raw EOF under an unchanged complete inventory, rebuilds affected source-date indexes and historical Daily Digests, validates SQLite/FTS/hash parity, and durably writes a provisional reconciliation receipt while still holding the lock. It then releases ownership, restores a previously loaded LaunchAgent, and atomically finalizes the same `run_id` receipt with the observed restore result.
 
 The catch-up backup currently contains only canonical SQLite plus per-chat checkpoints. It is useful for recovery evidence, but it is not a complete rollback bundle: Review Queue JSONL and Obsidian Markdown/index/Digest projections are not copied. A failed run may therefore retain successfully committed pages before the LaunchAgent resumes. Do not describe this backup as full rollback until a separate recovery policy covers every managed surface.
 
@@ -661,7 +674,7 @@ Catch-up uses a page-level partial-commit contract. Every `--apply` invocation w
 - `complete / drained`: every selected chat reached `no_messages` with `source_eof=true` under an unchanged complete inventory, projections and canonical validation passed, and the final receipt proves that a previously loaded LaunchAgent was restored after lock release (or that none was loaded).
 - `partial / drain_complete_restore_pending`: canonical drain and validation completed, but the durable receipt is still provisional and does not yet prove LaunchAgent restoration. This can remain after interruption between lock release and finalization; it is never terminal success.
 - `partial / launch_agent_restore_failed`: canonical work may already be committed, but restoration was attempted and failed. The final receipt records that failure and the command exits nonzero; inspect or repair the runtime before treating catch-up as closed.
-- `partial / resume_required`: at least one page or managed projection committed, but a chat was blocked or a later operation failed. When `resume_supported` is `true`, rerun `./launchers/补跑遗漏笔记.command --apply`; each chat continues from its committed checkpoint.
+- `partial / resume_required`: at least one page or managed projection committed, but a chat was blocked or a later operation failed. When `resume_supported` is `true`, rerun the same command with both `--allow-transient-wechat-source-read` and `--apply`; each chat continues from its committed checkpoint.
 - `failed / no_progress`: no monitor page committed. Inspect the receipt's error type/status and runtime state before retrying.
 - `failed / menu_app_active`: another menu app still owns the singleton lock. No backup, monitor, database, or projection write occurred; close that instance deliberately before retrying maintenance.
 - `complete / no_op`: the audit found zero pending messages, so no backup, write, or LaunchAgent switch occurred.
