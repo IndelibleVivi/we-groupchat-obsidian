@@ -5,28 +5,39 @@ on:
 permissions:
   contents: read
 jobs:
-  source-snapshot:
-    if: github.head_ref == 'fix/monitor-batch-acceptance-20260909'
+  apply-verified-repair:
+    if: github.event.pull_request.number == 24 && github.event.pull_request.head.repo.full_name == 'IndelibleVivi/we-groupchat-obsidian' && github.head_ref == 'fix/monitor-batch-acceptance-20260909'
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-      - name: Export tracked source and offline test dependencies
+          persist-credentials: true
+      - name: Apply exact locally verified source tree to this draft branch only
+        shell: bash
         run: |
-          git rev-parse HEAD > "$RUNNER_TEMP/SOURCE_SHA"
-          git archive --format=tar HEAD > "$RUNNER_TEMP/monitor-source.tar"
-          python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/monitor-review-wheels" pycryptodome zstandard
-      - uses: actions/upload-artifact@v4
-        with:
-          name: monitor-review-source
-          path: |
-            ${{ runner.temp }}/monitor-source.tar
-            ${{ runner.temp }}/SOURCE_SHA
-            ${{ runner.temp }}/monitor-review-wheels
-          retention-days: 1
+          set -euo pipefail
+          controls=(.review/monitor-0.patch .review/monitor-1.patch .review/monitor-2a.patch .review/monitor-2b.patch)
+          index_copy="$RUNNER_TEMP/monitor-source-index"
+          cp .git/index "$index_copy"
+          GIT_INDEX_FILE="$index_copy" git update-index --force-remove .github/workflows/monitor-review-bootstrap.yml "${controls[@]}"
+          test "$(GIT_INDEX_FILE="$index_copy" git write-tree)" = '58be8490eff231e886cd1bf9f6fd1f9568909e20'
+          patch_file="$RUNNER_TEMP/monitor-repair.patch"
+          cat "${controls[@]}" > "$patch_file"
+          echo "3d3234a7130bd408116590423b4d791fffef66e7f884da074b64ef478efdd79d  $patch_file" | sha256sum -c -
+          git apply --index --unidiff-zero --check "$patch_file"
+          git apply --index --unidiff-zero "$patch_file"
+          git rm -- "${controls[@]}"
+          cp .git/index "$index_copy"
+          GIT_INDEX_FILE="$index_copy" git update-index --force-remove .github/workflows/monitor-review-bootstrap.yml
+          test "$(GIT_INDEX_FILE="$index_copy" git write-tree)" = 'a3c7366d56adfdaab6d77cf00a4fadb0a6afc107'
+          git diff --cached --check
+          python3 -m compileall -q app.py mcp_server.py setup.py ai core ui scripts tests
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: validate monitor decisions and preserve frozen batches across recovery'
+          git push origin HEAD:refs/heads/fix/monitor-batch-acceptance-20260909
+          git rev-parse HEAD

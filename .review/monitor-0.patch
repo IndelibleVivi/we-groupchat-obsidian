@@ -1,0 +1,362 @@
+diff --git a/core/monitor.py b/core/monitor.py
+index 42915ef..56cdba4 100644
+--- a/core/monitor.py
++++ b/core/monitor.py
+@@ -18,0 +19 @@ from .knowledge import (
++    KNOWLEDGE_DB,
+@@ -35,0 +37,3 @@ from .monitor_source import (
++    freeze_monitor_source_batch,
++    pending_monitor_source_batch,
++    verify_pending_monitor_source_batch,
+@@ -46,0 +51,9 @@ HITS_DIR = os.path.join(DATA_DIR, "monitor_hits")
++class MonitorDecisionError(RuntimeError):
++    """Content-free failure at the provider decision acceptance boundary."""
++
++    code = "ai_invalid_response"
++
++    def __init__(self):
++        super().__init__(self.code)
++
++
+@@ -73,0 +87 @@ def reset_state_to_now(path=STATE_FILE, now_func=time.time):
++            "pending_source_batch",
+@@ -124,0 +139,9 @@ class TopicMonitor:
++        if dry_run:
++            return self._check_once(dry_run=True)
++        try:
++            with self.state_store.execution_lock():
++                return self._check_once(dry_run=False)
++        except MonitorStateError as exc:
++            return self._state_error_result(exc)
++
++    def _check_once(self, dry_run=False):
+@@ -173,0 +197,10 @@ class TopicMonitor:
++        pending = None
++        if not dry_run:
++            try:
++                pending = pending_monitor_source_batch(state, self._batch_policy_fingerprint())
++            except MonitorSourceError as exc:
++                return self._source_error_result(exc)
++            if pending is not None and not source_cursor_mode:
++                return {"status": "monitor_pending_source_unavailable",
++                        "message": "monitor_pending_source_unavailable"}
++
+@@ -185,0 +219,2 @@ class TopicMonitor:
++                if pending is not None:
++                    verify_monitor_source_inventory(self.db, pending["inventory_digest"], 0)
+@@ -190 +225 @@ class TopicMonitor:
+-                    raw_limit=max_messages,
++                    raw_limit=pending["raw_count"] if pending else max_messages,
+@@ -193,0 +229,5 @@ class TopicMonitor:
++            if pending is not None:
++                try:
++                    verify_pending_monitor_source_batch(pending, source_batch)
++                except MonitorSourceError as exc:
++                    return self._source_error_result(exc)
+@@ -220,5 +259,0 @@ class TopicMonitor:
+-            context_messages = self._source_cursor_context_messages(
+-                state,
+-                messages,
+-                max_messages,
+-            )
+@@ -234,0 +270,16 @@ class TopicMonitor:
++            context_messages = self._source_cursor_context_messages(
++                state,
++                messages,
++                max_messages,
++            )
++            if pending is None:
++                # Publish intent before the provider runs. It changes no source
++                # cursor and is acknowledged with the eventual cursor CAS.
++                try:
++                    state["pending_source_batch"] = freeze_monitor_source_batch(
++                        source_batch, state, self._batch_policy_fingerprint(),
++                    )
++                    snapshot = self.state_store.commit(snapshot.revision, state)
++                    state = dict(snapshot.data)
++                except MonitorStateError as exc:
++                    return self._state_error_result(exc)
+@@ -311 +362 @@ class TopicMonitor:
+-            if not dry_run and is_retryable_ai_error(exc):
++            if not dry_run and (isinstance(exc, MonitorDecisionError) or is_retryable_ai_error(exc)):
+@@ -314,0 +366,6 @@ class TopicMonitor:
++            if isinstance(exc, MonitorDecisionError):
++                return {
++                    "status": exc.code,
++                    "message": "AI 返回格式无效；未推进消息游标，稍后重试",
++                    "error_code": exc.code,
++                }
+@@ -456,0 +514 @@ class TopicMonitor:
++            state.pop("pending_source_batch", None)
+@@ -542,0 +601,2 @@ class TopicMonitor:
++        if isinstance(error, MonitorDecisionError):
++            return error.code
+@@ -1196 +1256,3 @@ class TopicMonitor:
+-                return self._evaluate(messages, messages_text, topic, context_text)
++                return self._validate_decision(
++                    self._evaluate(messages, messages_text, topic, context_text)
++                )
+@@ -1200 +1262,3 @@ class TopicMonitor:
+-                if attempt >= attempts or not is_retryable_ai_error(e):
++                if attempt >= attempts or not (
++                    isinstance(e, MonitorDecisionError) or is_retryable_ai_error(e)
++                ):
+@@ -1391,0 +1456,88 @@ lead_key 用稳定短语描述这条资源线索，便于去重；没有 resourc
++    def _batch_policy_fingerprint(self):
++        # Provider/model changes are allowed for recovery. Changing interest,
++        # chat or canonical destination must not silently reinterpret an intent.
++        basis = {
++            "chat": str(self.config.get("monitor_chat_username") or "").strip(),
++            "interest": str(self.config.get("monitor_topic") or "").strip(),
++            "knowledge": self._knowledge_enabled(),
++            "knowledge_db": os.path.abspath(os.path.expanduser(
++                self.config.get("monitor_knowledge_db") or KNOWLEDGE_DB
++            )) if self._knowledge_enabled() else "",
++        }
++        return hashlib.sha256(json.dumps(
++            basis, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
++        ).encode("utf-8")).hexdigest()
++
++    @staticmethod
++    def _validate_decision(value):
++        """Admit an explicit decision, never coerce corruption into a negative.
++
++        The legacy summary and items body forms remain supported. A standalone
++        JSON code fence is harmless; prose containing a JSON object is not an
++        accepted response. Diagnostics deliberately contain no provider text.
++        """
++        def unique_object(pairs):
++            result = {}
++            for key, item in pairs:
++                if key in result:
++                    raise MonitorDecisionError()
++                result[key] = item
++            return result
++
++        def reject_constant(_value):
++            raise MonitorDecisionError()
++
++        if isinstance(value, str):
++            text = value.strip()
++            fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.S)
++            if fenced:
++                text = fenced.group(1)
++            try:
++                value = json.loads(
++                    text, object_pairs_hook=unique_object,
++                    parse_constant=reject_constant,
++                )
++            except (ValueError, TypeError, RecursionError):
++                raise MonitorDecisionError() from None
++        if (
++            not isinstance(value, dict)
++            or type(value.get("match")) is not bool
++            or type(value.get("score")) is not int
++            or not 0 <= value["score"] <= 100
++            or (value["match"] and value["score"] < 70)
++        ):
++            raise MonitorDecisionError()
++        for key in (
++            "title", "digest", "summary", "topic_key", "category", "reason",
++            "event_type", "status_hint", "resource_status", "lead_key",
++        ):
++            if key in value and not isinstance(value[key], str):
++                raise MonitorDecisionError()
++        for key in ("entities", "semantic_tags", "key_facts", "links"):
++            if key in value and (
++                not isinstance(value[key], list)
++                or any(not isinstance(item, str) for item in value[key])
++            ):
++                raise MonitorDecisionError()
++        if "resource_lead" in value and type(value["resource_lead"]) is not bool:
++            raise MonitorDecisionError()
++        items = value.get("items", [])
++        if not isinstance(items, list):
++            raise MonitorDecisionError()
++        for item in items:
++            if isinstance(item, str):
++                continue
++            if not isinstance(item, dict) or any(
++                key in item and not isinstance(item[key], str)
++                for key in ("time", "summary", "text")
++            ):
++                raise MonitorDecisionError()
++        bodies = [value.get("digest", ""), value.get("summary", "")]
++        bodies.extend(
++            item if isinstance(item, str) else item.get("summary") or item.get("text", "")
++            for item in items
++        )
++        if value["match"] and not any(body.strip() for body in bodies):
++            raise MonitorDecisionError()
++        return value
++
+@@ -1393,4 +1545 @@ lead_key 用稳定短语描述这条资源线索，便于去重；没有 resourc
+-        if isinstance(decision, str):
+-            decision = self._parse_json(decision)
+-        if not isinstance(decision, dict):
+-            decision = {}
++        decision = self._validate_decision(decision)
+diff --git a/core/monitor_source.py b/core/monitor_source.py
+index d08a3d3..0f0b136 100644
+--- a/core/monitor_source.py
++++ b/core/monitor_source.py
+@@ -429,0 +430,108 @@ def read_monitor_source_batch(
++
++
++_PENDING_SCHEMA = "we-groupchat-obsidian.monitor-pending-batch.v1"
++_PROGRESS_FIELDS = (
++    "last_checked_ts", "source_cursors", "source_inventory_digest",
++    "last_checked_message_hash_ts", "last_checked_message_hashes",
++)
++
++
++def _fingerprint(value) -> str:
++    return hashlib.sha256(json.dumps(
++        value, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
++        allow_nan=False,
++    ).encode("utf-8")).hexdigest()
++
++
++def _progress_fingerprint(state: dict) -> str:
++    # Failure metadata and unrelated state revisions do not change the source
++    # position. A reset or a different consumer's cursor advancement does.
++    return _fingerprint({key: state.get(key) for key in _PROGRESS_FIELDS})
++
++
++def _batch_content_fingerprint(batch: MonitorSourceBatch) -> str:
++    # No source bodies are persisted. Detect in-place content/resource changes
++    # before re-evaluating an uncommitted batch; display aliases are not identity.
++    return _fingerprint([
++        {
++            "id": message.get("source_message_id"),
++            "timestamp": message.get("timestamp"),
++            "text": message.get("text") or message.get("content") or "",
++            "resources": message.get("resources") or [],
++        }
++        for message in batch.raw_messages
++    ])
++
++
++def freeze_monitor_source_batch(batch, state, policy_fingerprint):
++    """Describe one exact pending batch, without copying message bodies to state."""
++    pending = {
++        "schema": _PENDING_SCHEMA,
++        "checkpoint_fingerprint": _progress_fingerprint(state),
++        "policy_fingerprint": str(policy_fingerprint),
++        "inventory_digest": batch.inventory_digest,
++        "source_batch_id": batch.source_batch_id,
++        "raw_count": batch.raw_count,
++        "source_message_ids": [
++            str(message["source_message_id"]) for message in batch.raw_messages
++        ],
++        "content_fingerprint": _batch_content_fingerprint(batch),
++        "source_cursors": batch.source_cursors,
++    }
++    pending["checksum"] = _fingerprint(pending)
++    return pending
++
++
++def pending_monitor_source_batch(state, policy_fingerprint=None):
++    """Validate the frozen descriptor; unknown/corrupt intents never reset to now."""
++    if "pending_source_batch" not in state:
++        return None
++    pending = state["pending_source_batch"]
++    try:
++        if not isinstance(pending, dict) or pending.get("schema") != _PENDING_SCHEMA:
++            raise ValueError
++        checksum = pending.get("checksum")
++        if checksum != _fingerprint({k: v for k, v in pending.items() if k != "checksum"}):
++            raise ValueError
++        count = pending["raw_count"]
++        ids = pending["source_message_ids"]
++        if (
++            type(count) is not int or count < 1
++            or not isinstance(ids, list) or len(ids) != count
++            or any(not isinstance(value, str) or not value for value in ids)
++            or len(set(ids)) != count
++            or not isinstance(pending["source_batch_id"], str)
++            or not pending["source_batch_id"].startswith("wgbatch_")
++            or not all(
++                isinstance(pending[key], str) and len(pending[key]) == 64
++                and all(char in "0123456789abcdef" for char in pending[key])
++                for key in (
++                    "checkpoint_fingerprint", "policy_fingerprint",
++                    "inventory_digest", "content_fingerprint",
++                )
++            )
++            or not _normalized_state_cursors(pending["source_cursors"])
++        ):
++            raise ValueError
++    except (KeyError, TypeError, ValueError, OverflowError, MonitorSourceError) as exc:
++        raise MonitorSourceError("monitor_pending_batch_corrupt") from exc
++    if pending["checkpoint_fingerprint"] != _progress_fingerprint(state):
++        raise MonitorSourceError("monitor_pending_checkpoint_changed")
++    if policy_fingerprint is not None and pending["policy_fingerprint"] != policy_fingerprint:
++        raise MonitorSourceError("monitor_pending_policy_changed")
++    return pending
++
++
++def verify_pending_monitor_source_batch(pending, batch):
++    """Refuse to substitute new messages or a changed source for pending work."""
++    if (
++        pending["inventory_digest"] != batch.inventory_digest
++        or pending["source_batch_id"] != batch.source_batch_id
++        or pending["raw_count"] != batch.raw_count
++        or pending["source_message_ids"] != [
++            str(message["source_message_id"]) for message in batch.raw_messages
++        ]
++        or pending["source_cursors"] != batch.source_cursors
++        or pending["content_fingerprint"] != _batch_content_fingerprint(batch)
++    ):
++        raise MonitorSourceError("monitor_pending_batch_changed")
+diff --git a/core/monitor_state.py b/core/monitor_state.py
+index 911887f..184cb22 100644
+--- a/core/monitor_state.py
++++ b/core/monitor_state.py
+@@ -3,0 +4 @@ from __future__ import annotations
++from contextlib import contextmanager
+@@ -12 +13 @@ from .config import ensure_private_dir, ensure_private_file
+-from .platform import LockMode, create_file_lock
++from .platform import LockBusy, LockMode, create_file_lock
+@@ -15,0 +17 @@ MONITOR_STATE_SCHEMA = "we-groupchat-obsidian.monitor-state.v1"
++MONITOR_PENDING_STATE_SCHEMA = "we-groupchat-obsidian.monitor-state.v2"
+@@ -109,0 +112,2 @@ class MonitorStateStore:
++            if "pending_source_batch" in payload:
++                raise MonitorStateError("monitor_state_corrupt")
+@@ -112 +116,4 @@ class MonitorStateStore:
+-            payload.get("schema") != MONITOR_STATE_SCHEMA
++            payload.get("schema") not in {MONITOR_STATE_SCHEMA, MONITOR_PENDING_STATE_SCHEMA}
++            or ("pending_source_batch" in payload) != (
++                payload.get("schema") == MONITOR_PENDING_STATE_SCHEMA
++            )
+@@ -155 +162,6 @@ class MonitorStateStore:
+-                "schema": MONITOR_STATE_SCHEMA,
++                # Old readers reject v2 rather than ignoring pending work.
++                # Once acknowledged, ordinary state remains downgrade-readable.
++                "schema": (
++                    MONITOR_PENDING_STATE_SCHEMA
++                    if "pending_source_batch" in data else MONITOR_STATE_SCHEMA
++                ),
+@@ -210,0 +223,22 @@ class MonitorStateStore:
++    @contextmanager
++    def execution_lock(self):
++        """Serialize a whole monitor run without holding the checkpoint lock.
++
++        A second worker may inspect state, but may not replay the same pending
++        provider request. Process exit releases ownership; there is no lease
++        timeout that could expire while a provider is still responding.
++        """
++        try:
++            ensure_private_dir(os.path.dirname(self.path))
++            handle = self._lock_service().acquire(
++                self.path + ".run.lock", mode=LockMode.EXCLUSIVE, blocking=False,
++            )
++        except LockBusy as exc:
++            raise MonitorStateError("monitor_worker_busy") from exc
++        except OSError as exc:
++            raise MonitorStateError("monitor_worker_lock_unavailable") from exc
++        try:
++            yield
++        finally:
++            handle.close()
++

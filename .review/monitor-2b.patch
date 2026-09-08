@@ -1,0 +1,150 @@
+diff --git a/tests/test_app_monitor_resilience.py b/tests/test_app_monitor_resilience.py
+index 737ab06..ed24193 100644
+--- a/tests/test_app_monitor_resilience.py
++++ b/tests/test_app_monitor_resilience.py
+@@ -56,0 +57,27 @@ class AppMonitorResilienceTests(unittest.TestCase):
++    def test_invalid_response_is_reported_as_failure_without_erasing_error_episode(self):
++        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
++        app._monitor_lock = threading.Lock()
++        app._monitor_last_error = ""
++        app.config = {"background_notifications_enabled": True}
++        app.db = RefreshingDB()
++        app._monitor_chats = lambda: [{"username": "fixture@chatroom", "name": "Synthetic"}]
++        with patch("app.TopicMonitor") as monitor, patch("app._notify") as notify:
++            monitor.return_value.check_once.side_effect = [
++                {"status": "ai_invalid_response"},
++                {"status": "ai_backoff"},
++                {"status": "ai_invalid_response"},
++            ]
++            app._run_monitor_check()
++            app._run_monitor_check()
++            app._run_monitor_check()
++        self.assertIn("ai_invalid_response", app._monitor_last_error)
++        self.assertEqual(notify.call_count, 1)
++
++    def test_pending_batch_block_and_busy_have_distinct_result_semantics(self):
++        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
++        app.config = {}
++        app._monitor_last_error = ""
++        with patch("app._notify"):
++            self.assertIs(app._handle_monitor_result({"status": "monitor_pending_policy_changed"}), False)
++            self.assertIsNone(app._handle_monitor_result({"status": "monitor_worker_busy"}))
++
+diff --git a/tests/test_monitor.py b/tests/test_monitor.py
+index 1445995..837ed25 100644
+--- a/tests/test_monitor.py
++++ b/tests/test_monitor.py
+@@ -317 +317 @@ class TopicMonitorTests(unittest.TestCase):
+-        monitor = self.monitor(db, lambda prompt, *_: seen_prompt.append(prompt) or {"match": False})
++        monitor = self.monitor(db, lambda prompt, *_: seen_prompt.append(prompt) or {"match": False, "score": 0})
+@@ -447 +447 @@ class TopicMonitorTests(unittest.TestCase):
+-            lambda *_: {"match": True, "score": 95, "topic_key": "dry"},
++            lambda *_: {"match": True, "score": 95, "topic_key": "dry", "summary": "Synthetic dry run"},
+@@ -668 +668 @@ class TopicMonitorTests(unittest.TestCase):
+-            lambda *_: {"match": False},
++            lambda *_: {"match": False, "score": 0},
+@@ -692 +692 @@ class TopicMonitorTests(unittest.TestCase):
+-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
++        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
+@@ -732 +732 @@ class TopicMonitorTests(unittest.TestCase):
+-            lambda *_: {"match": False},
++            lambda *_: {"match": False, "score": 0},
+@@ -748 +748 @@ class TopicMonitorTests(unittest.TestCase):
+-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
++        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
+@@ -1228 +1228 @@ class TopicMonitorTests(unittest.TestCase):
+-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
++        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
+@@ -1246 +1246 @@ class TopicMonitorTests(unittest.TestCase):
+-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
++        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
+@@ -1279 +1279 @@ class TopicMonitorTests(unittest.TestCase):
+-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
++        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
+@@ -1304 +1304 @@ class TopicMonitorTests(unittest.TestCase):
+-            ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {"match": False},
++            ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {"match": False, "score": 0},
+@@ -1332 +1332 @@ class TopicMonitorTests(unittest.TestCase):
+-            ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {"match": False},
++            ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {"match": False, "score": 0},
+@@ -1365,0 +1366 @@ class TopicMonitorTests(unittest.TestCase):
++                "score": 0,
+diff --git a/tests/test_monitor_source.py b/tests/test_monitor_source.py
+index 7cf4a20..5d62bbc 100644
+--- a/tests/test_monitor_source.py
++++ b/tests/test_monitor_source.py
+@@ -608 +608,6 @@ class MonitorSourceCursorTests(unittest.TestCase):
+-        self.assertEqual(Path(self.state_file).read_bytes(), original)
++        after = load_state(self.state_file)
++        self.assertEqual(after["last_checked_ts"], 10)
++        self.assertNotIn("source_cursors", after)
++        # A pre-provider intent survives, but no source cursor was advanced.
++        self.assertIn("pending_source_batch", after)
++        self.assertNotIn("ai_failure_count", after)
+diff --git a/tests/test_monitor_state.py b/tests/test_monitor_state.py
+index 2c078ac..905b043 100644
+--- a/tests/test_monitor_state.py
++++ b/tests/test_monitor_state.py
+@@ -12,0 +13 @@ from core.monitor_state import (
++    MONITOR_PENDING_STATE_SCHEMA,
+@@ -29,0 +31,10 @@ def _race_commit(path, value, ready_queue, start_event, result_queue):
++def _hold_execution_lock(path, ready, release):
++    from core.platform import PlatformName, create_file_lock
++    selected = PlatformName.WINDOWS if os.name == "nt" else PlatformName.MACOS
++    store = MonitorStateStore(path, file_lock=create_file_lock(selected))
++    with store.execution_lock():
++        ready.set()
++        release.wait(10)
++        os._exit(0)  # Deliberate synthetic crash: no context-manager cleanup.
++
++
+@@ -97,0 +109,23 @@ class MonitorStateStoreTests(unittest.TestCase):
++    def test_pending_schema_blocks_old_readers_until_acknowledged(self):
++        snapshot = self.store.initialize_if_absent({
++            "last_checked_ts": 10, "pending_source_batch": {"fixture": True},
++        })
++        payload = json.loads(self.path.read_text())
++        self.assertEqual(payload["schema"], MONITOR_PENDING_STATE_SCHEMA)
++        self.assertNotEqual(payload["schema"], MONITOR_STATE_SCHEMA)
++        # The pre-change reader accepts exactly MONITOR_STATE_SCHEMA.
++        self.assertTrue(snapshot.data["pending_source_batch"])
++        self.store.update(lambda state: {key: value for key, value in state.items()
++                                         if key != "pending_source_batch"})
++        self.assertEqual(json.loads(self.path.read_text())["schema"], MONITOR_STATE_SCHEMA)
++
++    def test_v1_or_unversioned_state_cannot_hide_pending_work(self):
++        for schema in (None, MONITOR_STATE_SCHEMA):
++            with self.subTest(schema=schema):
++                payload = {"last_checked_ts": 10, "pending_source_batch": {"fixture": True}}
++                if schema:
++                    payload.update(schema=schema, revision=1)
++                self.path.write_text(json.dumps(payload))
++                with self.assertRaises(MonitorStateError):
++                    self.store.read()
++
+@@ -127,0 +162 @@ class MonitorStateStoreTests(unittest.TestCase):
++            "pending_source_batch": {"fixture": "explicitly-reset"},
+@@ -134,0 +170 @@ class MonitorStateStoreTests(unittest.TestCase):
++        self.assertNotIn("pending_source_batch", snapshot.data)
+@@ -138,0 +175,21 @@ class MonitorStateStoreTests(unittest.TestCase):
++    def test_execution_lock_excludes_another_process_and_survives_owner_exit(self):
++        context = multiprocessing.get_context("spawn")
++        ready, release = context.Event(), context.Event()
++        process = context.Process(target=_hold_execution_lock, args=(str(self.path), ready, release))
++        process.start()
++        try:
++            self.assertTrue(ready.wait(10))
++            with self.assertRaises(MonitorStateError) as caught:
++                with self.store.execution_lock():
++                    self.fail("overlapping ownership")
++            self.assertEqual(caught.exception.code, "monitor_worker_busy")
++        finally:
++            release.set()
++            process.join(10)
++            if process.is_alive():
++                process.terminate()
++                process.join(5)
++        self.assertEqual(process.exitcode, 0)
++        with self.store.execution_lock():
++            pass
++
