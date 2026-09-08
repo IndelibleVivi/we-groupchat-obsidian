@@ -427,3 +427,111 @@ def read_monitor_source_batch(
         last_checked_ts=last_checked_ts,
         source_batch_id=_batch_identity(username, consumed) if consumed else "",
     )
+
+
+_PENDING_SCHEMA = "we-groupchat-obsidian.monitor-pending-batch.v1"
+_PROGRESS_FIELDS = (
+    "last_checked_ts", "source_cursors", "source_inventory_digest",
+    "last_checked_message_hash_ts", "last_checked_message_hashes",
+)
+
+
+def _fingerprint(value) -> str:
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def _progress_fingerprint(state: dict) -> str:
+    # Failure metadata and unrelated state revisions do not change the source
+    # position. A reset or a different consumer's cursor advancement does.
+    return _fingerprint({key: state.get(key) for key in _PROGRESS_FIELDS})
+
+
+def _batch_content_fingerprint(batch: MonitorSourceBatch) -> str:
+    # No source bodies are persisted. Detect in-place content/resource changes
+    # before re-evaluating an uncommitted batch; display aliases are not identity.
+    return _fingerprint([
+        {
+            "id": message.get("source_message_id"),
+            "timestamp": message.get("timestamp"),
+            "text": message.get("text") or message.get("content") or "",
+            "resources": message.get("resources") or [],
+        }
+        for message in batch.raw_messages
+    ])
+
+
+def freeze_monitor_source_batch(batch, state, policy_fingerprint):
+    """Describe one exact pending batch, without copying message bodies to state."""
+    pending = {
+        "schema": _PENDING_SCHEMA,
+        "checkpoint_fingerprint": _progress_fingerprint(state),
+        "policy_fingerprint": str(policy_fingerprint),
+        "inventory_digest": batch.inventory_digest,
+        "source_batch_id": batch.source_batch_id,
+        "raw_count": batch.raw_count,
+        "source_message_ids": [
+            str(message["source_message_id"]) for message in batch.raw_messages
+        ],
+        "content_fingerprint": _batch_content_fingerprint(batch),
+        "source_cursors": batch.source_cursors,
+    }
+    pending["checksum"] = _fingerprint(pending)
+    return pending
+
+
+def pending_monitor_source_batch(state, policy_fingerprint=None):
+    """Validate the frozen descriptor; unknown/corrupt intents never reset to now."""
+    if "pending_source_batch" not in state:
+        return None
+    pending = state["pending_source_batch"]
+    try:
+        if not isinstance(pending, dict) or pending.get("schema") != _PENDING_SCHEMA:
+            raise ValueError
+        checksum = pending.get("checksum")
+        if checksum != _fingerprint({k: v for k, v in pending.items() if k != "checksum"}):
+            raise ValueError
+        count = pending["raw_count"]
+        ids = pending["source_message_ids"]
+        if (
+            type(count) is not int or count < 1
+            or not isinstance(ids, list) or len(ids) != count
+            or any(not isinstance(value, str) or not value for value in ids)
+            or len(set(ids)) != count
+            or not isinstance(pending["source_batch_id"], str)
+            or not pending["source_batch_id"].startswith("wgbatch_")
+            or not all(
+                isinstance(pending[key], str) and len(pending[key]) == 64
+                and all(char in "0123456789abcdef" for char in pending[key])
+                for key in (
+                    "checkpoint_fingerprint", "policy_fingerprint",
+                    "inventory_digest", "content_fingerprint",
+                )
+            )
+            or not _normalized_state_cursors(pending["source_cursors"])
+        ):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError, MonitorSourceError) as exc:
+        raise MonitorSourceError("monitor_pending_batch_corrupt") from exc
+    if pending["checkpoint_fingerprint"] != _progress_fingerprint(state):
+        raise MonitorSourceError("monitor_pending_checkpoint_changed")
+    if policy_fingerprint is not None and pending["policy_fingerprint"] != policy_fingerprint:
+        raise MonitorSourceError("monitor_pending_policy_changed")
+    return pending
+
+
+def verify_pending_monitor_source_batch(pending, batch):
+    """Refuse to substitute new messages or a changed source for pending work."""
+    if (
+        pending["inventory_digest"] != batch.inventory_digest
+        or pending["source_batch_id"] != batch.source_batch_id
+        or pending["raw_count"] != batch.raw_count
+        or pending["source_message_ids"] != [
+            str(message["source_message_id"]) for message in batch.raw_messages
+        ]
+        or pending["source_cursors"] != batch.source_cursors
+        or pending["content_fingerprint"] != _batch_content_fingerprint(batch)
+    ):
+        raise MonitorSourceError("monitor_pending_batch_changed")

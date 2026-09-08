@@ -605,7 +605,12 @@ class MonitorSourceCursorTests(unittest.TestCase):
         result = self.monitor(db, replace_generation).check_once()
 
         self.assertEqual(result["status"], "source_generation_changed")
-        self.assertEqual(Path(self.state_file).read_bytes(), original)
+        after = load_state(self.state_file)
+        self.assertEqual(after["last_checked_ts"], 10)
+        self.assertNotIn("source_cursors", after)
+        # A pre-provider intent survives, but no source cursor was advanced.
+        self.assertIn("pending_source_batch", after)
+        self.assertNotIn("ai_failure_count", after)
 
     def test_read_only_context_never_changes_source_cursor_authority(self):
         self.config["monitor_context_overlap_minutes"] = 1

@@ -40,6 +40,7 @@ from core.notification_identity import notification_identity_status_for_launch_a
 from core.project_identity import SOURCE_GUARD_LAUNCH_AGENT_LABEL
 from core.monitor import STATE_DIR as MONITOR_STATE_DIR, state_file_for_chat
 from core.monitor_state import MonitorStateError, MonitorStateStore
+from core.monitor_source import MonitorSourceError, pending_monitor_source_batch
 from core.resource_backup import inspect_mounted_resource_backup
 from core.source_inventory import (
     SOURCE_STATES,
@@ -270,6 +271,8 @@ def monitor_state_health(
     generation_bound = 0
     inventory_bound = 0
     legacy_states = 0
+    pending_batches = 0
+    invalid_response_chats = 0
     for chat in chats:
         path = state_file_for_chat(chat.get("username", ""), state_dir=state_dir)
         try:
@@ -287,6 +290,15 @@ def monitor_state_health(
         if not snapshot.data.get("last_checked_ts") and not progress["shard_cursors"]:
             counts["missing"] += 1
             continue
+        try:
+            pending = pending_monitor_source_batch(snapshot.data)
+        except MonitorSourceError:
+            counts["corrupt"] += 1
+            continue
+        pending_batches += int(pending is not None)
+        invalid_response_chats += int(
+            snapshot.data.get("ai_last_error_code") == "ai_invalid_response"
+        )
         counts["healthy"] += 1
         if snapshot.revision == 0:
             legacy_states += 1
@@ -315,6 +327,8 @@ def monitor_state_health(
         "generation_bound": generation_bound,
         "inventory_bound_chats": inventory_bound,
         "legacy_states": legacy_states,
+        "pending_batches": pending_batches,
+        "invalid_response_chats": invalid_response_chats,
     }
 
 
@@ -482,6 +496,11 @@ def main(argv: list[str] | None = None) -> int:
         f"shard_cursors={monitor_state['shard_cursors']}; "
         f"generation_bound={monitor_state['generation_bound']}; "
         f"inventory_bound_chats={monitor_state['inventory_bound_chats']}"
+    )
+    print(
+        f"[{ok(not monitor_state.get('invalid_response_chats', 0))}] Monitor pending work: "
+        f"batches={monitor_state.get('pending_batches', 0)}; "
+        f"invalid_response_chats={monitor_state.get('invalid_response_chats', 0)}"
     )
     inventory_counts = source_inventory["counts"]
     inventory_ok = source_inventory["state"] == "complete" or (

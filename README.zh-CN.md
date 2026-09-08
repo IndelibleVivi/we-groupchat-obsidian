@@ -299,6 +299,22 @@ Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 comm
 - `docs/resource-capture-and-mounted-backup-spec.md`：resource occurrence、selection、
   projection、handoff、status 与 failure semantics 的 formal spec。
 
+### 监控响应接受与待处理批次
+
+监控响应必须有真正的布尔 `match` 和 0–100 的整数 `score`；命中候选还必须有非空正文。
+无效、空白或截断 JSON 返回 `ai_invalid_response`，不会被当成正常“不保留”。
+有限短重试和耐久 backoff 保留原消息进度，合法负例仍然正常推进。
+
+生产游标批次调用 AI 前，会在现有私有 checkpoint 中冻结 `pending_source_batch`：
+记录精确消息 ID、游标边界、内容指纹和关注策略绑定，不写入原消息正文。
+即使中断后有新消息、单轮上限改变，重启也只重新读取这份有界批次；已提交事件在
+context/provider 工作前直接认领。来源或策略变化时明确暂停，不自动清空或重置进度。
+同一进度文件的执行锁阻止两个 worker 并发重放待处理请求。默认 health 只报告待处理
+批次和无效响应的数量，不暴露群聊身份、消息 ID 或正文。
+
+恢复限制、策略修改与验证见[恢复验收](docs/recovery-acceptance.md#monitor-acceptance-and-frozen-batches)。
+本项不改变资源权限、附件授权、通知筛选或部署状态。
+
 ## 常用命令
 
 Canonical Finder helper 统一放在 `launchers/`，都可以双击运行或在 Terminal
