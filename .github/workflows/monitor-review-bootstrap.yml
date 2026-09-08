@@ -14,14 +14,19 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Export tracked source only
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Export tracked source and offline test dependencies
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/SOURCE_SHA"
           git archive --format=tar HEAD > "$RUNNER_TEMP/monitor-source.tar"
+          python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/monitor-review-wheels" pycryptodome zstandard
       - uses: actions/upload-artifact@v4
         with:
           name: monitor-review-source
           path: |
             ${{ runner.temp }}/monitor-source.tar
             ${{ runner.temp }}/SOURCE_SHA
+            ${{ runner.temp }}/monitor-review-wheels
           retention-days: 1
