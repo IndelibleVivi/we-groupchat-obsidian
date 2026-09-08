@@ -54,6 +54,33 @@ class AppMonitorResilienceTests(unittest.TestCase):
         self.assertIn("First", handled_errors[0])
         self.assertEqual(app.db.refreshes, 1)
 
+    def test_invalid_response_is_reported_as_failure_without_erasing_error_episode(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app._monitor_lock = threading.Lock()
+        app._monitor_last_error = ""
+        app.config = {"background_notifications_enabled": True}
+        app.db = RefreshingDB()
+        app._monitor_chats = lambda: [{"username": "fixture@chatroom", "name": "Synthetic"}]
+        with patch("app.TopicMonitor") as monitor, patch("app._notify") as notify:
+            monitor.return_value.check_once.side_effect = [
+                {"status": "ai_invalid_response"},
+                {"status": "ai_backoff"},
+                {"status": "ai_invalid_response"},
+            ]
+            app._run_monitor_check()
+            app._run_monitor_check()
+            app._run_monitor_check()
+        self.assertIn("ai_invalid_response", app._monitor_last_error)
+        self.assertEqual(notify.call_count, 1)
+
+    def test_pending_batch_block_and_busy_have_distinct_result_semantics(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app.config = {}
+        app._monitor_last_error = ""
+        with patch("app._notify"):
+            self.assertIs(app._handle_monitor_result({"status": "monitor_pending_policy_changed"}), False)
+            self.assertIsNone(app._handle_monitor_result({"status": "monitor_worker_busy"}))
+
     def test_canonical_write_refreshes_all_existing_source_day_digests(self):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
         app.config = {"monitor_notify_writes": False}

@@ -168,3 +168,95 @@ work; the source gate blocks them safely but does not silently choose between
 loss and duplicate replay. No source-only result authorizes re-signing WeChat,
 clearing cache, resetting checkpoints, reloading a LaunchAgent, running live
 historical catch-up, or publishing a release tag.
+
+
+## Monitor acceptance and frozen batches
+
+The monitor now admits an explicit, typed decision before normalization or
+progress. `match` must be a JSON boolean and `score` an integer from 0 to 100;
+a positive decision must score at least 70 and contain a non-empty `digest`,
+`summary` or supported `items` body. Known optional fields are type checked.
+Duplicate JSON keys and non-finite JSON constants are rejected. A standalone
+JSON code fence remains accepted; arbitrary prose containing an object does not.
+An invalid response gets the content-free code `ai_invalid_response`, bounded
+short retries and the existing durable backoff. It never becomes `no_match`.
+A legitimate negative still advances normally. Dry-run writes no intent or
+failure metadata.
+
+One private checkpoint can contain one pending descriptor. It records only
+IDs, fingerprints and cursor metadata, and is written by MonitorStateStore
+before the provider call. Source progress is unchanged by this preparation
+transition. AI failure then updates only failure metadata while retaining that
+intent. On restart, production source reads use the frozen raw member count,
+not the current configured page budget; the member IDs, content/resource
+fingerprint, next cursors and inventory must agree. A newly appended message
+stays for the next batch. A same-ID in-place edit or an inserted row that changes
+the frozen prefix causes `monitor_pending_batch_changed`, not silent adoption.
+A changed generation is blocked before source-page reads. The intent is removed
+only in the successful source-progress CAS. Existing checkpoints without an
+intent keep their compatibility path.
+
+Pending checkpoints use monitor-state v2, which older readers reject instead
+of silently ignoring frozen work. The new reader accepts v1 and v2; after a
+successful acknowledgment the file returns to v1. Old code must not process a
+v2 checkpoint. An unversioned/v1 file containing pending intent is corrupt,
+not legacy-compatible progress. This guard does not make a destructive reset
+or a rollback of unrelated knowledge migrations safe.
+
+The checkpoint also binds the chat, interest and canonical knowledge destination.
+Changing the provider/model to recover from a provider outage is allowed. Changing
+the interest or destination pauses with `monitor_pending_policy_changed` until
+the original policy is restored or a supervised migration is chosen. An explicit
+reset-to-now abandons the interval and clears intent; it is not a lossless repair
+command. Never suggest deleting a checkpoint to bypass these guards.
+
+A separate per-checkpoint execution lock is held across a non-dry monitor run.
+It is nonblocking, uses the existing platform lock provider, and is released by
+process exit, including a crash. It does not hold the checkpoint-file lock across
+network work, so configuration/maintenance writers can still produce a detectable
+revision conflict. `monitor_worker_busy` never invokes AI or advances progress.
+
+After an event commit/state-CAS failure, an identical frozen batch reuses its
+canonical event before context lookup or another provider call. The new tests
+change the source between attempts rather than replaying an unchanged fixture.
+One test connects the repository's actual SQLite WeChat source adapter,
+TopicMonitor, KnowledgeStore transaction and Markdown projection using a wholly
+synthetic database. No test authorizes reading live chats or invoking a model.
+
+### Limits retained deliberately
+
+- A pending descriptor is not a raw-message archive. If required source rows
+  disappear or change, recovery stops for source reconciliation; it cannot
+  reconstruct lost raw bodies from a hash.
+- This fixes batches prepared by the new path. An older already-committed event
+  with no pending descriptor has only its existing exact-batch recovery evidence.
+- A crash before canonical commit (including an in-flight/lost provider response,
+  or a negative response before checkpoint publication) can repeat a provider
+  request for the same frozen batch. This is not exactly-once external execution.
+- Context is a fresh bounded read when uncommitted work needs evaluation; it is
+  not a persisted prompt snapshot. Canonical-event recovery needs no context.
+- Arbitrarily late old timestamps, source-generation admission, notification/
+  review-queue replay and full-application restore remain separate work.
+- Frozen batches apply to the production per-shard cursor path. Legacy adapters
+  get strict response validation, but cannot promise durable raw membership.
+
+### Verification
+
+Run the native focused regression with a temporary HOME:
+
+```bash
+TEST_HOME="$(mktemp -d)"
+HOME="$TEST_HOME" .venv/bin/python -m unittest \
+  tests.test_monitor_acceptance tests.test_monitor tests.test_monitor_source \
+  tests.test_monitor_resilience tests.test_monitor_state \
+  tests.test_recovery_pipeline_hardening tests.test_app_monitor_resilience \
+  tests.test_health_check
+```
+
+Then run the full native portability workflow. Linux tests using an explicitly
+injected POSIX lock adapter are supplemental; they cannot waive macOS acceptance.
+Tests cover malformed/schema-invalid responses, legitimate negatives, bounded
+retry/backoff, dry-run and legacy boundaries, failed intent publication,
+concurrent execution, owner crash, event commit followed by newly arriving rows,
+changed run budgets, filtered rows, content/generation/policy drift, corrupted
+intent, menu error reporting and identity-free health inspection.

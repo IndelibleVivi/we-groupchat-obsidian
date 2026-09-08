@@ -90,7 +90,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/mcp_config.py` | `windows-import-safe` | Pure configuration rendering; Windows command emission is activated later. |
 | `core/monitor.py` | `deferred-w0.2` | Transitively imports config/knowledge/review storage; Windows activation is W3. |
 | `core/monitor_result.py` | `windows-import-safe` | Pure bounded outcome interpretation; unknown results block catch-up. No platform or product activation. |
-| `core/monitor_source.py` | `windows-import-safe` | Pure bounded source-cursor merge helper; platform storage remains owned by callers. |
+| `core/monitor_source.py` | `windows-import-safe` | Pure source-cursor merge and pending-batch metadata validation; platform storage remains owned by callers. |
 | `core/monitor_state.py` | `windows-import-safe` | W0.2A shared/exclusive locking and revision CAS are portable; Windows monitor activation remains W3. |
 | `core/notification_identity.py` | `macos-only` | Foundation/app-bundle notification identity diagnostics. |
 | `core/notification_target.py` | `macos-only` | Emits the macOS `open` command; target-opening adapter is W6. |

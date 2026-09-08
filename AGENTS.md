@@ -229,6 +229,27 @@ documentation surfaces.
 
 ## Recovery hardening boundary
 
+- Production monitor work freezes a content-free `pending_source_batch` in
+  the existing MonitorStateStore before provider invocation. It binds the
+  original checkpoint, policy, exact member IDs, content fingerprint and next
+  cursors; it does not advance those cursors. Retries use its raw row count and
+  validate the exact membership, content and inventory before any provider
+  replay. The final progress CAS removes the descriptor. Never discard it on
+  parse failure, configuration drift or source changes. Explicit reset-to-now
+  retains its existing destructive meaning and clears pending intent too.
+- A checkpoint with pending intent uses monitor-state v2, so old readers fail
+  closed rather than ignore it. Acknowledgment returns the file to v1. Never
+  downgrade the schema while pending work remains; v1/unversioned pending
+  records are invalid. This is independent of knowledge-DB migration safety.
+- MonitorStateStore's separate nonblocking execution lock serializes a full
+  run without holding the checkpoint lock across provider work. State writers
+  still use revision CAS; normal process exit/crash releases run ownership.
+- Provider decisions need typed `match`/`score` and a non-empty retained body.
+  MonitorDecisionError is content-free and retries with the existing bounded
+  short-retry/backoff mechanism. Invalid output must never enter `no_match`.
+  Health may validate/count pending metadata but must not print it or read
+  WeChat. Existing legacy relation parsing is a different boundary.
+
 - `core/key_extractor.py::recover_keys` returns a structured observed-key
   result. Only HMAC-verified candidates may be published; C staging JSON is
   never authority. Every publisher, including legacy rematch, uses the same

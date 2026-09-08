@@ -1,6 +1,7 @@
 """Durable, revisioned state for one topic-monitor checkpoint."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
@@ -9,10 +10,11 @@ import tempfile
 from typing import Callable
 
 from .config import ensure_private_dir, ensure_private_file
-from .platform import LockMode, create_file_lock
+from .platform import LockBusy, LockMode, create_file_lock
 
 
 MONITOR_STATE_SCHEMA = "we-groupchat-obsidian.monitor-state.v1"
+MONITOR_PENDING_STATE_SCHEMA = "we-groupchat-obsidian.monitor-state.v2"
 
 
 class MonitorStateError(RuntimeError):
@@ -107,9 +109,14 @@ class MonitorStateStore:
         has_schema = "schema" in payload
         has_revision = "revision" in payload
         if not has_schema and not has_revision:
+            if "pending_source_batch" in payload:
+                raise MonitorStateError("monitor_state_corrupt")
             return MonitorStateSnapshot(data=dict(payload), revision=0, existed=True)
         if (
-            payload.get("schema") != MONITOR_STATE_SCHEMA
+            payload.get("schema") not in {MONITOR_STATE_SCHEMA, MONITOR_PENDING_STATE_SCHEMA}
+            or ("pending_source_batch" in payload) != (
+                payload.get("schema") == MONITOR_PENDING_STATE_SCHEMA
+            )
             or isinstance(payload.get("revision"), bool)
             or not isinstance(payload.get("revision"), int)
             or payload["revision"] < 1
@@ -152,7 +159,12 @@ class MonitorStateStore:
                 except OSError:
                     pass
             payload = {
-                "schema": MONITOR_STATE_SCHEMA,
+                # Old readers reject v2 rather than ignoring pending work.
+                # Once acknowledged, ordinary state remains downgrade-readable.
+                "schema": (
+                    MONITOR_PENDING_STATE_SCHEMA
+                    if "pending_source_batch" in data else MONITOR_STATE_SCHEMA
+                ),
                 "revision": int(revision),
                 **self._state_data(data),
             }
@@ -207,6 +219,28 @@ class MonitorStateStore:
             )
         except OSError as exc:
             raise MonitorStateError("monitor_state_write_failed") from exc
+
+    @contextmanager
+    def execution_lock(self):
+        """Serialize a whole monitor run without holding the checkpoint lock.
+
+        A second worker may inspect state, but may not replay the same pending
+        provider request. Process exit releases ownership; there is no lease
+        timeout that could expire while a provider is still responding.
+        """
+        try:
+            ensure_private_dir(os.path.dirname(self.path))
+            handle = self._lock_service().acquire(
+                self.path + ".run.lock", mode=LockMode.EXCLUSIVE, blocking=False,
+            )
+        except LockBusy as exc:
+            raise MonitorStateError("monitor_worker_busy") from exc
+        except OSError as exc:
+            raise MonitorStateError("monitor_worker_lock_unavailable") from exc
+        try:
+            yield
+        finally:
+            handle.close()
 
     def read(self) -> MonitorStateSnapshot:
         fd = self._lock(exclusive=False)

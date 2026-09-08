@@ -16,6 +16,7 @@ from .knowledge import (
     HUMAN_AI_INTIMACY_CATEGORIES,
     HUMAN_AI_INTIMACY_PROFILE,
     KnowledgeStore,
+    KNOWLEDGE_DB,
     RELATION_NOTIFY,
     TAXONOMY_PROFILES,
     build_message_hash,
@@ -33,6 +34,9 @@ from .daily_digest import source_window_dates
 from .monitor_state import MonitorStateError, MonitorStateStore
 from .monitor_source import (
     MonitorSourceError,
+    freeze_monitor_source_batch,
+    pending_monitor_source_batch,
+    verify_pending_monitor_source_batch,
     initialize_monitor_source_state,
     read_monitor_source_batch,
     supports_monitor_source_cursors,
@@ -42,6 +46,15 @@ from .monitor_source import (
 STATE_FILE = os.path.join(DATA_DIR, "monitor_state.json")
 STATE_DIR = os.path.join(DATA_DIR, "monitor_state")
 HITS_DIR = os.path.join(DATA_DIR, "monitor_hits")
+
+
+class MonitorDecisionError(RuntimeError):
+    """Content-free failure at the provider decision acceptance boundary."""
+
+    code = "ai_invalid_response"
+
+    def __init__(self):
+        super().__init__(self.code)
 
 
 class MonitorConfigError(RuntimeError):
@@ -71,6 +84,7 @@ def reset_state_to_now(path=STATE_FILE, now_func=time.time):
     def mutate(state):
         state["last_checked_ts"] = now_func()
         for key in (
+            "pending_source_batch",
             "source_cursors",
             "source_inventory_digest",
             "source_inventory_revision",
@@ -122,6 +136,15 @@ class TopicMonitor:
         self.now_func = now_func
 
     def check_once(self, dry_run=False):
+        if dry_run:
+            return self._check_once(dry_run=True)
+        try:
+            with self.state_store.execution_lock():
+                return self._check_once(dry_run=False)
+        except MonitorStateError as exc:
+            return self._state_error_result(exc)
+
+    def _check_once(self, dry_run=False):
         """Run a single monitor check.
 
         Args:
@@ -171,6 +194,16 @@ class TopicMonitor:
                 "message": "monitor_state_missing_checkpoint",
             }
 
+        pending = None
+        if not dry_run:
+            try:
+                pending = pending_monitor_source_batch(state, self._batch_policy_fingerprint())
+            except MonitorSourceError as exc:
+                return self._source_error_result(exc)
+            if pending is not None and not source_cursor_mode:
+                return {"status": "monitor_pending_source_unavailable",
+                        "message": "monitor_pending_source_unavailable"}
+
         if not dry_run:
             backoff_result = self._ai_backoff_result(state)
             if backoff_result:
@@ -183,14 +216,21 @@ class TopicMonitor:
         source_batch = None
         if source_cursor_mode:
             try:
+                if pending is not None:
+                    verify_monitor_source_inventory(self.db, pending["inventory_digest"], 0)
                 source_batch = read_monitor_source_batch(
                     self.db,
                     username,
                     state,
-                    raw_limit=max_messages,
+                    raw_limit=pending["raw_count"] if pending else max_messages,
                 )
             except MonitorSourceError as exc:
                 return self._source_error_result(exc)
+            if pending is not None:
+                try:
+                    verify_pending_monitor_source_batch(pending, source_batch)
+                except MonitorSourceError as exc:
+                    return self._source_error_result(exc)
             messages = list(source_batch.visible_messages)
             if source_batch.raw_count == 0:
                 return self._commit_monitor_result(
@@ -217,11 +257,6 @@ class TopicMonitor:
                     },
                     source_batch,
                 )
-            context_messages = self._source_cursor_context_messages(
-                state,
-                messages,
-                max_messages,
-            )
             recovered = self._recover_committed_source_batch(source_batch)
             if recovered is not None:
                 if recovered.get("status") == "knowledge_recovery_unavailable":
@@ -232,6 +267,22 @@ class TopicMonitor:
                     recovered,
                     source_batch,
                 )
+            context_messages = self._source_cursor_context_messages(
+                state,
+                messages,
+                max_messages,
+            )
+            if pending is None:
+                # Publish intent before the provider runs. It changes no source
+                # cursor and is acknowledged with the eventual cursor CAS.
+                try:
+                    state["pending_source_batch"] = freeze_monitor_source_batch(
+                        source_batch, state, self._batch_policy_fingerprint(),
+                    )
+                    snapshot = self.state_store.commit(snapshot.revision, state)
+                    state = dict(snapshot.data)
+                except MonitorStateError as exc:
+                    return self._state_error_result(exc)
         else:
             query_since_ts = self._get_query_since_ts(since_ts)
             page_forward = not dry_run and since_ts > 0
@@ -308,10 +359,16 @@ class TopicMonitor:
                     )
                 except MonitorSourceError as source_exc:
                     return self._source_error_result(source_exc)
-            if not dry_run and is_retryable_ai_error(exc):
+            if not dry_run and (isinstance(exc, MonitorDecisionError) or is_retryable_ai_error(exc)):
                 state_error = self._commit_retryable_ai_failure(snapshot, exc)
                 if state_error:
                     return state_error
+            if isinstance(exc, MonitorDecisionError):
+                return {
+                    "status": exc.code,
+                    "message": "AI 返回格式无效；未推进消息游标，稍后重试",
+                    "error_code": exc.code,
+                }
             raise
         normalized = self._normalize_decision(decision, messages)
         if not dry_run:
@@ -454,6 +511,7 @@ class TopicMonitor:
                 result.setdefault("source_eof", source_batch.source_eof)
                 result.setdefault("raw_message_count", source_batch.raw_count)
                 return result
+            state.pop("pending_source_batch", None)
             state["source_cursors"] = {
                 key: dict(value)
                 for key, value in source_batch.source_cursors.items()
@@ -540,6 +598,8 @@ class TopicMonitor:
 
     @staticmethod
     def _ai_failure_code(error):
+        if isinstance(error, MonitorDecisionError):
+            return error.code
         text = str(error or "").casefold()
         if "empty response" in text or "空响应" in text:
             return "ai_empty_response"
@@ -1193,11 +1253,15 @@ class TopicMonitor:
         delay = self._ai_retry_delay_seconds()
         for attempt in range(1, attempts + 1):
             try:
-                return self._evaluate(messages, messages_text, topic, context_text)
+                return self._validate_decision(
+                    self._evaluate(messages, messages_text, topic, context_text)
+                )
             except MonitorConfigError:
                 raise
             except Exception as e:
-                if attempt >= attempts or not is_retryable_ai_error(e):
+                if attempt >= attempts or not (
+                    isinstance(e, MonitorDecisionError) or is_retryable_ai_error(e)
+                ):
                     safe_error = redact_urls_in_text(e)
                     if safe_error != str(e):
                         raise RuntimeError(safe_error) from None
@@ -1389,11 +1453,96 @@ lead_key 用稳定短语描述这条资源线索，便于去重；没有 resourc
                 redact_urls_in_text(normalize_ai_error(e, provider))
             ) from None
 
+    def _batch_policy_fingerprint(self):
+        # Provider/model changes are allowed for recovery. Changing interest,
+        # chat or canonical destination must not silently reinterpret an intent.
+        basis = {
+            "chat": str(self.config.get("monitor_chat_username") or "").strip(),
+            "interest": str(self.config.get("monitor_topic") or "").strip(),
+            "knowledge": self._knowledge_enabled(),
+            "knowledge_db": os.path.abspath(os.path.expanduser(
+                self.config.get("monitor_knowledge_db") or KNOWLEDGE_DB
+            )) if self._knowledge_enabled() else "",
+        }
+        return hashlib.sha256(json.dumps(
+            basis, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _validate_decision(value):
+        """Admit an explicit decision, never coerce corruption into a negative.
+
+        The legacy summary and items body forms remain supported. A standalone
+        JSON code fence is harmless; prose containing a JSON object is not an
+        accepted response. Diagnostics deliberately contain no provider text.
+        """
+        def unique_object(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise MonitorDecisionError()
+                result[key] = item
+            return result
+
+        def reject_constant(_value):
+            raise MonitorDecisionError()
+
+        if isinstance(value, str):
+            text = value.strip()
+            fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.S)
+            if fenced:
+                text = fenced.group(1)
+            try:
+                value = json.loads(
+                    text, object_pairs_hook=unique_object,
+                    parse_constant=reject_constant,
+                )
+            except (ValueError, TypeError, RecursionError):
+                raise MonitorDecisionError() from None
+        if (
+            not isinstance(value, dict)
+            or type(value.get("match")) is not bool
+            or type(value.get("score")) is not int
+            or not 0 <= value["score"] <= 100
+            or (value["match"] and value["score"] < 70)
+        ):
+            raise MonitorDecisionError()
+        for key in (
+            "title", "digest", "summary", "topic_key", "category", "reason",
+            "event_type", "status_hint", "resource_status", "lead_key",
+        ):
+            if key in value and not isinstance(value[key], str):
+                raise MonitorDecisionError()
+        for key in ("entities", "semantic_tags", "key_facts", "links"):
+            if key in value and (
+                not isinstance(value[key], list)
+                or any(not isinstance(item, str) for item in value[key])
+            ):
+                raise MonitorDecisionError()
+        if "resource_lead" in value and type(value["resource_lead"]) is not bool:
+            raise MonitorDecisionError()
+        items = value.get("items", [])
+        if not isinstance(items, list):
+            raise MonitorDecisionError()
+        for item in items:
+            if isinstance(item, str):
+                continue
+            if not isinstance(item, dict) or any(
+                key in item and not isinstance(item[key], str)
+                for key in ("time", "summary", "text")
+            ):
+                raise MonitorDecisionError()
+        bodies = [value.get("digest", ""), value.get("summary", "")]
+        bodies.extend(
+            item if isinstance(item, str) else item.get("summary") or item.get("text", "")
+            for item in items
+        )
+        if value["match"] and not any(body.strip() for body in bodies):
+            raise MonitorDecisionError()
+        return value
+
     def _normalize_decision(self, decision, messages=None):
-        if isinstance(decision, str):
-            decision = self._parse_json(decision)
-        if not isinstance(decision, dict):
-            decision = {}
+        decision = self._validate_decision(decision)
 
         title = redact_urls_in_text(
             str(decision.get("title") or "发现关注内容").strip()

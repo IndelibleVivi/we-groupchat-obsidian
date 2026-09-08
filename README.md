@@ -361,6 +361,27 @@ the AI provider again.
 - `docs/resource-capture-and-mounted-backup-spec.md`: formal resource occurrence,
   selection, projection, handoff, status, and failure semantics.
 
+### Monitor decision acceptance and pending work
+
+Monitor responses require an explicit boolean `match` and integer `score` in
+0–100; retained candidates also need a non-empty body. Invalid, empty or
+truncated JSON is `ai_invalid_response`, never a successful negative decision.
+Bounded short retries and durable backoff preserve the source position.
+
+Before a production cursor batch reaches AI, the existing private checkpoint
+stores a content-free `pending_source_batch`: exact message IDs, cursor boundary,
+content fingerprint and policy binding. Restart re-reads that exact bounded
+batch even if new messages arrive or the run limit changes. A committed event is
+reused before context/provider work. Source or policy drift stops explicitly;
+no reset or new interpretation is chosen silently. No raw message bodies are
+added to checkpoint storage. A separate per-state execution lock prevents two
+workers from replaying one pending request concurrently. Health reports pending
+batch and invalid-response counts without exposing identities or bodies.
+
+See [recovery acceptance](docs/recovery-acceptance.md#monitor-acceptance-and-frozen-batches)
+for recovery limits, policy changes and verification. This does not change
+resource permissions, attachment consent, notification selection or deployment.
+
 ## Useful Commands
 
 The canonical Finder helpers live in `launchers/` and can be double-clicked or
