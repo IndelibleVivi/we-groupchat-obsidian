@@ -1,0 +1,27 @@
+name: Monitor review bootstrap
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  source-snapshot:
+    if: github.head_ref == 'fix/monitor-batch-acceptance-20260909'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Export tracked source only
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/SOURCE_SHA"
+          git archive --format=tar HEAD > "$RUNNER_TEMP/monitor-source.tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: monitor-review-source
+          path: |
+            ${{ runner.temp }}/monitor-source.tar
+            ${{ runner.temp }}/SOURCE_SHA
+          retention-days: 1
