@@ -2,24 +2,35 @@
 WeChat Group Chat MCP Server - Query and summarize WeChat messages via AI agents.
 
 Built on FastMCP, reusing existing core/ and ai/ modules.
-STDIO transport, for use with Claude Desktop / Claude Code.
+Local stdio transport: clients supporting local MCP stdio servers can launch it.
+
+This is an optional separate surface. The macOS menu-bar app does not need it
+and does not manage it. Install the SDK into the same interpreter your client
+will launch, then use that interpreter as the stdio command:
+
+  /path/to/we-groupchat-obsidian/.venv/bin/python -m pip install -r requirements-mcp.txt
 
 Usage:
-  python mcp_server.py          # Run directly
-  mcp dev mcp_server.py         # MCP Inspector debug
+  /path/to/we-groupchat-obsidian/.venv/bin/python mcp_server.py   # waits on stdio
+  mcp dev mcp_server.py                                          # MCP Inspector debug
 
-Claude Desktop config (~/Library/Application Support/Claude/claude_desktop_config.json):
+The stdio command and args are the portable part: `command` is that
+interpreter and `args` is this file's absolute path. The JSON wrapper below is
+only one example; use whatever configuration format your MCP-compatible client
+provides.
+
   {
     "mcpServers": {
       "we-groupchat-obsidian": {
-        "command": "/path/to/.venv/bin/python3",
-        "args": ["/path/to/mcp_server.py"]
+        "command": "/path/to/we-groupchat-obsidian/.venv/bin/python",
+        "args": ["/path/to/we-groupchat-obsidian/mcp_server.py"]
       }
     }
   }
 """
 import json
 import os
+import shlex
 import sys
 import time
 from datetime import datetime
@@ -27,7 +38,19 @@ from datetime import datetime
 # Ensure project root is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+    if exc.name != "mcp":
+        raise
+    raise ImportError(
+        "mcp_server.py requires the optional MCP SDK. The macOS menu-bar app "
+        "does not need it. Install it into the interpreter that will launch "
+        "this server, then use that same interpreter as your client's stdio "
+        "command:\n"
+        f"  {shlex.quote(sys.executable)} -m pip install -r "
+        f"{shlex.quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'requirements-mcp.txt'))}"
+    ) from exc
 
 from core.config import DATA_DIR, load_config
 from core.image_decoder import (

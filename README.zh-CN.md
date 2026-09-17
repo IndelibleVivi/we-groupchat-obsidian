@@ -153,7 +153,7 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
 - 默认 no-OAuth selected-resource mounted backup：把 exact links 与共享 CAS files 交给现有 Google Drive for Desktop 等挂载目录，同时生成轻量 Obsidian index、catalog snapshot 和诚实的 `sync_delegated` receipt。
 - 可选 advanced Google Drive API lane：拥有独立 selection/control plane、durable queue、群聊/月 shortcut 与 retry/reconcile，不自动删除。
 - 链接和转发展开：保留 exact URL extraction，并对 display/export 做 credential-safe redaction；内置远程链接预览已停用且零网络请求。本地微信 XML 里可见的转发聊天记录会尽量解析。
-- MCP Server：面向 Claude Desktop、Claude Code、Cursor、OpenClaw 等 client 的可选 legacy read-only compatibility surface；可查询、搜索、总结、查看图片与已有 metadata，但不能发送消息或修改本地状态。
+- MCP Server：面向支持本地 MCP stdio server 的 client 的可选 legacy read-only compatibility surface；需要额外显式安装（`requirements-mcp.txt`），菜单栏 app 既不内嵌也不管理它。可查询、搜索、总结、查看图片与已有 metadata，但不能发送消息或修改本地状态。
 - 运维命令：即使菜单栏图标被隐藏，也可以用 `.command` 文件配置关注推送、健康检查、刷新数据源、历史回填和安装自启动。
 
 ## 隐私和风险边界
@@ -248,6 +248,17 @@ cd we-groupchat-obsidian
 ```
 
 第一次运行或 `requirements.txt` 更新时，`启动.command` 会先询问是否创建/更新 `.venv` 并安装 dependencies；只有明确输入 `y` 才会继续，不同意则直接退出。首次成功 setup 还会构建并 ad-hoc sign `dist/WeGroupchatObsidian.app` 这只本机 alias bundle，之后普通启动与新安装的 LaunchAgent 都复用它的稳定 bundle identity；启动器不会再回退成 `python app.py`。Alias bundle 仍依赖当前源码目录与 `.venv`，所以项目依然是 source-distributed macOS menu-bar app，目前不提供已签名 installer、`.dmg` 或 bundled Python runtime。若 macOS 阻止打开 `.command` 文件，右键它，选择“打开”，再确认打开。
+
+普通安装只使用 `requirements.txt`，不会 import MCP SDK。若还需要运行可选 legacy
+read-only MCP server，请在 app 正常可用后把 SDK 装进本 checkout 的 virtual
+environment。Quick Start 启动的是 `.command` launcher，不会激活 shell 里的
+virtual environment，所以要显式使用解释器路径：
+
+```bash
+./.venv/bin/python -m pip install -r requirements-mcp.txt
+```
+
+启动器只安装 `requirements.txt`，不会在既有环境里额外安装或卸载可选包。
 
 macOS 可能在每只长驻 menu-app process 第一次读取 WeChat App Data 时请求授权。普通 monitor、source guard 与 resource timer 都留在同一只 app 内，不会每个 interval 启动新 Python。默认 health 也不会 `stat` 受保护的 WeChat container。只有显式运行带 `--allow-transient-wechat-source-read` 的 maintenance CLI，才允许另一只短命进程读取 source；这类单次操作仍可能产生自己的一次系统授权窗。
 
@@ -666,29 +677,33 @@ attachment bytes 仍不会复制进 vault 本身。
 
 ## MCP Server
 
-以 Claude Desktop 为例，在配置文件中添加：
+MCP Server 是一个**可选 legacy read-only compatibility surface**。macOS 菜单栏
+app 既不内嵌也不管理它：普通安装只使用 `requirements.txt`，永远不会 import MCP
+SDK。需要时，在这个 checkout 的 virtual environment 里显式安装可选依赖：
 
-```text
-~/Library/Application Support/Claude/claude_desktop_config.json
+```bash
+./.venv/bin/python -m pip install -r requirements-mcp.txt
 ```
 
-示例配置：
+然后在支持本地 MCP stdio server 的 client 里注册 `mcp_server.py`。真正跨 client 通用的是
+stdio command + args：把 `command` 指向同一个 virtual-environment 解释器，
+把 `args` 指向这个文件的绝对路径。下面的 JSON 只是一个示例 wrapper；请按
+你所用 client 的配置格式填写。
 
 ```json
 {
   "mcpServers": {
     "we-groupchat-obsidian": {
-      "command": "/absolute/path/to/we-groupchat-obsidian/.venv/bin/python3",
+      "command": "/absolute/path/to/we-groupchat-obsidian/.venv/bin/python",
       "args": ["/absolute/path/to/we-groupchat-obsidian/mcp_server.py"]
     }
   }
 }
 ```
 
-MCP Server 是一个**可选 legacy read-only compatibility surface**。Read 与
-summary tools 会把本机 chat-derived data 暴露给 MCP client；AI summary 还会
-交给用户配置的 AI provider。Summary 不推进 bookmark。`manage_chat_groups`
-只允许 `list`，旧 create/delete/add/remove actions 返回
+Read 与 summary tools 会把本机 chat-derived data 暴露给你配置的 MCP client；
+AI summary 还会交给用户配置的 AI provider。Summary 不推进 bookmark。
+`manage_chat_groups` 只允许 `list`，旧 create/delete/add/remove actions 返回
 `mcp_mutation_retired`。
 
 MCP message sending 已退休。旧 `prepare_send_message`、

@@ -15,7 +15,9 @@ acceptance, quota messages, and idle-manifest reuse (`efe54ed`).
 Windows identity remains local-NTFS-only. UNC is a syntax fixture; reparse
 points and unsupported namespaces/filesystems remain rejected. No source,
 attachment, backup, monitor job, tray, startup, secrets, or packaging capability
-is enabled. MCP remains optional legacy read-only compatibility.
+is enabled. MCP remains optional legacy read-only compatibility with a
+separate SDK installation and explicit stdio entrypoint. Ordinary app startup
+does not manage or probe it; the configured MCP client owns its lifecycle.
 
 ## W0.2B.2 storage contract
 
@@ -77,7 +79,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 
 | Path | Classification | Current boundary and next owner |
 |---|---|---|
-| `app.py` | `macos-only` | rumps/AppKit/objc menu shell; reusable controllers are extracted in later staged PRs. |
+| `app.py` | `macos-only` | rumps/AppKit/objc shell and long-lived runtime host; background jobs do not depend on menu visibility. Reusable controllers are extracted in later staged PRs. |
 | `mcp_server.py` | `deferred-w1+` | Optional legacy read-only compatibility surface; Windows source factory activation belongs to W1.1/W2. |
 | `setup.py` | `macos-only` | py2app packaging entrypoint; Windows packaging is W6. |
 | `ai/__init__.py` | `windows-import-safe` | Empty shared provider package boundary. |
@@ -107,7 +109,6 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/knowledge.py` | `deferred-w0.2` | Transitively imports ConfigStore/path/private storage; Windows activation is W3. |
 | `core/launch_agent.py` | `macos-only` | macOS LaunchAgent adapter; Windows autostart is W6. |
 | `core/link_preview.py` | `windows-import-safe` | Platform-neutral exact URL extraction plus inert zero-network compatibility receipts; remote preview is retired. |
-| `core/mcp_config.py` | `windows-import-safe` | Pure configuration rendering; Windows command emission is activated later. |
 | `core/monitor.py` | `deferred-w0.2` | Transitively imports config/knowledge/review storage; Windows activation is W3. |
 | `core/monitor_result.py` | `windows-import-safe` | Pure bounded outcome interpretation; unknown results block catch-up. No platform or product activation. |
 | `core/monitor_source.py` | `windows-import-safe` | Pure source-cursor merge and pending-batch metadata validation; platform storage remains owned by callers. |

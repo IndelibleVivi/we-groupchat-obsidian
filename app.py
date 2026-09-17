@@ -72,7 +72,6 @@ from core.config import (
     DATA_DIR,
 )
 from core.app_runtime import AppAlreadyRunning, AppInstanceLock
-from core.mcp_config import claude_code_add_command, claude_desktop_config
 from core.daily_digest import (
     DAILY_DIGEST_STATE_FILE,
     mark_daily_digest_success,
@@ -329,7 +328,6 @@ class WeGroupchatObsidianApp(rumps.App):
             # Dynamic area: latest summary (📝) inserted before "📋 ..."
             rumps.MenuItem("📋 最近总结"),
             rumps.separator,
-            self._build_mcp_menu(),
             self._build_monitor_menu(),
             self._build_resource_backup_menu(),
             self._build_drive_sync_menu(),
@@ -550,7 +548,12 @@ class WeGroupchatObsidianApp(rumps.App):
         """Rebuild top-level monitor menu."""
         if "🔔 关注推送" in self.menu:
             del self.menu["🔔 关注推送"]
-        self.menu.insert_after("🔌 MCP 服务", self._build_monitor_menu())
+        if "🔗 资源索引与本地备份" in self.menu:
+            self.menu.insert_before(
+                "🔗 资源索引与本地备份", self._build_monitor_menu()
+            )
+        else:
+            self.menu.insert_before("⚙️ 设置", self._build_monitor_menu())
 
     # ── Mounted selected-resource backup ─────────────────────
 
@@ -685,7 +688,7 @@ class WeGroupchatObsidianApp(rumps.App):
     def _rebuild_resource_backup_menu(self):
         if "🔗 资源索引与本地备份" in self.menu:
             del self.menu["🔗 资源索引与本地备份"]
-        anchor = "🔔 关注推送" if "🔔 关注推送" in self.menu else "🔌 MCP 服务"
+        anchor = "🔔 关注推送" if "🔔 关注推送" in self.menu else "📋 最近总结"
         self.menu.insert_after(anchor, self._build_resource_backup_menu())
 
     def _configure_resource_backup_timer(self):
@@ -1200,7 +1203,7 @@ class WeGroupchatObsidianApp(rumps.App):
             if "🔗 资源索引与本地备份" in self.menu
             else "🔔 关注推送"
             if "🔔 关注推送" in self.menu
-            else "🔌 MCP 服务"
+            else "📋 最近总结"
         )
         self.menu.insert_after(anchor, self._build_drive_sync_menu())
 
@@ -2332,135 +2335,6 @@ class WeGroupchatObsidianApp(rumps.App):
         finally:
             self._monitor_lock.release()
 
-    # ── MCP service menu ──────────────────────────────────────
-
-    def _check_mcp_ready(self):
-        """Check if MCP Server can start normally, return issue list (empty = ready)."""
-        project_dir = os.path.dirname(os.path.abspath(__file__))
-        venv_python = os.path.join(project_dir, ".venv", "bin", "python3")
-        mcp_server = os.path.join(project_dir, "mcp_server.py")
-
-        issues = []
-        if not os.path.isfile(venv_python):
-            issues.append("Python 虚拟环境未安装")
-        if not os.path.isfile(mcp_server):
-            issues.append("mcp_server.py 不存在")
-        db_dir = self.config.get("db_dir", "")
-        if not db_dir or not os.path.isdir(db_dir):
-            issues.append("数据库目录未配置")
-        if not get_cached_keys():
-            issues.append("数据库密钥未提取")
-        return issues
-
-    def _is_mcp_running(self):
-        """Detect if mcp_server.py process is running."""
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", "mcp_server.py"],
-                capture_output=True, text=True,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
-    def _get_mcp_config_snippet(self, client="claude_desktop"):
-        """Generate MCP client configuration."""
-        project_dir = os.path.dirname(os.path.abspath(__file__))
-        venv_python = os.path.join(project_dir, ".venv", "bin", "python3")
-        mcp_server = os.path.join(project_dir, "mcp_server.py")
-
-        if client == "claude_desktop":
-            return claude_desktop_config(venv_python, mcp_server)
-        return claude_code_add_command(venv_python, mcp_server)
-
-    def _build_mcp_menu(self):
-        """Build MCP service submenu."""
-        mcp = rumps.MenuItem("🔌 MCP 服务")
-
-        # Status
-        issues = self._check_mcp_ready()
-        if issues:
-            status_text = f"❌ {issues[0]}"
-        elif self._is_mcp_running():
-            status_text = "✅ 运行中"
-        else:
-            status_text = "✅ 就绪"
-        mcp.add(rumps.MenuItem(f"状态: {status_text}"))
-
-        mcp.add(rumps.separator)
-
-        mcp.add(rumps.MenuItem(
-            "📋 复制 Claude Desktop 配置",
-            callback=self._copy_claude_desktop_config,
-        ))
-        mcp.add(rumps.MenuItem(
-            "📋 复制 Claude Code 命令",
-            callback=self._copy_claude_code_config,
-        ))
-
-        mcp.add(rumps.separator)
-
-        mcp.add(rumps.MenuItem(
-            "🧪 测试 MCP 服务",
-            callback=self._test_mcp_server,
-        ))
-
-        return mcp
-
-    def _rebuild_mcp_menu(self):
-        """Rebuild MCP service menu."""
-        if "🔌 MCP 服务" in self.menu:
-            del self.menu["🔌 MCP 服务"]
-        self.menu.insert_before("⚙️ 设置", self._build_mcp_menu())
-
-    def _copy_claude_desktop_config(self, _):
-        snippet = self._get_mcp_config_snippet("claude_desktop")
-        process = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-        process.communicate(snippet.encode("utf-8"))
-        _notify("MCP 服务", "已复制到剪贴板",
-                "粘贴到 claude_desktop_config.json 即可")
-
-    def _copy_claude_code_config(self, _):
-        snippet = self._get_mcp_config_snippet("claude_code")
-        process = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-        process.communicate(snippet.encode("utf-8"))
-        _notify("MCP 服务", "已复制到剪贴板",
-                "在终端粘贴执行即可添加 MCP 服务")
-
-    def _test_mcp_server(self, _):
-        """Test if MCP service can start normally."""
-        threading.Thread(target=self._do_mcp_test, daemon=True).start()
-
-    def _do_mcp_test(self):
-        project_dir = os.path.dirname(os.path.abspath(__file__))
-        venv_python = os.path.join(project_dir, ".venv", "bin", "python3")
-        mcp_server = os.path.join(project_dir, "mcp_server.py")
-
-        if not os.path.isfile(venv_python):
-            _notify("MCP 服务", "测试失败", "Python 虚拟环境未安装")
-            return
-
-        try:
-            proc = subprocess.Popen(
-                [venv_python, mcp_server],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            time.sleep(2)
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                _notify("MCP 服务", "测试通过 ✅", "MCP 服务器启动正常")
-            else:
-                stderr = proc.stderr.read().decode(errors="replace")
-                _notify("MCP 服务", "启动失败 ❌", stderr[:200] or "未知错误")
-        except Exception as e:
-            _notify("MCP 服务", "测试失败 ❌", str(e)[:200])
-
     def _toggle_auto_refresh(self, _):
         """Toggle 'auto-refresh on menu open' setting."""
         current = self.config.get("auto_refresh_on_open", False)
@@ -2655,7 +2529,6 @@ class WeGroupchatObsidianApp(rumps.App):
         try:
             if self.db:
                 self._run_on_main(self._rebuild_chat_menu)
-                self._run_on_main(self._rebuild_mcp_menu)
                 print("[auto-refresh] ✓ 群聊列表已刷新")
         except Exception:
             traceback.print_exc()

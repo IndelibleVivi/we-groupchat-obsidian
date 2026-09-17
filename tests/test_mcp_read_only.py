@@ -4,7 +4,25 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import mcp_server
+from core.project_identity import MCP_SERVER_ID
+
+# The MCP SDK is an optional dependency (requirements-mcp.txt). When it is not
+# installed, skip these tests instead of reporting a collection error; CI runs
+# the base-only bootstrap check first, then installs the SDK and exercises the
+# full contract in the same regression job.
+try:
+    import mcp.server.fastmcp  # noqa: F401 - optional SDK availability probe
+    _MCP_SDK_AVAILABLE = True
+except ModuleNotFoundError as exc:
+    # Only a genuinely absent top-level SDK is optional. A broken or
+    # incompatible installed SDK must surface as a real import failure instead
+    # of being hidden behind the optional-dependency skip.
+    if exc.name != "mcp":
+        raise
+    _MCP_SDK_AVAILABLE = False
+
+if _MCP_SDK_AVAILABLE:
+    import mcp_server
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +60,15 @@ class _FakeAI:
         return "fixture summary"
 
 
+@unittest.skipUnless(
+    _MCP_SDK_AVAILABLE,
+    "optional MCP SDK is not installed; run "
+    "`./.venv/bin/python -m pip install -r requirements-mcp.txt`",
+)
 class McpReadOnlyTests(unittest.TestCase):
+    def test_fastmcp_registers_the_canonical_server_id(self):
+        self.assertEqual(mcp_server.mcp.name, MCP_SERVER_ID)
+
     def test_read_only_mcp_tool_imports_and_operates(self):
         db = type(
             "DiscoveryDB",
