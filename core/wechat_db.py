@@ -4,7 +4,6 @@ Based on the query logic from the wechat-decrypt project's mcp_server.py.
 """
 import html
 import hashlib
-import json
 import os
 import re
 import sqlite3
@@ -18,6 +17,11 @@ from urllib.parse import quote
 import zstandard as zstd
 
 from .decryptor import WALSnapshotError, decrypt_database, decrypt_wal
+from .source_adapter import (
+    SourceUnavailableError,
+    decode_cursor_token,
+    encode_cursor_token,
+)
 from .source_inventory import (
     COMPLETE_STATES,
     SourceInventoryError,
@@ -308,12 +312,16 @@ def _file_resource_metadata(text):
     return resource
 
 
-class WeChatSourceDegraded(RuntimeError):
-    """A privacy-safe source read failure that must not advance a consumer cursor."""
-
-    def __init__(self, code="source_shard_unavailable"):
-        super().__init__(code)
-        self.code = str(code or "source_shard_unavailable")
+# Retained name for this module's own raise sites and for the proof modules that
+# import it by that name: tests.test_wechat_db, tests.test_source_inventory,
+# tests.test_google_drive_file_sync, tests.test_resource_backup and
+# tests.test_recovery_pipeline_hardening (via ``wechat_db.WeChatSourceDegraded``).
+# Production consumers (core/resource_capture.py, core/google_drive_file_sync.py)
+# now import ``SourceUnavailableError`` from core/source_adapter.py directly. The
+# class is implemented once in core/source_adapter.py; this alias keeps the old
+# ``except`` clauses matching that single canonical class instead of forking a
+# subclass that would stop catching the adapter's exceptions.
+WeChatSourceDegraded = SourceUnavailableError
 
 
 class WeChatDB:
@@ -1332,14 +1340,7 @@ class WeChatDB:
         ``seen_ids`` set beyond the configured page size.
         """
         page_limit = max(1, int(limit))
-        if cursor_token:
-            try:
-                decoded = json.loads(str(cursor_token))
-                after_cursor = (int(decoded[0]), int(decoded[1]))
-            except (TypeError, ValueError, IndexError, json.JSONDecodeError) as exc:
-                raise WeChatSourceDegraded("source_cursor_invalid") from exc
-        else:
-            after_cursor = (max(0, int(since_ts)), 0)
+        after_cursor = decode_cursor_token(cursor_token, since_ts=since_ts)
 
         spec = next(
             (
@@ -1394,10 +1395,10 @@ class WeChatDB:
         next_cursor = str(cursor_token or "")
         if page:
             envelope = page[-1].get("source_envelope") or {}
-            next_cursor = json.dumps([
-                int(envelope.get("create_time") or 0),
-                int(envelope.get("rowid") or 0),
-            ], separators=(",", ":"))
+            next_cursor = encode_cursor_token(
+                envelope.get("create_time") or 0,
+                envelope.get("rowid") or 0,
+            )
         return {
             "messages": page,
             "next_cursor": next_cursor,

@@ -34,6 +34,11 @@ jobs:
           tests.windows
           tests.test_repository_layout
           tests.test_state_storage
+          tests.test_source_adapter.CapabilityTests
+          tests.test_source_adapter.CursorTokenTests
+          tests.test_source_adapter.ErrorVocabularyTests
+          tests.test_source_adapter.InventoryBindingTests
+          tests.test_source_adapter.SourcePageTests
           tests.test_keychain
           tests.test_ai_factory
           tests.test_google_drive_auth.ProtectedRefreshTokenStoreTests

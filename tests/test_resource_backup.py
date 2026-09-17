@@ -197,6 +197,56 @@ class InventoryAwareSource:
         return rows[:limit] if page_forward else rows[-limit:]
 
 
+class KeysetSource:
+    """A production-shaped source exposing the opaque keyset page reader."""
+
+    def __init__(self, messages_by_shard):
+        self.messages_by_shard = {
+            shard: [dict(message) for message in messages]
+            for shard, messages in dict(messages_by_shard or {}).items()
+        }
+
+    def get_message_shards(self, _username):
+        return list(self.messages_by_shard)
+
+    def get_cursor_page_for_shard(
+        self,
+        _username,
+        source_shard_id,
+        *,
+        cursor_token="",
+        since_ts=0,
+        limit=500,
+    ):
+        page_limit = max(1, int(limit))
+        positioned = sorted(
+            (
+                (int(message["timestamp"]), position, message)
+                for position, message in enumerate(
+                    self.messages_by_shard.get(source_shard_id, []), start=1
+                )
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        after = (
+            tuple(json.loads(cursor_token))
+            if cursor_token
+            else (max(0, int(since_ts)), 0)
+        )
+        pending = [entry for entry in positioned if (entry[0], entry[1]) > after]
+        page = pending[:page_limit]
+        next_cursor = cursor_token
+        if page:
+            next_cursor = json.dumps(
+                [page[-1][0], page[-1][1]], separators=(",", ":")
+            )
+        return {
+            "messages": [entry[2] for entry in page],
+            "next_cursor": next_cursor,
+            "exhausted": len(pending) <= page_limit,
+        }
+
+
 class ResourceBackupTests(unittest.TestCase):
     def setUp(self):
         self.settings_patcher = patch(
@@ -444,6 +494,66 @@ class ResourceBackupTests(unittest.TestCase):
         resolved = capture.resolve_pending_files(limit=10)
         self.assertEqual(resolved["ready_local"], 2)
         return capture
+
+    def test_keyset_source_pages_large_same_second_bucket_across_restarts(self):
+        timestamp = 1_787_481_000
+        rows = [
+            {
+                "timestamp": timestamp,
+                "time_str": "2026-08-23 10:30",
+                "sender": "Someone",
+                "text": f"https://example.test/item-{index}",
+                "source_message_id": f"wgmsg_same_{index}",
+                "resources": [],
+            }
+            for index in range(5)
+        ]
+        capture = SelectedResourceCapture(
+            self.config,
+            source=KeysetSource({"fixture-shard": rows}),
+            now_func=lambda: 1_787_500_000,
+            random_func=lambda: 0.5,
+            archive_id_factory=lambda: "00000000-0000-0000-0000-000000000001",
+        )
+        capture.config["resource_backup_max_messages_per_scan"] = 2
+        capture.initialize_selected_chat_cursors(start_timestamp=0)
+
+        captured = []
+        for _ in range(6):
+            capture = SelectedResourceCapture(
+                dict(capture.config),
+                source=KeysetSource({"fixture-shard": rows}),
+                now_func=lambda: 1_787_500_000,
+                random_func=lambda: 0.5,
+                archive_id_factory=lambda: "00000000-0000-0000-0000-000000000001",
+            )
+            result = capture.scan()
+            self.assertEqual(result["state"], "healthy")
+            captured.append(result["captured_links"])
+            if result["captured_links"] == 0:
+                break
+
+        self.assertEqual(captured, [2, 2, 1, 0])
+        conn = sqlite3.connect(self.capture_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            shards = [dict(row) for row in conn.execute("SELECT * FROM resource_shards")]
+            occurrences = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM resource_occurrences ORDER BY occurrence_id"
+                )
+            ]
+        finally:
+            conn.close()
+        self.assertEqual(len(shards), 1)
+        self.assertEqual(shards[0]["source_cursor_token"], f"[{timestamp},5]")
+        self.assertEqual(shards[0]["source_state"], "healthy")
+        self.assertEqual(
+            sorted(row["source_message_id"] for row in occurrences),
+            [f"wgmsg_same_{index}" for index in range(5)],
+        )
+        self.assertEqual(len(occurrences), 5)
 
     def _backup(self, capture, *, mode="redacted"):
         return MountedResourceBackup(

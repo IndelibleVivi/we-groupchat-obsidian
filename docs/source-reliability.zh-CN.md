@@ -507,7 +507,11 @@ Public 默认全部关闭：
 
 Selected chat username 只存在 private local config 和独立本机 ledger。Remote chat identity 是由随机本地
 `archive_id` 加盐派生的 SHA-256 key；Drive metadata 永远不写 raw `@chatroom` username。每个群聊 × shard
-cursor 保存 timestamp 和该 timestamp 已见过的完整 message identity set，因此同秒分页、restart 都不会漏或重。
+cursor 保存 timestamp、opaque `source_cursor_token` 和该 timestamp 已见过的完整 message identity set。
+当前 Mac reader 使用共享的 bounded keyset page，token 在大批同秒消息中也能跨 restart 续读。
+已有 ledger 会新增默认空值的 token 列，保留原记录与 identity set；首次 replay 仍按 message identity
+去重。队列插入与 token 推进处于同一 SQLite transaction。仅支持 timestamp 的 legacy adapter 保留
+兼容扫描，其请求量可能随同秒已见 identity 数增长，不具备 native keyset 的单次读取上限。
 `(source_message_id, resource_index)` 全局幂等。这套 DB 与 run receipt 不保存 raw chat body。
 
 `drive_scan_state` 保存 enable-time chat seed；canonical 增量位置保存在 `drive_scan_shards`。其余主要表是

@@ -116,12 +116,24 @@
 ## Windows port staging
 
 - The full Windows programme contract, `WGO-WIN-SPEC-2`, remains external
-  owner-review candidate material. W0.2B.2 is the bounded private-storage and
-  atomic-publication tranche; `docs/WINDOWS-PORT-MAP.md` is its in-repository
-  authority and the living module/import classification.
+  owner-review candidate material. `docs/WINDOWS-PORT-MAP.md` owns the current
+  foundation and source seam plus living module/import classification;
+  `docs/WINDOWS-DEVELOPMENT.md` owns contributor handoff, phase ordering,
+  exact-build evidence and explicit deltas from the historical design.
 - `app.py` remains the macOS shell. W0.2B.2 must not add Windows source reads,
   keys, monitor activation, attachment/backup behavior, tray UI, autostart,
   packaging or message sending.
+- `core/source_adapter.py` owns the canonical read-source protocol and stateless
+  capability/cursor/inventory/page/error helpers. Current `WeChatDB` is the Mac
+  implementation; monitor/resource/Direct reuse shared rules without adding a
+  durable owner. Keep SourceInventoryStore expected-set and MonitorStateStore
+  progress authority intact. `core/source_contract.py` is Markdown provenance,
+  not the WeChat reader. Direct scan queue inserts and its new opaque
+  `drive_scan_shards.source_cursor_token` commit together; old ledgers gain an
+  empty-default column without resetting data or changing remote Drive schema.
+  Timestamp-only legacy source callers retain completeness, not a false bounded
+  keyset claim. Windows exact schema/key/cache work follows E1 evidence;
+  do not infer a Windows source from import success or guess a schema profile.
 - `core/platform/` owns platform contracts and fail-closed provider selection.
   W0.2A supplies native locks, W0.2B.1 path identity, and W0.2B.2 private
   storage plus atomic byte publication. W0.3 provides native API/OAuth secret stores;
@@ -224,6 +236,11 @@ For the shared foundation on Windows, also run:
   tests.windows `
   tests.test_repository_layout `
   tests.test_state_storage `
+  tests.test_source_adapter.CapabilityTests `
+  tests.test_source_adapter.CursorTokenTests `
+  tests.test_source_adapter.ErrorVocabularyTests `
+  tests.test_source_adapter.InventoryBindingTests `
+  tests.test_source_adapter.SourcePageTests `
   tests.test_keychain tests.test_ai_factory tests.test_google_drive_auth.ProtectedRefreshTokenStoreTests `
   tests.test_config.ConfigTests.test_config_store_preserves_concurrent_disjoint_process_updates `
   tests.test_monitor_state.MonitorStateStoreTests.test_two_processes_cannot_replace_the_same_revision `

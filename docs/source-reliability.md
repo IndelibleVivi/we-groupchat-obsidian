@@ -630,9 +630,16 @@ Public defaults are off:
 Selected chat usernames live only in private local config and the independent
 local ledger. Each remote chat identity is a salted SHA-256 key derived from a
 random local `archive_id`; raw `@chatroom` usernames are never Drive metadata.
-The ledger stores a timestamp and complete same-timestamp message identity set
-for each chat x shard cursor, making same-second pagination and restart
-idempotent. `(source_message_id, resource_index)` is globally unique.
+The ledger stores a timestamp, an opaque `source_cursor_token`, and the
+complete same-timestamp message identity set for each chat x shard cursor.
+Current Mac readers use shared bounded keyset pages; the token survives restart
+even inside a large same-second bucket. Existing ledgers gain the token column
+with an empty default, retaining their rows and identity sets; the first replay
+remains idempotent. Queue inserts and token advancement commit in one SQLite
+transaction. Timestamp-only legacy adapters retain their compatibility scan,
+whose request can grow with the already-seen same-second identities; they do
+not provide the native keyset bound. `(source_message_id, resource_index)` is
+globally unique.
 Raw chat bodies are not stored in this database or its run receipts.
 
 `drive_scan_state` retains the enable-time chat seed; canonical incremental
