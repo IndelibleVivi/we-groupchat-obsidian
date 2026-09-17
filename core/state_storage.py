@@ -45,10 +45,10 @@ class StateStorage:
 
     def prepare(self):
         self.services.require("private_storage").ensure_directory(os.path.dirname(self.path))
-        path = self.operational_path()
-        if os.path.lexists(path):
-            self.services.require("private_storage").ensure_file(path)
-        return path
+        # Existing bytes and permissions remain recovery evidence until the
+        # owner validates them. Publication secures the replacement before
+        # writing any payload; merely acquiring a lock must not migrate it.
+        return self.operational_path()
 
     def write_bytes(self, data):
         self.services.require("atomic_publisher").write_bytes(self.operational_path(), data)

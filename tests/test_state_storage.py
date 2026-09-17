@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from core.config import ConfigStore, normalize_path_value
+from core.config import ConfigError, ConfigStore, normalize_path_value
 from core.monitor_state import MonitorStateError, MonitorStateStore
 from core.source_inventory import SourceInventoryError, SourceInventoryStore
 
@@ -51,6 +51,31 @@ class StateStorageTests(unittest.TestCase):
             self.assertFalse(MonitorStateStore(root / "monitor.json").inspect().existed)
             self.assertFalse(SourceInventoryStore(root / "inventory.json").inspect("synthetic").complete)
             self.assertFalse(root.parent.exists())
+
+    def test_corrupt_state_retains_bytes_and_permissions_before_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, owner, error, read in (
+                ("config", ConfigStore, ConfigError, lambda store: store.read()),
+                ("monitor", MonitorStateStore, MonitorStateError, lambda store: store.read()),
+                ("inventory", SourceInventoryStore, SourceInventoryError,
+                 lambda store: store.reconcile("synthetic", [])),
+            ):
+                with self.subTest(owner=name):
+                    path = Path(tmp) / name / "state.json"
+                    path.parent.mkdir()
+                    path.write_bytes(b"{malformed recovery evidence")
+                    os.chmod(path, 0o644)
+                    if os.name == "nt":
+                        from tests.windows.native_probe import WindowsNativeProbe
+                        permissions = lambda: WindowsNativeProbe().sddl(path)
+                    else:
+                        permissions = lambda: path.stat().st_mode
+                    before = (path.read_bytes(), path.stat().st_mtime_ns, permissions())
+                    with self.assertRaises(error):
+                        read(owner(path))
+                    self.assertEqual(
+                        (path.read_bytes(), path.stat().st_mtime_ns, permissions()), before,
+                    )
 
     def test_inspection_of_existing_state_does_not_restrict_permissions(self):
         with tempfile.TemporaryDirectory() as tmp:

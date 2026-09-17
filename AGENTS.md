@@ -139,6 +139,8 @@
   temporary file before payload bytes, preserve the old target on pre-replace
   failure, and never delete the destination as a replacement fallback.
   Windows privacy requires verified NTFS DACLs; chmod is not evidence.
+  Lock preparation must not change an existing state file's permissions before
+  its owner validates it; private replacement belongs to the write path.
   Read-only monitor/inventory inspection must not create storage or change
   permissions. Do not migrate archive, knowledge, resource or other storage
   callers implicitly: existing config permission helpers remain solely for

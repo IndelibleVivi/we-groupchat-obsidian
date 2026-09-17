@@ -24,6 +24,9 @@ is enabled. MCP remains optional legacy read-only compatibility.
   their schemas, JSON representation, revision/CAS rules and error vocabulary.
   Constructors do not create storage. Read-only monitor/inventory inspection
   neither creates a directory/lock nor changes permissions.
+  Lock preparation leaves existing state-file bytes and permissions intact,
+  including corrupt recovery evidence. A validated write publishes a private
+  replacement rather than re-permissioning the old file before parsing it.
 - Path admission uses the existing platform path provider. The final state
   file cannot be a symlink/non-regular node. Native Windows input is not passed
   through POSIX shell unescaping. File identities are not used as lock names:
