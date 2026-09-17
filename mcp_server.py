@@ -885,7 +885,7 @@ def get_ai_config() -> str:
         cfg = load_config()
         provider = cfg.get("ai_provider", "未配置")
         model = cfg.get("ai_model", "默认")
-        has_key = bool(load_key("ai-api-key") or cfg.get("ai_api_key"))
+        has_key = bool(load_key("ai-api-key"))
 
         lines = [
             "=== AI 总结配置 ===",

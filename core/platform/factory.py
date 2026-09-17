@@ -11,12 +11,14 @@ from .contracts import (
     PlatformName,
     PlatformServices,
     PrivateStorage,
+    SecretStore,
 )
 
 PlatformServicesProvider = Callable[[], PlatformServices]
 
 
 def _macos_services() -> PlatformServices:
+    from .macos_secrets import MacOSSecretStore
     from .macos_locks import MacOSFileLock
     from .macos_paths import MacOSPathService
     from .macos_private_storage import (
@@ -26,6 +28,7 @@ def _macos_services() -> PlatformServices:
 
     return PlatformServices(
         platform=PlatformName.MACOS,
+        secrets=MacOSSecretStore(),
         locks=MacOSFileLock(),
         paths=MacOSPathService(),
         private_storage=MacOSPrivateStorage(),
@@ -34,6 +37,7 @@ def _macos_services() -> PlatformServices:
 
 
 def _windows_services() -> PlatformServices:
+    from .windows_secrets import WindowsSecretStore
     from .windows_locks import WindowsFileLock
     from .windows_paths import WindowsPathService
     from .windows_private_storage import (
@@ -43,6 +47,7 @@ def _windows_services() -> PlatformServices:
 
     return PlatformServices(
         platform=PlatformName.WINDOWS,
+        secrets=WindowsSecretStore(),
         locks=WindowsFileLock(),
         paths=WindowsPathService(),
         private_storage=WindowsPrivateStorage(),
@@ -140,3 +145,7 @@ def create_atomic_publisher(
     platform_name: PlatformName | None = None,
 ) -> AtomicPublisher:
     return create_platform_services(platform_name).require("atomic_publisher")
+
+
+def create_secret_store(platform_name: PlatformName | None = None) -> SecretStore:
+    return create_platform_services(platform_name).require("secrets")

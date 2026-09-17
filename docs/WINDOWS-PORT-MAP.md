@@ -1,9 +1,9 @@
-# Windows portability map (W0.2B.2)
+# Windows portability map (storage and protected credentials)
 
 The full Windows programme contract, `WGO-WIN-SPEC-2`, remains external
 owner-review candidate material and is not distributed with this repository.
-This document is the in-repository authority for the bounded W0.2B.2
-storage tranche and the living portability classification. It does not claim
+This document is the in-repository authority for the completed storage
+foundation, W0.3 API/OAuth credential boundary and living portability classification. It does not claim
 completion or approval of the full external Windows programme.
 
 W0.2A supplied native shared/exclusive file locks. W0.2B.1 supplied concrete
@@ -13,9 +13,8 @@ The accepted implementation baseline is the public main integrating monitor
 acceptance, quota messages, and idle-manifest reuse (`efe54ed`).
 
 Windows identity remains local-NTFS-only. UNC is a syntax fixture; reparse
-points and unsupported namespaces/filesystems remain rejected. No source,
-attachment, backup, monitor job, tray, startup, secrets, or packaging capability
-is enabled. MCP remains optional legacy read-only compatibility with a
+points and unsupported namespaces/filesystems remain rejected. The native secret service now supports API/OAuth credentials. No Windows source,
+attachment, backup, monitor job, tray, startup or packaging capability is enabled. MCP remains optional legacy read-only compatibility with a
 separate SDK installation and explicit stdio entrypoint. Ordinary app startup
 does not manage or probe it; the configured MCP client owns its lifecycle.
 
@@ -49,12 +48,47 @@ does not manage or probe it; the configured MCP client owns its lifecycle.
 - Existing `core.config.ensure_private_dir/file` remain for the explicitly
   unmigrated archive, knowledge, projection, and other Mac consumers. They are
   not used by the three migrated stores. Those callers are later work, not a
-  second publication path for these stores. Credential storage remains W0.3.
+  second publication path for these stores. API/OAuth credentials use the separate W0.3 native secret service below.
 
 Acceptance covers actual private storage and first/replacement publication,
 pre-replace failure preservation, native path inputs, read-only inspection,
 concurrent config patches, checkpoint revision conflicts, and inventory union.
 Windows ACL and reparse tests run on Windows; macOS skips do not prove them.
+
+## W0.3 protected credential contract
+
+- `core.platform.create_secret_store()` selects macOS Keychain or Windows
+  Credential Manager. Import and construction perform no credential reads.
+  Missing loads return `None`; native access/write/delete failures raise
+  content-free `SecretStoreError` codes. There is no plaintext sidecar fallback.
+- `core/keychain.py` retains its historical name and bool/optional-value API for
+  existing app, AI factory, health and configuration callers. It contains no
+  native implementation; `secret_status` distinguishes missing from unavailable.
+  This facade stays while those callers use that API. Native adapters own all
+  credential operations. OAuth uses the strict service directly, reports
+  unavailable storage distinctly and never reports a failed delete as success.
+- Mac writes use service `we-groupchat-obsidian`. Reads try `wechat-summary`
+  only when the current item is missing, not when access failed. Explicit delete
+  removes both readable identities so a legacy token cannot reappear.
+- Windows stores UTF-8 generic credentials under `we-groupchat-obsidian/<account>`
+  for the current user on this computer (`CRED_PERSIST_LOCAL_MACHINE`, not
+  enterprise roaming). Values exceeding the native 2560-byte blob limit fail
+  before writing. API/OAuth calls do not invoke macOS `security` on Windows.
+- AI construction has no config-key fallback. Ollama does not open the secret
+  store. This tranche does not migrate the existing Mac `all_keys.json` cache
+  or `image_aes_key` compatibility input. They have active Mac source/attachment
+  callers; Windows must not adopt them as plaintext storage. Versioned imported
+  database/image key validation belongs with the exact-build W1.3 key provider,
+  after source evidence establishes what can actually be verified.
+- Tests cover failed writes, missing vs inaccessible, legacy deletion, consumer
+  errors, and synthetic native Windows save/update/new-process reload/delete.
+  Native Windows test credentials have unique test-only identities; they never
+  query real app accounts. macOS adapter regressions use an injected runner.
+
+Native API authority: Microsoft [CredWriteW](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew),
+[CredReadW](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credreadw),
+[CredDeleteW](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-creddeletew),
+and [CREDENTIALW](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw).
 
 ## Classification
 
@@ -84,10 +118,10 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `setup.py` | `macos-only` | py2app packaging entrypoint; Windows packaging is W6. |
 | `ai/__init__.py` | `windows-import-safe` | Empty shared provider package boundary. |
 | `ai/base.py` | `windows-import-safe` | Platform-neutral provider interface. |
-| `ai/claude_provider.py` | `windows-import-safe` | Provider adapter imports cleanly; credentials remain behind the W0.3 secret boundary. |
-| `ai/factory.py` | `windows-import-safe` | Imports cleanly on Windows; provider creation still reaches the macOS keychain and is not activated before W0.3. |
+| `ai/claude_provider.py` | `windows-import-safe` | Provider adapter imports cleanly; API credentials use the native W0.3 secret boundary. |
+| `ai/factory.py` | `windows-import-safe` | API keys use the active native secret store; Ollama bypasses credentials; no config-key fallback. |
 | `ai/ollama_provider.py` | `windows-import-safe` | Platform-neutral HTTP provider adapter; runtime behavior is not a Windows product-support claim. |
-| `ai/openai_provider.py` | `windows-import-safe` | Provider adapter imports cleanly; credentials remain behind the W0.3 secret boundary. |
+| `ai/openai_provider.py` | `windows-import-safe` | Provider adapter imports cleanly; API credentials use the native W0.3 secret boundary. |
 | `core/__init__.py` | `windows-import-safe` | Empty shared package boundary. |
 | `core/api_errors.py` | `windows-import-safe` | Provider-independent error normalization. |
 | `core/app_runtime.py` | `windows-import-safe` | W0.2A singleton now uses the portable exclusive non-blocking lock; Windows app activation remains W6. |
@@ -99,13 +133,13 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/config.py` | `windows-import-safe` | W0.2B.2 uses native private storage, path admission and atomic publication; config revision/sole-writer rules are unchanged. |
 | `core/daily_digest.py` | `deferred-w0.2` | Transitively imports config/knowledge storage; Windows activation is W3. |
 | `core/decryptor.py` | `windows-import-safe` | Shared crypto/WAL implementation; synthetic behavior fixtures expand in W1. |
-| `core/google_drive_auth.py` | `deferred-w0.2` | Config/private storage plus macOS Keychain; secret adapter is W0.3. |
+| `core/google_drive_auth.py` | `deferred-w0.2` | Native protected refresh tokens; OAuth client-config file storage remains Mac-owned and Windows Direct Drive is deferred. |
 | `core/google_drive_client.py` | `deferred-w0.2` | Transitively imports the current auth adapter. |
 | `core/google_drive_file_sync.py` | `deferred-w0.2` | Direct `fcntl` and attachment/config dependencies; Windows activation is later. |
 | `core/image_decoder.py` | `windows-import-safe` | Platform-neutral byte decoding. |
 | `core/key_extractor.py` | `macos-only` | macOS process scanner, codesign, sudo, and osascript source adapter. |
 | `core/wechat_signature.py` | `macos-only` | Shared read-only macOS codesign predicate (strict, no runtime flag, legacy ad-hoc or managed stable identity); injectable runner only, no Windows signature or key support. |
-| `core/keychain.py` | `macos-only` | macOS `security` adapter; shared secret contract is defined for W0.3 wiring. |
+| `core/keychain.py` | `windows-import-safe` | Compatibility facade for current credential callers; native operations live in platform adapters. |
 | `core/knowledge.py` | `deferred-w0.2` | Transitively imports ConfigStore/path/private storage; Windows activation is W3. |
 | `core/launch_agent.py` | `macos-only` | macOS LaunchAgent adapter; Windows autostart is W6. |
 | `core/link_preview.py` | `windows-import-safe` | Platform-neutral exact URL extraction plus inert zero-network compatibility receipts; remote preview is retired. |
@@ -117,7 +151,9 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/notification_target.py` | `macos-only` | Emits the macOS `open` command; target-opening adapter is W6. |
 | `core/platform/__init__.py` | `windows-import-safe` | Exposes contracts and active-platform lock/path/private-storage/publication selectors. |
 | `core/platform/contracts.py` | `windows-import-safe` | Shared platform protocols including private storage and atomic publication; path/storage errors are content-free. |
-| `core/platform/factory.py` | `windows-import-safe` | Lazy macOS/Windows lock, path, private-storage and atomic-publication providers; later capabilities remain absent. |
+| `core/platform/factory.py` | `windows-import-safe` | Lazy macOS/Windows lock, path, private-storage, atomic-publication and secret providers; later capabilities remain absent. |
+| `core/platform/macos_secrets.py` | `macos-only` | Native Keychain operations, bounded failures and legacy identity compatibility. |
+| `core/platform/windows_secrets.py` | `windows-import-safe` | Native current-user Credential Manager; synthetic Windows behavior gate. |
 | `core/platform/macos_locks.py` | `macos-only` | Native `fcntl.flock` shared/exclusive backend retained for current macOS behavior. |
 | `core/platform/macos_private_storage.py` | `macos-only` | Current-UID 0700/0600 enforcement and same-directory atomic publication; no ancestor or unrelated child permission changes. |
 | `core/platform/macos_paths.py` | `macos-only` | Concrete inode identity; valid-UTF-8 missing-child identity is limited to APFS and uses volume-reported case semantics. HFS+ and unknown normalization rules fail closed. |
@@ -176,7 +212,8 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 3. **W0.2B.2:** implement private storage and atomic publication; migrate only
    config, monitor checkpoints, and source inventory. Remaining storage owners
    retain their deferred classification and separate caller migrations.
-4. **W0.3:** adapt secrets behind the contract. Notifications, target opening,
+4. **W0.3:** native API/OAuth credential adapters and current consumers are wired.
+   Imported source-key records follow exact-build validation in W1.3. Notifications, target opening,
    tray behavior, packaging, and logon startup remain W6.
 5. **W1.1–W1.3:** extract the canonical WeChat source contract, add one
    exact-build Windows probe/schema profile, and add a verified key provider.

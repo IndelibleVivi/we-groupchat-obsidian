@@ -1,4 +1,4 @@
-"""Installed-app Google Drive OAuth with PKCE and Keychain refresh-token storage."""
+"""Installed-app Google Drive OAuth with PKCE and native protected refresh-token storage."""
 from __future__ import annotations
 
 import base64
@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 
 from .config import DATA_DIR, ensure_private_dir
-from .keychain import delete_key, load_key, save_key
+from .platform import SecretStoreError, create_secret_store
 
 
 DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
@@ -35,16 +35,26 @@ class GoogleDriveAuthRequired(GoogleDriveAuthError):
     pass
 
 
-class KeychainRefreshTokenStore:
+class ProtectedRefreshTokenStore:
     def load(self):
-        return load_key(REFRESH_TOKEN_ACCOUNT)
+        try:
+            return create_secret_store().load(REFRESH_TOKEN_ACCOUNT)
+        except SecretStoreError:
+            raise GoogleDriveAuthError("secret_store_unavailable") from None
 
     def save(self, token):
-        if not token or not save_key(REFRESH_TOKEN_ACCOUNT, str(token)):
-            raise GoogleDriveAuthError("keychain_write_failed")
+        if not token:
+            raise GoogleDriveAuthError("secret_empty")
+        try:
+            create_secret_store().save(REFRESH_TOKEN_ACCOUNT, str(token))
+        except SecretStoreError:
+            raise GoogleDriveAuthError("secret_write_failed") from None
 
     def delete(self):
-        delete_key(REFRESH_TOKEN_ACCOUNT)
+        try:
+            create_secret_store().delete(REFRESH_TOKEN_ACCOUNT)
+        except SecretStoreError:
+            raise GoogleDriveAuthError("secret_delete_failed") from None
 
 
 def _atomic_private_json(path: str, payload: dict) -> None:
@@ -122,7 +132,7 @@ class GoogleDriveOAuth:
         now_func=time.time,
     ):
         self.client_config_path = client_config_path
-        self.token_store = token_store or KeychainRefreshTokenStore()
+        self.token_store = token_store or ProtectedRefreshTokenStore()
         self.session = session or requests.Session()
         self.browser_open = browser_open or webbrowser.open
         self.now_func = now_func
@@ -131,7 +141,14 @@ class GoogleDriveOAuth:
 
     def status(self, *, validate=False) -> dict:
         configured = os.path.isfile(self.client_config_path)
-        token_present = bool(self.token_store.load())
+        try:
+            token_present = bool(self.token_store.load())
+        except GoogleDriveAuthError as exc:
+            return {
+                "state": "validation_unavailable", "client_configured": configured,
+                "token_present": None, "refresh_token_valid": None,
+                "connected": False, "scope": DRIVE_FILE_SCOPE, "error_code": exc.code,
+            }
         cached_valid = bool(
             self._access_token and self.now_func() < self._access_token_expires_at
         )
@@ -194,9 +211,8 @@ class GoogleDriveOAuth:
         }
 
     def disconnect(self) -> None:
+        self.invalidate_access_token()
         self.token_store.delete()
-        self._access_token = ""
-        self._access_token_expires_at = 0.0
 
     @staticmethod
     def _pkce_pair():

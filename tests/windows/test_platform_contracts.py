@@ -101,7 +101,7 @@ class PlatformFactoryTests(unittest.TestCase):
             services.require("secrets")
         self.assertEqual(raised.exception.code, "platform_capability_unavailable")
 
-    def test_concrete_desktop_provider_exposes_w0_2_capabilities_only(self):
+    def test_concrete_desktop_provider_exposes_foundation_capabilities(self):
         selected = detect_platform()
         if selected is PlatformName.UNSUPPORTED:
             self.skipTest("desktop provider gate targets macOS and Windows")
@@ -109,10 +109,11 @@ class PlatformFactoryTests(unittest.TestCase):
         self.assertEqual(
             services.available_capabilities(),
             frozenset(
-                {"locks", "paths", "private_storage", "atomic_publisher"}
+                {"locks", "paths", "private_storage", "atomic_publisher", "secrets"}
             ),
         )
         self.assertIsNotNone(create_path_service(selected))
+        self.assertIsNotNone(services.secrets)
         self.assertIsNotNone(services.private_storage)
         self.assertIsNotNone(services.atomic_publisher)
         self.assertIsNotNone(create_private_storage(selected))

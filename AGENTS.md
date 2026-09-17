@@ -54,7 +54,7 @@
   distinguish monitor healthy/missing/corrupt/conflict, source inventory
   completeness/counts, raw cursor progress, mounted handoff with provider sync
   unknown, separate Direct Drive verification, disabled link preview, legacy
-  read-only/send-retired MCP, and the Windows W0.2B.2 bounded state-storage boundary.
+  read-only/send-retired MCP, and the Windows shared storage/credential foundation boundary.
   Health inspection must not scan source, initialize/migrate the source
   inventory, open CAS payload objects, `stat` the protected WeChat container,
   or promote mounted evidence to remote
@@ -124,9 +124,13 @@
   packaging or message sending.
 - `core/platform/` owns platform contracts and fail-closed provider selection.
   W0.2A supplies native locks, W0.2B.1 path identity, and W0.2B.2 private
-  storage plus atomic byte publication. Secrets remain W0.3;
+  storage plus atomic byte publication. W0.3 provides native API/OAuth secret stores;
   notifications/open/autostart/tray/packaging remain W6; source adapters begin
-  in W1.
+  in W1. `core/keychain.py` is a compatibility facade for current callers; native
+  operations live only in `core/platform/macos_secrets.py` and
+  `core/platform/windows_secrets.py`. No plaintext API-key fallback. Imported
+  database/image key records require exact-source validation in W1.3; current
+  Mac key cache and image-config callers remain an explicit compatibility boundary.
 - W0.2A migrates direct lock ownership only in `core/config.py`,
   `core/app_runtime.py`, `core/monitor_state.py`, and
   `core/source_inventory.py`. Preserve ConfigStore sole-writer semantics,
@@ -213,13 +217,14 @@ private/public publication, app-bundle rebuild, LaunchAgent reload and live
 acceptance are separate gates. Do not mutate live config/data or reload a live
 agent merely because source tests pass.
 
-For W0.2B.2 on Windows, also run:
+For the shared foundation on Windows, also run:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest `
   tests.windows `
   tests.test_repository_layout `
   tests.test_state_storage `
+  tests.test_keychain tests.test_ai_factory tests.test_google_drive_auth.ProtectedRefreshTokenStoreTests `
   tests.test_config.ConfigTests.test_config_store_preserves_concurrent_disjoint_process_updates `
   tests.test_monitor_state.MonitorStateStoreTests.test_two_processes_cannot_replace_the_same_revision `
   tests.test_source_inventory.SourceInventoryStoreTests.test_concurrent_reconcile_preserves_inventory_union_and_revisions

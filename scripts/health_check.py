@@ -544,7 +544,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print("[OK] MCP compatibility: legacy_read_only; send=mcp_send_retired")
     print(
-        "[OK] Windows: W0.2B.2 bounded private state-storage source only; "
+        "[OK] Windows: shared storage/credential foundation source only; "
         "product_support=not_claimed"
     )
     print("")

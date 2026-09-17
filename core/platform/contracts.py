@@ -3,7 +3,8 @@
 W0.2A supplies concrete macOS and Windows file-lock adapters. W0.2B.1 adds
 path identity without activating storage, source, monitor, or UI behavior.
 W0.2B.2 adds concrete private-storage and atomic byte publication behind the
-``private_storage`` and ``atomic_publisher`` capabilities. Later platform
+``private_storage`` and ``atomic_publisher`` capabilities. W0.3 wires native
+protected credential stores for existing API/OAuth callers. Later platform
 capabilities remain fail-closed until their owning phases.
 """
 from __future__ import annotations
@@ -145,7 +146,20 @@ class AtomicPublisher(Protocol):
     def write_bytes(self, path: str | PathLike[str], data: bytes) -> None: ...
 
 
+class SecretStoreError(RuntimeError):
+    """Bounded failure token; never includes account names or secret material."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
 class SecretStore(Protocol):
+    """Missing loads return None; inaccessible storage raises SecretStoreError.
+
+    Save replaces one credential through the native protected store. Delete is
+    idempotent and removes every legacy identity readable by this adapter.
+    """
     def save(self, account: str, secret: str) -> None: ...
 
     def load(self, account: str) -> str | None: ...
