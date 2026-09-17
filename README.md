@@ -10,12 +10,14 @@ currently distributed. The current package metadata identifies the
 `v0.1.0-alpha.1` prerelease line; a source checkout, local alias build,
 installed copy, and live runtime remain separate acceptance states.
 
-Windows port status: **W0.2B.2 bounded state-storage stage**. Native macOS/Windows
+Windows port status: **shared storage and protected credential foundation**. Native macOS/Windows
 locks and path providers now support private storage and atomic publication for
 configuration, monitor checkpoints, and source inventory. Their schemas and
 revision rules are unchanged. Windows privacy uses NTFS permissions rather than
 POSIX mode bits; path support remains local-NTFS-only with reparse points rejected.
-This is source portability, not a Windows application: WeChat discovery, keys,
+API/OAuth credentials now use the platform secret interface (Mac Keychain or
+Windows Credential Manager); Ollama needs no credential-store access.
+This is source portability, not a Windows application: WeChat discovery, source keys,
 database reads, monitoring, backup, tray UI, autostart and packaging remain
 unsupported. See [`docs/WINDOWS-PORT-MAP.md`](docs/WINDOWS-PORT-MAP.md).
 
@@ -195,7 +197,7 @@ independently deployed microservices. Editable sources:
 ## Privacy and Safety
 
 - Runtime data is local by default: `~/.we-groupchat-obsidian/`.
-- API keys are stored in macOS Keychain, not in the repo.
+- API keys use the native protected credential service (macOS Keychain in the current app); config files are not an API-key fallback.
 - WeChat database keys, logs, SQLite files, Markdown exports, and `.venv/` should never be committed.
 - The attachment catalog, local archive, source-guard state/receipts, and backup
   snapshot manifests/catalogs are private runtime data. Archive objects contain the original
@@ -445,7 +447,7 @@ operational facts that were previously easy to collapse:
 | `Source inventory` | Complete versus degraded/uninitialized inventory plus present, missing, cache-only, key-missing, and unreadable counts. “Complete” requires a complete expected-shard inventory, stable current generations, and successful reads. |
 | `Mounted resource handoff` | Existing destination binding and latest snapshot handoff evidence. `provider_side_sync=unknown` and `remote_verified=False` remain explicit even after `sync_delegated`. |
 | `Google Drive API remote verification` | Count of objects verified through the optional Direct Drive API ledger. It is separate from source completeness and mounted-folder delivery. |
-| `Link preview` / `MCP compatibility` / `Windows` | Preview is disabled with zero requests; MCP is legacy read-only and send-retired; W0.2B.2 provides bounded private state-storage source, not Windows product support. |
+| `Link preview` / `MCP compatibility` / `Windows` | Preview is disabled with zero requests; MCP is legacy read-only and send-retired; the storage/credential foundation is source-level support; Windows product support remains unclaimed. |
 
 `--sensitive` may show local paths, chat names, topic titles, source-relative
 paths, and opaque shard IDs for deliberate on-device debugging. Default output
@@ -678,7 +680,7 @@ commands remove old scheduled plists.
 
 New installs use `~/.we-groupchat-obsidian/` for config, logs, key caches, monitor SQLite state, review queue data, and default Markdown output. Older local installs may still have `~/.wechat-summary/`; the loader can read the old config when the new config is absent and rebases project-owned default paths to the new directory.
 
-For an existing local machine, migrate the actual files before restarting the LaunchAgent: move the old directory to `~/.we-groupchat-obsidian/` or keep `~/.wechat-summary` as a symlink to the new directory during the compatibility window. API keys saved under the old Keychain service name remain readable as a fallback, while new saves use `we-groupchat-obsidian`.
+For an existing local machine, migrate the actual files before restarting the LaunchAgent: move the old directory to `~/.we-groupchat-obsidian/` or keep `~/.wechat-summary` as a symlink to the new directory during the compatibility window. API keys saved under the old Keychain service name remain readable as a fallback, while new saves use `we-groupchat-obsidian`. An inaccessible current item does not fall back to an old key; explicit credential deletion removes both readable service identities.
 
 ## LaunchAgent Compatibility
 

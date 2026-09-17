@@ -22,6 +22,7 @@ from .contracts import (
     ProcessService,
     ReparsePointConflict,
     SecretStore,
+    SecretStoreError,
 )
 from .factory import (
     InvalidPlatformServicesProviderResult,
@@ -32,6 +33,7 @@ from .factory import (
     create_path_service,
     create_platform_services,
     create_private_storage,
+    create_secret_store,
     detect_platform,
     register_platform_services,
 )
@@ -61,11 +63,13 @@ __all__ = [
     "ProcessService",
     "ReparsePointConflict",
     "SecretStore",
+    "SecretStoreError",
     "create_atomic_publisher",
     "create_file_lock",
     "create_path_service",
     "create_platform_services",
     "create_private_storage",
+    "create_secret_store",
     "detect_platform",
     "register_platform_services",
 ]

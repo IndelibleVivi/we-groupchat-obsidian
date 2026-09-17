@@ -3,17 +3,14 @@ from core.keychain import load_key
 
 
 def _get_api_key(config):
-    """Get API key: prefer Keychain, fall back to config."""
-    key = load_key("ai-api-key")
-    if key:
-        return key
-    return config.get("ai_api_key", "")
+    """Read the active platform protected store; config is not credential storage."""
+    return load_key("ai-api-key") or ""
 
 
 def create_provider(config):
     """Create AI provider based on config."""
     provider = config.get("ai_provider", "qwen")
-    api_key = _get_api_key(config)
+    api_key = "" if provider == "ollama" else _get_api_key(config)
     model = config.get("ai_model", "")
 
     if provider == "claude":

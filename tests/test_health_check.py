@@ -699,7 +699,7 @@ gui/501/com.example.wechat-summary = {
                 text,
             )
             self.assertIn(
-                "Windows: W0.2B.2 bounded private state-storage source only; "
+                "Windows: shared storage/credential foundation source only; "
                 "product_support=not_claimed",
                 text,
             )

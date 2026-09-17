@@ -8,11 +8,12 @@ operator CLI、持久化本地状态、recovery/backup workers 和完整 regress
 或已签名 installer。当前 package metadata 对应 `v0.1.0-alpha.1` prerelease line；
 source checkout、本地 alias build、installed copy 与 live runtime 仍是彼此独立的验收状态。
 
-Windows 迁移当前处于 **W0.2B.2 有限范围状态存储阶段**。原生 macOS/Windows
+Windows 迁移当前处于 **共享存储与受保护凭据基础阶段**。原生 macOS/Windows
 锁与路径适配已接入 config、monitor checkpoint 和 source inventory 的私有存储与
 原子发布，原有 schema 和 revision 规则保持不变。Windows 私有权限使用 NTFS ACL，
 不把 POSIX mode bits 当作权限证明；路径仍限本地 NTFS，并拒绝 reparse point。
-这仍是源码可移植性，不是 Windows app：微信发现、密钥、数据库读取、monitor、backup、
+API/OAuth 凭据已接入平台 secret 接口（Mac Keychain / Windows Credential Manager）；
+Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows app：微信发现、来源密钥、数据库读取、monitor、backup、
 托盘、自启和打包尚不支持。分阶段契约见
 [`docs/WINDOWS-PORT-MAP.md`](docs/WINDOWS-PORT-MAP.md)。
 
@@ -167,7 +168,7 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
   显式授权，重启后必定归零，也不会从 config 恢复；关闭后，in-flight resolver 会在下一次读取附件
   bytes 之前取消。Links-only backfill 不读取附件 cache。
 - 聊天内容会发送给你自己配置的 AI provider。使用 Ollama 本地模型时，内容可以完全不离开本机；使用云端 provider 时，请按对应服务的隐私规则自行判断。
-- API Key 存储在 macOS Keychain，不写入 repo。
+- API Key 使用系统受保护凭据服务（当前 Mac app 使用 Keychain）；config 不作为 API key 的 fallback。
 - 本地配置、书签、monitor state、数据库 key、日志、SQLite DB 和 Markdown 导出默认在 `~/.we-groupchat-obsidian/` 或你的 Obsidian vault 中，不应该提交到 git。旧 `~/.wechat-summary/` 只作为本机 migration/compatibility 路径保留。
 - Attachment catalog、本地 archive、source-guard state/receipts 和 backup snapshot manifest/catalog 都是私有 runtime data。
   Archive object 含原始附件 bytes，绝不能提交或公开。
@@ -374,7 +375,7 @@ source install 与 LaunchAgent 继续使用。
 | `Source inventory` | 区分 complete、degraded 与 uninitialized，并分别统计 present、missing、cache-only、key-missing、unreadable。只有 expected inventory 完整、current generations 稳定且 required reads 全部成功，才能叫 source complete。 |
 | `Mounted resource handoff` | 只读检查现有 destination binding 与 latest snapshot handoff；即使是 `sync_delegated`，也明确保留 `provider_side_sync=unknown`、`remote_verified=False`。 |
 | `Google Drive API remote verification` | 可选 Direct Drive API ledger 中经过 remote verification 的 object 数；它与 source completeness、mounted delivery 都是不同事实。 |
-| `Link preview` / `MCP compatibility` / `Windows` | Preview 停用且零请求；MCP 为 legacy read-only、send retired；W0.2B.2 提供有限范围的私有状态存储源码，不是 Windows 产品支持。 |
+| `Link preview` / `MCP compatibility` / `Windows` | Preview 停用且零请求；MCP 为 legacy read-only、send retired；存储/凭据中间层已接入源码，Windows 产品支持仍未声明。 |
 
 只有显式 `--sensitive` 才可能显示本机 paths、chat names、topic titles、source-relative
 paths 与 opaque shard IDs。默认输出不打印这些值，也不打印 message text、API endpoint 或 token material。
@@ -539,7 +540,7 @@ data；对应 uninstall 命令负责移除历史 scheduled plist。
 
 新安装默认使用 `~/.we-groupchat-obsidian/` 保存 config、logs、key cache、monitor SQLite state、Review Queue 和默认 Markdown 输出。旧本机环境可能还存在 `~/.wechat-summary/`；如果新 config 不存在，程序会读取旧 config，并把项目默认路径 rebased 到新目录。
 
-已有机器迁移时，应在重启 LaunchAgent 前迁移实际文件：把旧目录移动到 `~/.we-groupchat-obsidian/`，或在兼容期内保留 `~/.wechat-summary` -> `~/.we-groupchat-obsidian` 的 symlink。旧 Keychain service name 下的 API Key 仍会作为 fallback 读取，新保存的 key 会写到 `we-groupchat-obsidian`。
+已有机器迁移时，应在重启 LaunchAgent 前迁移实际文件：把旧目录移动到 `~/.we-groupchat-obsidian/`，或在兼容期内保留 `~/.wechat-summary` -> `~/.we-groupchat-obsidian` 的 symlink。旧 Keychain service name 下的 API Key 仍会作为 fallback 读取，新保存的 key 会写到 `we-groupchat-obsidian`。当前凭据不可访问时不会退回旧 key；显式删除凭据会移除两个可读 service identity。
 
 ## LaunchAgent 兼容策略
 

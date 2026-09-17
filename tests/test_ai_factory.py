@@ -5,6 +5,16 @@ from ai.factory import create_provider
 
 
 class AIProviderFactoryTests(unittest.TestCase):
+    def test_ollama_does_not_open_credential_store(self):
+        with patch("ai.factory.load_key", side_effect=AssertionError("credential access")), \
+             patch("ai.ollama_provider.OllamaProvider") as provider:
+            self.assertIs(create_provider({"ai_provider": "ollama"}), provider.return_value)
+
+    def test_plaintext_config_key_is_not_a_fallback(self):
+        with patch("ai.factory.load_key", return_value=None):
+            with self.assertRaises(ValueError):
+                create_provider({"ai_provider": "openai", "ai_api_key": "plaintext-fixture"})
+
     def test_deepseek_uses_v4_flash_when_model_is_unset(self):
         with (
             patch("ai.factory.load_key", return_value="test-api-key"),

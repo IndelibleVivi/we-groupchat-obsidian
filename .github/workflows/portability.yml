@@ -28,12 +28,15 @@ jobs:
           cache: pip
       - name: Install base and Windows-safe dependencies
         run: python -m pip install -r requirements.txt
-      - name: Verify W0.2B.2 Windows storage, locks, paths, and public boundary
+      - name: Verify Windows storage, locks, paths, credentials, and public boundary
         run: >-
           python -m unittest
           tests.windows
           tests.test_repository_layout
           tests.test_state_storage
+          tests.test_keychain
+          tests.test_ai_factory
+          tests.test_google_drive_auth.ProtectedRefreshTokenStoreTests
           tests.test_config.ConfigTests.test_config_store_preserves_concurrent_disjoint_process_updates
           tests.test_monitor_state.MonitorStateStoreTests.test_two_processes_cannot_replace_the_same_revision
           tests.test_source_inventory.SourceInventoryStoreTests.test_concurrent_reconcile_preserves_inventory_union_and_revisions

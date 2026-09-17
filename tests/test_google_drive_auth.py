@@ -198,5 +198,43 @@ class GoogleDriveOAuthTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), "oauth_network_error")
 
 
+class ProtectedRefreshTokenStoreTests(unittest.TestCase):
+    def test_native_store_failure_propagates_as_content_free_auth_error(self):
+        from unittest.mock import Mock, patch
+        from core.platform import SecretStoreError
+        from core.google_drive_auth import ProtectedRefreshTokenStore, GoogleDriveAuthError
+        native = Mock()
+        native.load.side_effect = SecretStoreError("secret_store_unavailable")
+        native.save.side_effect = SecretStoreError("secret_write_failed")
+        native.delete.side_effect = SecretStoreError("secret_delete_failed")
+        with patch("core.google_drive_auth.create_secret_store", return_value=native):
+            store = ProtectedRefreshTokenStore()
+            for action, code in ((store.load, "secret_store_unavailable"),
+                                 (lambda: store.save("fixture"), "secret_write_failed"),
+                                 (store.delete, "secret_delete_failed")):
+                with self.assertRaisesRegex(GoogleDriveAuthError, f"^{code}$"):
+                    action()
+
+    def test_unavailable_status_is_not_missing_or_connected(self):
+        from unittest.mock import Mock
+        store = Mock()
+        store.load.side_effect = GoogleDriveAuthError("secret_store_unavailable")
+        oauth = GoogleDriveOAuth(client_config_path="/fixture/absent.json", token_store=store)
+        state = oauth.status()
+        self.assertEqual(state["state"], "validation_unavailable")
+        self.assertIsNone(state["token_present"])
+        self.assertFalse(state["connected"])
+
+    def test_failed_disconnect_clears_cached_access_but_reports_failure(self):
+        from unittest.mock import Mock
+        store = Mock()
+        store.delete.side_effect = GoogleDriveAuthError("secret_delete_failed")
+        oauth = GoogleDriveOAuth(token_store=store)
+        oauth._access_token = "synthetic-access"
+        with self.assertRaisesRegex(GoogleDriveAuthError, "secret_delete_failed"):
+            oauth.disconnect()
+        self.assertEqual(oauth._access_token, "")
+
+
 if __name__ == "__main__":
     unittest.main()
