@@ -286,17 +286,26 @@ class GoogleDriveFileSync:
             )
             # The keyset source cursor is opaque and must survive restarts, so
             # an existing ledger gains the column instead of replaying a
-            # same-second bucket from the timestamp floor on every scan.
-            shard_columns = {
-                str(row[1])
-                for row in conn.execute("PRAGMA table_info(drive_scan_shards)")
-            }
-            if "source_cursor_token" not in shard_columns:
-                conn.execute(
-                    "ALTER TABLE drive_scan_shards "
-                    "ADD COLUMN source_cursor_token TEXT NOT NULL DEFAULT ''"
-                )
-            conn.commit()
+            # same-second bucket from the timestamp floor on every scan.  The
+            # check and conditional ALTER must share one write transaction:
+            # menu and operator processes may construct the service together.
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                shard_columns = {
+                    str(row[1])
+                    for row in conn.execute(
+                        "PRAGMA table_info(drive_scan_shards)"
+                    )
+                }
+                if "source_cursor_token" not in shard_columns:
+                    conn.execute(
+                        "ALTER TABLE drive_scan_shards "
+                        "ADD COLUMN source_cursor_token TEXT NOT NULL DEFAULT ''"
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             conn.close()
         try:
