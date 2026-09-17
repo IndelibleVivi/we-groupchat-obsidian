@@ -1886,7 +1886,9 @@ class WeGroupchatObsidianApp(rumps.App):
                         state_file=state_file_for_chat(chat["username"]),
                     )
                     result = monitor.check_once(dry_run=dry_run)
-                    self._handle_monitor_result(result, manual=manual, dry_run=dry_run)
+                    handled = self._handle_monitor_result(result, manual=manual, dry_run=dry_run)
+                    if handled is False or result.get("status") == "ai_backoff":
+                        had_error = True
                 except Exception as e:
                     had_error = True
                     print(
@@ -1914,6 +1916,29 @@ class WeGroupchatObsidianApp(rumps.App):
 
     def _handle_monitor_result(self, result, manual=False, dry_run=False):
         status = result.get("status")
+        blocked_messages = {
+            "monitor_state_corrupt": "进度记录损坏或版本不兼容，已暂停；请检查状态备份",
+            "monitor_state_conflict": "进度被另一个写入者改变，当前批次未确认；稍后重新核对",
+            "monitor_state_write_failed": "无法保存监控进度，当前工作未确认；请检查本地存储",
+            "source_generation_changed": "来源分片在处理期间发生变化，已暂停；请核对来源",
+            "source_generation_admission_required": "来源分片需要显式迁移，已暂停；未继承旧进度",
+            "knowledge_recovery_unavailable": "暂时无法核对已提交知识事件，未重复调用 AI；请检查知识库",
+            "ai_invalid_response": "AI 返回格式无效，当前消息批次已保留，稍后自动重试",
+            "monitor_pending_batch_corrupt": "待处理批次记录损坏，已暂停；请检查状态备份，不要重置进度",
+            "monitor_pending_batch_changed": "待处理批次的来源已变化，已暂停；需要核对来源后恢复",
+            "monitor_pending_checkpoint_changed": "进度与待处理批次不一致，已暂停；请核对状态备份",
+            "monitor_pending_policy_changed": "关注描述或知识库位置已改变；恢复原配置后可继续原批次",
+            "monitor_pending_source_unavailable": "原批次需要分片游标读取，当前来源不支持，已暂停",
+            "monitor_worker_lock_unavailable": "无法取得监控执行锁，未处理新消息",
+        }
+        if status in blocked_messages:
+            self._handle_monitor_error(f"{status}: {blocked_messages[status]}", manual)
+            return False
+        if status == "monitor_worker_busy":
+            print("[monitor] monitor_worker_busy: another worker owns this chat")
+            if manual:
+                _notify("关注推送", "正在检查", "另一个 worker 正在处理该群，本次未重复调用 AI")
+            return
         decision = result.get("decision") or {}
         projection_warnings = result.get("knowledge_projection_warnings") or []
         if projection_warnings:

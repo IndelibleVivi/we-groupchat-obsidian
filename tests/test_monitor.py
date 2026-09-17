@@ -314,7 +314,7 @@ class TopicMonitorTests(unittest.TestCase):
         db = FakeDB(messages)
         seen_prompt = []
 
-        monitor = self.monitor(db, lambda prompt, *_: seen_prompt.append(prompt) or {"match": False})
+        monitor = self.monitor(db, lambda prompt, *_: seen_prompt.append(prompt) or {"match": False, "score": 0})
         result = monitor.check_once(dry_run=True)
 
         self.assertEqual(result["message_count"], 200)
@@ -444,7 +444,7 @@ class TopicMonitorTests(unittest.TestCase):
 
         result = self.monitor(
             db,
-            lambda *_: {"match": True, "score": 95, "topic_key": "dry"},
+            lambda *_: {"match": True, "score": 95, "topic_key": "dry", "summary": "Synthetic dry run"},
         ).check_once(dry_run=True)
 
         self.assertEqual(result["status"], "matched")
@@ -665,7 +665,7 @@ class TopicMonitorTests(unittest.TestCase):
 
         monitor = self.monitor(
             FakeDB([]),
-            lambda *_: {"match": False},
+            lambda *_: {"match": False, "score": 0},
             relation_evaluator=fail_relation_evaluator,
         )
         candidate = {
@@ -689,7 +689,7 @@ class TopicMonitorTests(unittest.TestCase):
         self.assertEqual(result["source"], "same_topic_key")
 
     def test_default_relation_matches_legacy_topic_without_chat_username(self):
-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
+        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
         candidate = {
             "topic_key": "same-key",
             "source_chat_username": "chatroom",
@@ -729,7 +729,7 @@ class TopicMonitorTests(unittest.TestCase):
 
         monitor = self.monitor(
             FakeDB([]),
-            lambda *_: {"match": False},
+            lambda *_: {"match": False, "score": 0},
             knowledge_store=FailingHashStore(),
         )
 
@@ -745,7 +745,7 @@ class TopicMonitorTests(unittest.TestCase):
         self.assertEqual(result["relation_lookup_error"], "RuntimeError")
 
     def test_related_ids_require_strong_same_chat_evidence(self):
-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
+        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
         candidate = {
             "title": "Example Project memory bridge launch",
             "topic_key": "example-project-launch",
@@ -1225,7 +1225,7 @@ class TopicMonitorTests(unittest.TestCase):
         self.assertNotIn("https://example.com/old-context", markdown)
 
     def test_prompt_keeps_ai_interaction_and_multiple_candidate_guidance(self):
-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
+        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
         messages = [msg(11, "示例模型做互动问卷时加载了测试技能，并给出了示例结果")]
         prompt = monitor._build_prompt(
             messages,
@@ -1243,7 +1243,7 @@ class TopicMonitorTests(unittest.TestCase):
 
     def test_human_ai_target_chat_prompt_uses_fixed_taxonomy(self):
         self.config["monitor_chat_display_name"] = "示例人机互动群"
-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
+        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
         messages = [msg(11, "示例讨论涉及长期记忆、共读玩法和模型边界")]
 
         prompt = monitor._build_prompt(
@@ -1276,7 +1276,7 @@ class TopicMonitorTests(unittest.TestCase):
         self.assertIn("记忆与连续性", text)
 
     def test_normalized_decision_keeps_semantic_tags(self):
-        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False})
+        monitor = self.monitor(FakeDB([]), lambda *_: {"match": False, "score": 0})
 
         normalized = monitor._normalize_decision({
             "match": True,
@@ -1301,7 +1301,7 @@ class TopicMonitorTests(unittest.TestCase):
             self.config,
             state_file=self.state_file,
             hits_dir=self.hits_dir,
-            ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {"match": False},
+            ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {"match": False, "score": 0},
             link_preview_fetcher=lambda url: preview_calls.append(url) or {
                 "url": url,
                 "status": "ok",
@@ -1329,7 +1329,7 @@ class TopicMonitorTests(unittest.TestCase):
             self.config,
             state_file=self.state_file,
             hits_dir=self.hits_dir,
-            ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {"match": False},
+            ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {"match": False, "score": 0},
             link_preview_fetcher=lambda url: preview_calls.append(url) or {
                 "url": url,
                 "status": "ok",
@@ -1363,6 +1363,7 @@ class TopicMonitorTests(unittest.TestCase):
             hits_dir=self.hits_dir,
             ai_evaluator=lambda prompt, *_: seen_prompt.append(prompt) or {
                 "match": False,
+                "score": 0,
             },
             now_func=lambda: 1000,
         )
