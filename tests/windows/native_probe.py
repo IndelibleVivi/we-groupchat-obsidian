@@ -122,6 +122,11 @@ class WindowsNativeProbe:
             ctypes.POINTER(ctypes.c_void_p),
         ]
         self.advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+        self.advapi32.GetFileSecurityW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        ]
+        self.advapi32.GetFileSecurityW.restype = wintypes.BOOL
         self.advapi32.SetNamedSecurityInfoW.argtypes = [
             wintypes.LPWSTR,
             ctypes.c_int,
@@ -197,6 +202,21 @@ class WindowsNativeProbe:
         finally:
             if descriptor.value:
                 self.kernel32.LocalFree(descriptor)
+
+    def descriptor_bytes(self, path) -> bytes:
+        """Read the stored owner/DACL descriptor independently of aclapi SDDL."""
+        target = os.fspath(path)
+        information = _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
+        size = wintypes.DWORD(0)
+        self.advapi32.GetFileSecurityW(target, information, None, 0, ctypes.byref(size))
+        if self._last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
+            raise ctypes.WinError(self._last_error())
+        buffer = ctypes.create_string_buffer(size.value)
+        if not self.advapi32.GetFileSecurityW(
+            target, information, buffer, len(buffer), ctypes.byref(size),
+        ):
+            raise ctypes.WinError(self._last_error())
+        return bytes(buffer[:size.value])
 
     def grant_everyone(self, path, *, directory: bool) -> None:
         """Replace the DACL with one broad ``Everyone`` allow ACE."""

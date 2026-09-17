@@ -260,14 +260,14 @@ class WindowsPrivateStorageTests(unittest.TestCase):
         value.write_bytes(b"payload")
         self.probe.grant_everyone(value, directory=False)
 
-        self.assertIn("S-1-1-0", self.probe.sddl(value))
+        self.assertIn(";;;WD)", self.probe.sddl(value))
         self.assertFalse(self.storage.verify(value))
 
         self.storage.ensure_file(value)
 
         self.assertTrue(self.storage.verify(value))
         sddl = self.probe.sddl(value)
-        self.assertNotIn("S-1-1-0", sddl)
+        self.assertNotIn(";;;WD)", sddl)
         self.assertIn("SY", sddl)
         self.assertIn("D:P", sddl)
         self.assertEqual(sddl.count("(A;"), 2)
@@ -321,6 +321,7 @@ class WindowsPrivateStorageTests(unittest.TestCase):
         child_before = self.probe.sddl(child)
         nested_before = self.probe.sddl(nested)
         sibling_before = self.probe.sddl(sibling)
+        raw_before = [self.probe.descriptor_bytes(p) for p in (child, nested, sibling)]
 
         self.storage.ensure_directory(parent)
 
@@ -329,7 +330,9 @@ class WindowsPrivateStorageTests(unittest.TestCase):
         self.assertNotEqual(parent_sddl, parent_before)
         self.assertIn("D:P", parent_sddl)
         self.assertNotIn("OICI", parent_sddl)
-        self.assertEqual(self.probe.sddl(child), child_before)
+        raw_after = [self.probe.descriptor_bytes(p) for p in (child, nested, sibling)]
+        self.assertEqual(raw_after, raw_before)
+        self.assertEqual(self.probe.sddl(child), child_before, "stored descriptors are byte-identical")
         self.assertEqual(self.probe.sddl(nested), nested_before)
         self.assertEqual(self.probe.sddl(sibling), sibling_before)
         self.assertEqual(nested.read_bytes(), b"nested")
