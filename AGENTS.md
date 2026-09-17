@@ -2,13 +2,20 @@
 
 ## Source ownership
 
-- `app.py` is the macOS menu-bar and py2app application entrypoint.
+- `app.py` is the macOS menu-bar and py2app application entrypoint. Its
+  long-lived process still owns background timers and process-lifetime macOS
+  access; menu visibility is not a prerequisite for those jobs. Keep shared
+  domain behavior in `core/` rather than making menu presentation its owner.
 - `mcp_server.py` is the direct FastMCP entrypoint.
 - MCP is an optional legacy read-only compatibility surface. It may query and
   summarize, but must not mutate bookmarks/groups or touch WeChat UI. The old
   send tool names are inert `mcp_send_retired` stubs; legacy send config keys
   remain loadable but inactive. Do not restore sender/policy/confirmation
-  modules or a send-side effect path.
+  modules or a send-side effect path. Ordinary app installation and startup
+  must not require the MCP SDK, probe MCP readiness/processes, or manage an MCP
+  client. `requirements-mcp.txt` owns the opt-in SDK dependency. Keep explicit
+  stdio setup separate and client-neutral; the configured client owns the
+  optional server's lifecycle.
 - `core/monitor_state.py::MonitorStateStore` is the sole monitor-checkpoint
   write authority. Existing state migrates only after a valid parse; corrupt,
   symlink or non-regular state fails closed. TopicMonitor commits one expected
@@ -187,6 +194,12 @@
 ## Verification and deployment
 
 Run from repository root:
+
+The complete suite requires the optional `requirements-mcp.txt` dependencies
+as well as `requirements.txt`. A base-only run may skip MCP protocol tests and
+must not be reported as complete compatibility verification. CI exercises
+ordinary app loading without the SDK before installing the optional dependency
+and running the full regression suite.
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -t . -p 'test_*.py'

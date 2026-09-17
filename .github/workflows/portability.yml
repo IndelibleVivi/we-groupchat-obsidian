@@ -61,8 +61,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install macOS dependencies
+      - name: Install macOS dependencies (app only, no MCP SDK)
         run: python -m pip install -r requirements.txt
+      - name: Verify ordinary app bootstrap ignores the optional MCP SDK
+        run: python -m unittest tests.test_mcp_optional
+      # The optional SDK is installed only after the base-only bootstrap check,
+      # so the full suite below still exercises the legacy read-only MCP
+      # contract instead of silently skipping it.
+      - name: Install optional MCP SDK
+        run: python -m pip install -r requirements-mcp.txt
       - name: Run full macOS regression suite
         run: >-
           python -m unittest discover

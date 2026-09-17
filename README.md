@@ -190,7 +190,7 @@ independently deployed microservices. Editable sources:
 - Optional advanced selected-chat file sync through the Google Drive API, with a separate selection/control plane, durable queue, chat/month shortcuts, retry/reconcile, and no automatic deletion.
 - Exact URL extraction with credential-safe display/export redaction; built-in remote link preview is disabled and performs zero network requests.
 - CLI and `.command` maintenance entrypoints for users whose menu bar icon is hidden.
-- Optional legacy read-only MCP compatibility server for chat lookup, search, summaries, images, and existing group/bookmark inspection. It cannot send messages or mutate local metadata.
+- Optional legacy read-only MCP compatibility server for chat lookup, search, summaries, images, and existing group/bookmark inspection. It is an explicit opt-in install (`requirements-mcp.txt`); the menu-bar app does not embed or manage it. It cannot send messages or mutate local metadata.
 
 ## Privacy and Safety
 
@@ -297,6 +297,19 @@ reuse that stable bundle identity; the launcher no longer falls back to
 `python app.py`. The alias bundle still depends on this checkout and its
 `.venv`, so this remains a source-distributed macOS menu-bar app with no signed
 installer, `.dmg`, or bundled Python runtime.
+
+The ordinary install stays on `requirements.txt` and never imports the MCP SDK.
+If you also want to run the optional legacy read-only MCP server, install its
+SDK into the checkout's virtual environment after the app works. Quick Start
+starts a `.command` launcher and does not activate the shell virtual
+environment, so use the explicit interpreter path:
+
+```bash
+./.venv/bin/python -m pip install -r requirements-mcp.txt
+```
+
+The launcher installs only `requirements.txt`; it never adds or removes the
+optional package in an existing environment.
 
 macOS may request access when each long-lived menu-app process first reads
 WeChat App Data. The ordinary monitor, source guard, and resource timers stay
@@ -745,24 +758,37 @@ The `00-按日期.md` files are lightweight link-only date maps. They live at th
 
 ## MCP Server
 
-Example Claude Desktop config:
+The MCP server is an **optional legacy read-only compatibility surface**. The
+macOS menu-bar app neither embeds nor manages it: an ordinary install uses
+`requirements.txt` alone and never imports the MCP SDK. Install the optional
+dependency explicitly in this checkout's virtual environment when you want it:
+
+```bash
+./.venv/bin/python -m pip install -r requirements-mcp.txt
+```
+
+Then register `mcp_server.py` in a client that supports local MCP stdio servers. The portable part is
+the stdio command and args: point `command` at that same virtual-environment
+interpreter and `args` at this file's absolute path. The JSON block below is
+only one example wrapper; use whatever configuration format your client
+provides.
 
 ```json
 {
   "mcpServers": {
     "we-groupchat-obsidian": {
-      "command": "/absolute/path/to/we-groupchat-obsidian/.venv/bin/python3",
+      "command": "/absolute/path/to/we-groupchat-obsidian/.venv/bin/python",
       "args": ["/absolute/path/to/we-groupchat-obsidian/mcp_server.py"]
     }
   }
 }
 ```
 
-The MCP server is an **optional legacy read-only compatibility surface**. Its
-read and summary tools expose local chat-derived data to the MCP client and,
-for AI summaries, to the AI provider configured by the user. Summary calls do
-not advance bookmarks. `manage_chat_groups` permits only `list`; its former
-create/delete/add/remove actions return `mcp_mutation_retired`.
+The read and summary tools expose local chat-derived data to the MCP client you
+configure and, for AI summaries, to the AI provider configured by the user.
+Summary calls do not advance bookmarks. `manage_chat_groups` permits only
+`list`; its former create/delete/add/remove actions return
+`mcp_mutation_retired`.
 
 MCP message sending is retired. The legacy `prepare_send_message`,
 `confirm_send_message`, and `send_message` tool names remain registered for one

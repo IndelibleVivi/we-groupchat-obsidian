@@ -1,0 +1,10 @@
+# Optional legacy read-only MCP compatibility surface.
+#
+# The macOS menu-bar app never imports the MCP SDK; ordinary installs use
+# requirements.txt only. Install this file explicitly when you want to run
+# mcp_server.py as an stdio MCP server for a client you configure:
+#
+#   python -m pip install -r requirements-mcp.txt
+#
+-r requirements.txt
+mcp[cli]>=1.0.0,<2
