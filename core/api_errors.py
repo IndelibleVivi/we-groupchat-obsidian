@@ -4,6 +4,15 @@ import re
 
 RETRYABLE_STATUS_CODES = {"500", "502", "503", "504"}
 
+QUOTA_EXHAUSTED_MARKERS = (
+    "credits exhausted",
+    "insufficient balance",
+    "insufficient_quota",
+    "余额不足",
+    "额度已用完",
+    "额度不足",
+)
+
 
 def _strip_html(text):
     text = re.sub(r"<[^>]+>", " ", str(text or ""))
@@ -16,10 +25,14 @@ def normalize_ai_error(error, provider="AI"):
     text = _strip_html(raw)
     lower = text.lower()
 
-    if "401" in text or "auth" in lower or ("invalid" in lower and "key" in lower):
-        return f"{provider} API Key 无效或已过期，请在设置中重新配置"
+    # Explicit credit/balance exhaustion wins over proxy 401/429/503 envelopes.
+    # Bare "quota exceeded" also describes per-minute limits, not just billing.
+    if any(marker in lower for marker in QUOTA_EXHAUSTED_MARKERS):
+        return f"{provider} 额度已用完，请充值或等待额度重置后再试"
     if "429" in text or "rate" in lower:
         return f"{provider} API 请求频率超限，请稍后再试"
+    if "401" in text or "auth" in lower or ("invalid" in lower and "key" in lower):
+        return f"{provider} API Key 无效或已过期，请在设置中重新配置"
     if "timeout" in lower or "timed out" in lower:
         return f"{provider} API 请求超时，请检查网络连接后重试"
     if "connect" in lower or "connection" in lower:

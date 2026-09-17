@@ -345,6 +345,14 @@ If an event committed before its monitor cursor, retry adopts the stable
 `source_batch_id`, repairs projections, and advances the batch without calling
 the AI provider again.
 
+### AI error messages
+
+An explicit credit or balance exhaustion response is reported as exhausted
+quota, including when a proxy wraps it in an authentication error. A `429`
+request-limit response, including a per-minute "quota exceeded" message, asks
+you to wait; it does not by itself mean that you need to add credit or replace
+your API key.
+
 ### Documentation map
 
 - `README.md` / `README.zh-CN.md`: current user, operator, privacy, and project
