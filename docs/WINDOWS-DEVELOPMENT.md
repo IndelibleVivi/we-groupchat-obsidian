@@ -25,6 +25,35 @@
 首轮建议以一台 Windows 11 x64、本地 NTFS、普通交互用户环境为目标；其他 OS/build、
 ARM、网络盘和 cloud placeholder source 都须另外验证，不能继承支持声明。
 
+## 共建入口与合并流程
+
+仓库级贡献入口与公共数据边界见 [CONTRIBUTING](../CONTRIBUTING.md)。Windows 共建继续
+使用同一个产品与同一条 `main`：贡献者从 maintainer 标记为 ready 的 bounded issue
+认领结果，用 fork 的短期 topic branch 提交 Draft PR，不建立长期平行的 Windows domain
+分叉。一个 issue 由一个可联系的人类 GitHub identity 负责；agent 可以协助实现，但不
+替代任务 owner、机器 owner 或 maintainer 的责任。
+
+从认领到合并使用一条可检查的路径：
+
+```text
+ready issue → claimed → Draft PR → synthetic/native foundation tests
+→ exact-head review → authorized real-machine evidence（需要时）
+→ updated-base CI and finding disposition → maintainer merge
+```
+
+PR 必须绑定完整 base/head SHA，交付一个可独立验收的行为变化，并包含实际 caller、失败
+路径、必要测试和文档。新提交改变相关代码或 merge base 后，旧 review 与 native receipt
+不会自动覆盖新 head。CI 绿色、review 尚未回复、review quota failure 或只审过旧 SHA
+均不是同一事实，也不能被写成通过。
+
+真实 source 测试晚于代码审阅，并由机器 owner 对指定 commit 和范围明确同意。登录着
+微信的日常电脑不能成为自动执行公共 PR 的 self-hosted runner；hosted CI 不使用真实
+source、OAuth/API secret 或聊天数据。公开 evidence 使用 allowlist，只保留 commit、
+环境/client build、profile、测试名、pass/fail/not_run、有限错误码和未覆盖项。
+
+GitHub ruleset、required reviewer 与 CODEOWNERS 是独立的 maintainer/account 设置；模板和
+源码不能替代它们。本文件只定义贡献与 evidence contract，不表示任何设置已经更改。
+
 ## 一个产品，各自的平台实现
 
 ```mermaid

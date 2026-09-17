@@ -375,6 +375,10 @@ your API key.
 
 - `README.md` / `README.zh-CN.md`: current user, operator, privacy, and project
   overview authority.
+- `CONTRIBUTING.md`: repository contribution, exact-head review, verification,
+  and public evidence entrypoint. Windows sequencing stays in
+  `docs/WINDOWS-DEVELOPMENT.md`; module status stays in
+  `docs/WINDOWS-PORT-MAP.md`.
 - `docs/share-package-guide.zh-CN.md`: the sole tracked offline-guide template.
   The exact-commit source-package builder emits it as `群友使用说明.md`; there
   are no competing root-level quick-start manuals.

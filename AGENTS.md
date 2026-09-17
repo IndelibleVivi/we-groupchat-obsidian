@@ -120,6 +120,9 @@
   foundation and source seam plus living module/import classification;
   `docs/WINDOWS-DEVELOPMENT.md` owns contributor handoff, phase ordering,
   exact-build evidence and explicit deltas from the historical design.
+  `CONTRIBUTING.md` owns the repository-wide contribution entrypoint and public
+  evidence boundary; `.github/ISSUE_TEMPLATE/` and the PR template collect
+  task-specific scope and evidence without becoming a second Windows spec.
 - `app.py` remains the macOS shell. W0.2B.2 must not add Windows source reads,
   keys, monitor activation, attachment/backup behavior, tray UI, autostart,
   packaging or message sending.
@@ -268,6 +271,11 @@ Update README EN/ZH when entrypoints, supported behavior, privacy boundaries,
 installation, repository layout or ordinary commands change. Update operator
 guides for changed procedures and this file when source ownership, required
 verification or deployment gates change.
+
+Update `CONTRIBUTING.md` and the matching GitHub templates together when the
+claim/review/evidence workflow changes. Keep Windows technical sequencing in
+`docs/WINDOWS-DEVELOPMENT.md` and the module status in
+`docs/WINDOWS-PORT-MAP.md`; do not duplicate those contracts into templates.
 
 `docs/share-package-guide.zh-CN.md` is the sole tracked offline-guide template.
 The share-package builder may emit it as `群友使用说明.md` inside an exact-commit
