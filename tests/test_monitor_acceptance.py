@@ -207,6 +207,62 @@ class MonitorAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.event_count(), 2)
         self.assertEqual(calls, [True, True])
 
+    def test_recovery_of_committed_batch_clears_stale_ai_failure_metadata(self):
+        # A: a malformed response freezes intent and records the failure episode.
+        state_store = MonitorStateStore(self.state_path)
+        store = ConflictingKnowledgeStore(
+            self.config["monitor_knowledge_db"], self.config["monitor_obsidian_root"],
+            state_store=state_store,
+        )
+        failed = self.monitor(lambda *_: '{"match":true').check_once()
+        self.assertEqual(failed["status"], "ai_invalid_response")
+        failed_state = load_state(self.state_path)
+        self.assertEqual(failed_state["ai_last_error_code"], "ai_invalid_response")
+        self.assertEqual(failed_state["pending_source_batch"]["raw_count"], 1)
+        self.assertEqual(failed_state["last_checked_ts"], 10)
+        self.assertNotIn("source_cursors", failed_state)
+        self.assertEqual(self.event_count(), 0)
+
+        # B: the canonical event commits, but the progress CAS conflicts.
+        self.now = 1061
+        conflicted = self.monitor(lambda *_: POSITIVE, store=store).check_once()
+        self.assertEqual(conflicted["status"], "monitor_state_conflict")
+        self.assertEqual(self.event_count(), 1)
+        conflicted_state = load_state(self.state_path)
+        self.assertIn("pending_source_batch", conflicted_state)
+        self.assertEqual(conflicted_state["last_checked_ts"], 10)
+        self.assertNotIn("source_cursors", conflicted_state)
+
+        # C: adoption must not replay the provider or write a second event.
+        adopted = self.monitor(lambda *_: self.fail("committed batch replayed provider")).check_once()
+        self.assertEqual(adopted["status"], "duplicate")
+        self.assertTrue(adopted["knowledge_event_reused"])
+        self.assertEqual(self.event_count(), 1)
+        final = load_state(self.state_path)
+        self.assertEqual(final["last_checked_ts"], 11)
+        self.assertNotIn("pending_source_batch", final)
+        self.assertEqual(final["source_cursors"]["logical-a"]["cursor_token"], "[11,1]")
+        for key in (
+            "ai_failure_count", "ai_last_error", "ai_last_error_code",
+            "ai_last_error_ts", "ai_next_retry_after",
+        ):
+            self.assertNotIn(key, final)
+
+        # Health must stop flagging the recovered chat as invalid-response.
+        from core.monitor import state_file_for_chat
+        from scripts.health_check import monitor_state_health
+        directory = self.root / "recovery-health"
+        directory.mkdir()
+        path = Path(state_file_for_chat(self.config["monitor_chat_username"], state_dir=directory))
+        path.write_bytes(Path(self.state_path).read_bytes())
+        report = monitor_state_health(
+            {"monitor_chats": [{"username": self.config["monitor_chat_username"], "name": "Synthetic"}]},
+            state_dir=directory, runtime_log=self.root / "missing.log",
+        )
+        self.assertEqual(report["state"], "healthy")
+        self.assertEqual(report["pending_batches"], 0)
+        self.assertEqual(report["invalid_response_chats"], 0)
+
     def test_write_failure_before_event_keeps_members_for_next_attempt(self):
         with mock.patch.object(self.store, "apply_event", side_effect=OSError("synthetic disk failure")):
             with self.assertRaises(OSError):

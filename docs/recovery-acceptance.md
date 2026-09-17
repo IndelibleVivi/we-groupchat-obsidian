@@ -193,8 +193,10 @@ fingerprint, next cursors and inventory must agree. A newly appended message
 stays for the next batch. A same-ID in-place edit or an inserted row that changes
 the frozen prefix causes `monitor_pending_batch_changed`, not silent adoption.
 A changed generation is blocked before source-page reads. The intent is removed
-only in the successful source-progress CAS. Existing checkpoints without an
-intent keep their compatibility path.
+only in the successful source-progress CAS, and that terminal acceptance also
+clears the bounded AI failure metadata, so canonical adoption that never
+re-invokes the provider returns the health invalid-response count to zero.
+Existing checkpoints without an intent keep their compatibility path.
 
 Pending checkpoints use monitor-state v2, which older readers reject instead
 of silently ignoring frozen work. The new reader accepts v1 and v2; after a

@@ -524,6 +524,9 @@ class TopicMonitor:
             result.setdefault("source_inventory_digest", source_batch.inventory_digest)
             result.setdefault("source_eof", source_batch.source_eof)
             result.setdefault("raw_message_count", source_batch.raw_count)
+        # A terminal acceptance of this batch ends the AI failure episode too,
+        # including canonical adoption that never re-invoked the provider.
+        self._clear_ai_failure_state(state)
         return self._commit_state_result(snapshot, state, result)
 
     def _commit_state_result(self, snapshot, state, result):
