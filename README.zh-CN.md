@@ -309,6 +309,9 @@ Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 comm
 ### 文档地图
 
 - `README.md` / `README.zh-CN.md`：当前用户、operator、隐私和项目概览 authority。
+- `CONTRIBUTING.md`：仓库贡献、exact-head review、验证与 public evidence 入口；
+  Windows 阶段顺序仍由 `docs/WINDOWS-DEVELOPMENT.md` 负责，模块状态仍由
+  `docs/WINDOWS-PORT-MAP.md` 负责。
 - `docs/share-package-guide.zh-CN.md`：唯一 tracked offline-guide template；
   exact-commit source-package builder 会把它生成为 `群友使用说明.md`，根目录不再保留
   相互竞争的快速手册。
