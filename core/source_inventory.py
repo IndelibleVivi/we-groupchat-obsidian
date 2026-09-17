@@ -7,10 +7,10 @@ import json
 import os
 import posixpath
 import stat
-import tempfile
 import threading
 
-from .platform import LockMode, create_file_lock
+from .platform import LockMode
+from .state_storage import StateFileNotRegular, StateStorage
 from .project_identity import DATA_DIR_NAME
 
 
@@ -45,18 +45,6 @@ class SourceInventoryError(RuntimeError):
     def __init__(self, code: str):
         self.code = str(code)
         super().__init__(self.code)
-
-
-def _ensure_private_dir(path: str) -> None:
-    from .config import ensure_private_dir
-
-    ensure_private_dir(path)
-
-
-def _ensure_private_file(path: str) -> None:
-    from .config import ensure_private_file
-
-    ensure_private_file(path)
 
 
 def normalize_relative_source_path(value: str) -> str:
@@ -220,7 +208,7 @@ class SourceInventoryStore:
 
     _DEFAULT = object()
 
-    def __init__(self, path=_DEFAULT, *, file_lock=None):
+    def __init__(self, path=_DEFAULT, *, file_lock=None, platform_services=None):
         if path is self._DEFAULT:
             path = SOURCE_INVENTORY_FILE
         self.path = (
@@ -228,8 +216,8 @@ class SourceInventoryStore:
             if path is not None
             else ""
         )
-        self.lock_path = self.path + ".lock" if self.path else ""
         self._file_lock = file_lock
+        self._storage = StateStorage(self.path, platform_services=platform_services)
         self._memory_lock = threading.RLock()
         self._memory_payload = self._empty_payload()
 
@@ -293,7 +281,7 @@ class SourceInventoryStore:
             if not stat.S_ISREG(file_stat.st_mode):
                 raise SourceInventoryError("source_inventory_corrupt")
             fd = os.open(
-                self.path,
+                self._storage.operational_path(),
                 os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
             )
             opened_stat = os.fstat(fd)
@@ -312,17 +300,19 @@ class SourceInventoryStore:
 
     def _lock_service(self):
         if self._file_lock is None:
-            self._file_lock = create_file_lock()
+            self._file_lock = self._storage.services.require("locks")
         return self._file_lock
 
     def _lock(self):
         try:
-            _ensure_private_dir(os.path.dirname(self.path))
+            path = self._storage.prepare()
             return self._lock_service().acquire(
-                self.lock_path,
+                path + ".lock",
                 mode=LockMode.EXCLUSIVE,
                 blocking=True,
             )
+        except StateFileNotRegular as exc:
+            raise SourceInventoryError("source_inventory_corrupt") from exc
         except OSError as exc:
             raise SourceInventoryError("source_inventory_lock_unavailable") from exc
 
@@ -331,49 +321,11 @@ class SourceInventoryStore:
         lock_handle.close()
 
     def _write_file(self, payload: dict) -> None:
-        directory = os.path.dirname(self.path)
-        temp_fd = -1
-        temp_path = ""
+        encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
         try:
-            temp_fd, temp_path = tempfile.mkstemp(
-                prefix=".source-inventory.", suffix=".json", dir=directory
-            )
-            fchmod = getattr(os, "fchmod", None)
-            if callable(fchmod):
-                try:
-                    fchmod(temp_fd, 0o600)
-                except OSError:
-                    pass
-            with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
-                temp_fd = -1
-                json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, self.path)
-            temp_path = ""
-            _ensure_private_file(self.path)
-            try:
-                directory_fd = os.open(directory, os.O_RDONLY)
-            except OSError:
-                directory_fd = -1
-            if directory_fd >= 0:
-                try:
-                    os.fsync(directory_fd)
-                except OSError:
-                    pass
-                finally:
-                    os.close(directory_fd)
+            self._storage.write_bytes(encoded)
         except OSError as exc:
             raise SourceInventoryError("source_inventory_write_failed") from exc
-        finally:
-            if temp_fd >= 0:
-                os.close(temp_fd)
-            if temp_path:
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
 
     @staticmethod
     def _source_records(payload: dict, source_namespace: str) -> dict[str, dict]:

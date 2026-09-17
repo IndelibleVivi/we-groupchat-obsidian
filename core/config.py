@@ -4,11 +4,11 @@ import os
 import re
 import shlex
 import stat
-import tempfile
 import uuid
 
 from .project_identity import DATA_DIR_NAME, LEGACY_DATA_DIR_NAME
-from .platform import LockMode, create_file_lock
+from .platform import LockMode, PlatformName, detect_platform
+from .state_storage import StateFileNotRegular, StateStorage
 from .taxonomy_assignment import FREE_FORM_PROFILE
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -161,11 +161,11 @@ def _read_json_strict(path):
 
 
 def normalize_path_value(value):
-    """Normalize a user-entered path, including shell-escaped Finder/Terminal paths."""
+    """Normalize a native path; accept shell-escaped Finder/Terminal paths on macOS."""
     text = str(value or "").strip()
     if not text:
         return ""
-    if "\\" in text:
+    if "\\" in text and detect_platform() is PlatformName.MACOS:
         try:
             parts = shlex.split(text)
             if len(parts) == 1:
@@ -494,20 +494,23 @@ class ConfigStore:
     an unrelated concurrent update.
     """
 
-    def __init__(self, path=None, *, file_lock=None):
+    def __init__(self, path=None, *, file_lock=None, platform_services=None):
         self.path = os.path.abspath(os.path.expanduser(path or CONFIG_FILE))
-        self.lock_path = self.path + ".lock"
         self._file_lock = file_lock
+        self._storage = StateStorage(self.path, platform_services=platform_services)
 
     def _lock_service(self):
         if self._file_lock is None:
-            self._file_lock = create_file_lock()
+            self._file_lock = self._storage.services.require("locks")
         return self._file_lock
 
     def _lock(self, exclusive):
-        ensure_private_dir(os.path.dirname(self.path))
+        try:
+            path = self._storage.prepare()
+        except StateFileNotRegular as exc:
+            raise ConfigError("config_not_regular") from exc
         return self._lock_service().acquire(
-            self.lock_path,
+            path + ".lock",
             mode=LockMode.EXCLUSIVE if exclusive else LockMode.SHARED,
             blocking=True,
         )
@@ -519,7 +522,7 @@ class ConfigStore:
     def _read_locked(self):
         if not os.path.lexists(self.path):
             return None
-        return _sanitize_config(_read_json_strict(self.path))
+        return _sanitize_config(_read_json_strict(self._storage.operational_path()))
 
     def read(self):
         fd = self._lock(False)
@@ -529,46 +532,8 @@ class ConfigStore:
             self._unlock(fd)
 
     def _write_locked(self, value):
-        directory = os.path.dirname(self.path)
-        ensure_private_dir(directory)
-        temp_fd, temp_path = tempfile.mkstemp(
-            prefix=".config-", suffix=".json", dir=directory
-        )
-        try:
-            fchmod = getattr(os, "fchmod", None)
-            if callable(fchmod):
-                try:
-                    fchmod(temp_fd, 0o600)
-                except OSError:
-                    pass
-            with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
-                temp_fd = -1
-                json.dump(value, handle, indent=4, ensure_ascii=False)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, self.path)
-            temp_path = ""
-            ensure_private_file(self.path)
-            try:
-                directory_fd = os.open(directory, os.O_RDONLY)
-            except OSError:
-                directory_fd = -1
-            if directory_fd >= 0:
-                try:
-                    os.fsync(directory_fd)
-                except OSError:
-                    pass
-                finally:
-                    os.close(directory_fd)
-        finally:
-            if temp_fd >= 0:
-                os.close(temp_fd)
-            if temp_path:
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
+        data = (json.dumps(value, indent=4, ensure_ascii=False) + "\n").encode("utf-8")
+        self._storage.write_bytes(data)
 
     def update(self, mutator):
         if not callable(mutator):

@@ -154,7 +154,7 @@ class ConfigTests(unittest.TestCase):
             store = ConfigStore(path)
             before = store.replace({"monitor_enabled": False})
 
-            with patch("core.config.os.replace", side_effect=OSError("fixture")):
+            with patch.object(store._storage.services.atomic_publisher, "_replace", side_effect=OSError("fixture")):
                 with self.assertRaises(OSError):
                     store.update(
                         lambda config: {**config, "monitor_enabled": True}

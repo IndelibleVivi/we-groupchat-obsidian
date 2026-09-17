@@ -11,8 +11,10 @@ from core.platform.factory import (
     PlatformFactoryMismatch,
     PlatformServicesUnavailable,
     _PLATFORM_FACTORIES,
+    create_atomic_publisher,
     create_path_service,
     create_platform_services,
+    create_private_storage,
     detect_platform,
     register_platform_services,
 )
@@ -99,16 +101,22 @@ class PlatformFactoryTests(unittest.TestCase):
             services.require("secrets")
         self.assertEqual(raised.exception.code, "platform_capability_unavailable")
 
-    def test_concrete_desktop_provider_exposes_locks_and_paths_only(self):
+    def test_concrete_desktop_provider_exposes_w0_2_capabilities_only(self):
         selected = detect_platform()
         if selected is PlatformName.UNSUPPORTED:
             self.skipTest("desktop provider gate targets macOS and Windows")
         services = create_platform_services(selected)
         self.assertEqual(
             services.available_capabilities(),
-            frozenset({"locks", "paths"}),
+            frozenset(
+                {"locks", "paths", "private_storage", "atomic_publisher"}
+            ),
         )
         self.assertIsNotNone(create_path_service(selected))
+        self.assertIsNotNone(services.private_storage)
+        self.assertIsNotNone(services.atomic_publisher)
+        self.assertIsNotNone(create_private_storage(selected))
+        self.assertIsNotNone(create_atomic_publisher(selected))
 
 
 if __name__ == "__main__":

@@ -4,7 +4,14 @@ from __future__ import annotations
 import platform as runtime_platform
 from collections.abc import Callable
 
-from .contracts import FileLock, PathService, PlatformName, PlatformServices
+from .contracts import (
+    AtomicPublisher,
+    FileLock,
+    PathService,
+    PlatformName,
+    PlatformServices,
+    PrivateStorage,
+)
 
 PlatformServicesProvider = Callable[[], PlatformServices]
 
@@ -12,22 +19,34 @@ PlatformServicesProvider = Callable[[], PlatformServices]
 def _macos_services() -> PlatformServices:
     from .macos_locks import MacOSFileLock
     from .macos_paths import MacOSPathService
+    from .macos_private_storage import (
+        MacOSAtomicPublisher,
+        MacOSPrivateStorage,
+    )
 
     return PlatformServices(
         platform=PlatformName.MACOS,
         locks=MacOSFileLock(),
         paths=MacOSPathService(),
+        private_storage=MacOSPrivateStorage(),
+        atomic_publisher=MacOSAtomicPublisher(),
     )
 
 
 def _windows_services() -> PlatformServices:
     from .windows_locks import WindowsFileLock
     from .windows_paths import WindowsPathService
+    from .windows_private_storage import (
+        WindowsAtomicPublisher,
+        WindowsPrivateStorage,
+    )
 
     return PlatformServices(
         platform=PlatformName.WINDOWS,
         locks=WindowsFileLock(),
         paths=WindowsPathService(),
+        private_storage=WindowsPrivateStorage(),
+        atomic_publisher=WindowsAtomicPublisher(),
     )
 
 
@@ -109,3 +128,15 @@ def create_file_lock(platform_name: PlatformName | None = None) -> FileLock:
 
 def create_path_service(platform_name: PlatformName | None = None) -> PathService:
     return create_platform_services(platform_name).require("paths")
+
+
+def create_private_storage(
+    platform_name: PlatformName | None = None,
+) -> PrivateStorage:
+    return create_platform_services(platform_name).require("private_storage")
+
+
+def create_atomic_publisher(
+    platform_name: PlatformName | None = None,
+) -> AtomicPublisher:
+    return create_platform_services(platform_name).require("atomic_publisher")

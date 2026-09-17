@@ -1,38 +1,55 @@
-# Windows portability map (W0.2B.1)
+# Windows portability map (W0.2B.2)
 
 The full Windows programme contract, `WGO-WIN-SPEC-2`, remains external
 owner-review candidate material and is not distributed with this repository.
-`PR-W0.2B.1` is authorized as a bounded path-identity foundation; this
-document is its sole in-repository executable authority and the living
-portability classification.
+This document is the in-repository authority for the bounded W0.2B.2
+storage tranche and the living portability classification. It does not claim
+completion or approval of the full external Windows programme.
 
-```text
-repository: IndelibleVivi/we-groupchat-obsidian
-requested_ref: feat/windows-port-w0-2b1-path-identity-main
-resolved_sha: see_pr_head
-default_branch_sha: 7a318c0f2a85c587f05f5013dfd301d67efb4702
-merge_base: 7a318c0f2a85c587f05f5013dfd301d67efb4702
-w0_1_spec_baseline_sha: a25af75468588cad6f32fef1a3358b40b9036917
-w0_1_implementation_sha: 27c46226d21e540518a868c0ff55498b9f55bb3e
-last_reconciled_main_sha: 7a318c0f2a85c587f05f5013dfd301d67efb4702
-w0_2a_squash_merge_sha: 7a318c0f2a85c587f05f5013dfd301d67efb4702
-classification_scope: living module/import status
-applies_to: feat/windows-port-w0-2b1-path-identity-main
-release_tier_affected: W0 only
-```
+W0.2A supplied native shared/exclusive file locks. W0.2B.1 supplied concrete
+path identities. **W0.2B.2** adds private storage and atomic publication and
+migrates only `ConfigStore`, `MonitorStateStore`, and `SourceInventoryStore`.
+The accepted implementation baseline is the public main integrating monitor
+acceptance, quota messages, and idle-manifest reuse (`efe54ed`).
 
-W0.2B.1 adds concrete macOS and Windows path-identity providers behind the
-existing platform contract. It distinguishes human display paths, absolute
-operational paths, filesystem identity keys, and slash-normalized
-source-relative paths. Windows support is limited to local NTFS, rejects
-reparse points and unsupported namespaces/filesystems, and treats UNC only as
-a syntax fixture. No existing storage, resource, source, monitor, or UI owner
-is migrated in this phase. It does not enable Windows source discovery, key
-acquisition, database reads, monitor writes, attachments, backup, tray UI,
-autostart, packaging, or message sending. Existing macOS entrypoints and
-behavior remain authoritative.
-MCP message sending is now retired across platforms; `mcp_server.py` remains
-only as an optional legacy read-only compatibility surface.
+Windows identity remains local-NTFS-only. UNC is a syntax fixture; reparse
+points and unsupported namespaces/filesystems remain rejected. No source,
+attachment, backup, monitor job, tray, startup, secrets, or packaging capability
+is enabled. MCP remains optional legacy read-only compatibility.
+
+## W0.2B.2 storage contract
+
+- `core/state_storage.py` binds the three state owners to the existing path,
+  lock, private-storage, and atomic-publication services. The owners retain
+  their schemas, JSON representation, revision/CAS rules and error vocabulary.
+  Constructors do not create storage. Read-only monitor/inventory inspection
+  neither creates a directory/lock nor changes permissions.
+- Path admission uses the existing platform path provider. The final state
+  file cannot be a symlink/non-regular node. Native Windows input is not passed
+  through POSIX shell unescaping. File identities are not used as lock names:
+  atomic replacement changes the file ID, while the admitted filename and its
+  sibling lock must continue serializing writers.
+- Private storage is enforced before publishing state. macOS uses current-user
+  ownership and 0700 directories / 0600 regular files. Windows uses a protected
+  NTFS DACL admitting the current user and SYSTEM. Windows mode bits are not
+  evidence of privacy. Securing a directory must not recursively rewrite ACLs
+  or permissions on existing ancestors or unrelated descendants.
+- Atomic publication creates a private temporary file in the same directory,
+  writes and flushes its complete payload, then replaces the destination once.
+  A failure before replacement preserves the previous canonical bytes and
+  revision. There is no delete-destination fallback. Cleanup owns only the
+  operation's temporary file. Atomic visibility does not promise power-loss
+  durability on every filesystem; Windows has no claimed directory-fsync
+  barrier here.
+- Existing `core.config.ensure_private_dir/file` remain for the explicitly
+  unmigrated archive, knowledge, projection, and other Mac consumers. They are
+  not used by the three migrated stores. Those callers are later work, not a
+  second publication path for these stores. Credential storage remains W0.3.
+
+Acceptance covers actual private storage and first/replacement publication,
+pre-replace failure preservation, native path inputs, read-only inspection,
+concurrent config patches, checkpoint revision conflicts, and inventory union.
+Windows ACL and reparse tests run on Windows; macOS skips do not prove them.
 
 ## Classification
 
@@ -74,7 +91,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/background_jobs.py` | `windows-import-safe` | Shared process-lifetime job coordination; behavior activation remains gated. |
 | `core/bookmark.py` | `deferred-w0.2` | Transitively imports ConfigStore/private storage. |
 | `core/chat_groups.py` | `deferred-w0.2` | Transitively imports ConfigStore/private storage. |
-| `core/config.py` | `windows-import-safe` | W0.2A config locking is portable; W0.2B.1 does not migrate config paths, while atomic publication and private-storage hardening remain W0.2B.2. |
+| `core/config.py` | `windows-import-safe` | W0.2B.2 uses native private storage, path admission and atomic publication; config revision/sole-writer rules are unchanged. |
 | `core/daily_digest.py` | `deferred-w0.2` | Transitively imports config/knowledge storage; Windows activation is W3. |
 | `core/decryptor.py` | `windows-import-safe` | Shared crypto/WAL implementation; synthetic behavior fixtures expand in W1. |
 | `core/google_drive_auth.py` | `deferred-w0.2` | Config/private storage plus macOS Keychain; secret adapter is W0.3. |
@@ -91,15 +108,17 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/monitor.py` | `deferred-w0.2` | Transitively imports config/knowledge/review storage; Windows activation is W3. |
 | `core/monitor_result.py` | `windows-import-safe` | Pure bounded outcome interpretation; unknown results block catch-up. No platform or product activation. |
 | `core/monitor_source.py` | `windows-import-safe` | Pure source-cursor merge and pending-batch metadata validation; platform storage remains owned by callers. |
-| `core/monitor_state.py` | `windows-import-safe` | W0.2A shared/exclusive locking and revision CAS are portable; Windows monitor activation remains W3. |
+| `core/monitor_state.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve checkpoint CAS and read-only inspection; Windows monitor activation remains W3. |
 | `core/notification_identity.py` | `macos-only` | Foundation/app-bundle notification identity diagnostics. |
 | `core/notification_target.py` | `macos-only` | Emits the macOS `open` command; target-opening adapter is W6. |
-| `core/platform/__init__.py` | `windows-import-safe` | Exposes contracts, stable path errors, and active-platform lock/path selectors. |
-| `core/platform/contracts.py` | `windows-import-safe` | Shared lock/path/storage/secret/process/notification/open/autostart protocols; W0.2B.1 defines stable `path_identity_unknown` and `reparse_point_conflict` failures. |
-| `core/platform/factory.py` | `windows-import-safe` | Fail-closed service registry with lazy macOS and Windows lock/path providers; all later capabilities remain absent. |
+| `core/platform/__init__.py` | `windows-import-safe` | Exposes contracts and active-platform lock/path/private-storage/publication selectors. |
+| `core/platform/contracts.py` | `windows-import-safe` | Shared platform protocols including private storage and atomic publication; path/storage errors are content-free. |
+| `core/platform/factory.py` | `windows-import-safe` | Lazy macOS/Windows lock, path, private-storage and atomic-publication providers; later capabilities remain absent. |
 | `core/platform/macos_locks.py` | `macos-only` | Native `fcntl.flock` shared/exclusive backend retained for current macOS behavior. |
+| `core/platform/macos_private_storage.py` | `macos-only` | Current-UID 0700/0600 enforcement and same-directory atomic publication; no ancestor or unrelated child permission changes. |
 | `core/platform/macos_paths.py` | `macos-only` | Concrete inode identity; valid-UTF-8 missing-child identity is limited to APFS and uses volume-reported case semantics. HFS+ and unknown normalization rules fail closed. |
 | `core/platform/windows_locks.py` | `windows-import-safe` | Native `LockFileEx` shared/exclusive backend with retained handles and stable `worker_busy` conflicts. |
+| `core/platform/windows_private_storage.py` | `windows-import-safe` | Handle-based protected NTFS DACL enforcement/verification and atomic publication; path admission remains in windows_paths. |
 | `core/platform/windows_paths.py` | `windows-import-safe` | Local-NTFS identity via handle-relative NT traversal, retained ancestry handles, volume/file IDs, extended operational paths, and fail-closed reparse/case-sensitive/unsupported-filesystem checks. |
 | `core/project_identity.py` | `windows-import-safe` | Shared public project identifiers. |
 | `core/relation_audit.py` | `windows-import-safe` | Imports without platform services; filesystem behavior remains unclaimed. |
@@ -109,7 +128,8 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/resource_capture.py` | `deferred-w0.2` | Direct `fcntl` and source/config dependencies; Windows is W4. |
 | `core/review_queue.py` | `deferred-w0.2` | Transitively imports ConfigStore/private storage; Windows activation is W3. |
 | `core/source_contract.py` | `windows-import-safe` | Existing shared source-metadata helpers; canonical WeChatSource extraction is W1.1. |
-| `core/source_inventory.py` | `windows-import-safe` | W0.2A inventory serialization is portable; W0.2B.1 does not migrate inventory paths, while private/atomic completion and source activation remain W0.2B.2/W1+. |
+| `core/state_storage.py` | `windows-import-safe` | Platform IO binding for the three migrated JSON state owners; no schema or revision authority. |
+| `core/source_inventory.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve completeness, revisions, and read-only inspection; source activation remains W1+. |
 | `core/source_metadata_plan.py` | `deferred-w0.2` | Transitively imports digest/knowledge/config storage. |
 | `core/taxonomy_assignment.py` | `windows-import-safe` | Platform-neutral taxonomy resolution. |
 | `core/taxonomy_migration.py` | `deferred-w0.2` | Direct `fcntl` and knowledge storage. |
@@ -129,7 +149,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `scripts/configure_monitor.py` | `operator-deferred` | Depends on config, source, keychain, and knowledge activation. |
 | `scripts/daily_digest.py` | `operator-deferred` | Depends on W0.2 storage and W3 activation. |
 | `scripts/google_drive_file_sync.py` | `operator-deferred` | Depends on current auth/config/source adapters. |
-| `scripts/health_check.py` | `macos-only` | Privacy-safe reliability matrix plus LaunchAgent/notification/macOS source diagnostics; its Windows line reports the W0.2B.1 lock/path-source-only boundary. |
+| `scripts/health_check.py` | `macos-only` | Privacy-safe reliability matrix plus LaunchAgent/notification/macOS source diagnostics; its Windows line reports the W0.2B.2 bounded state-storage source boundary. |
 | `scripts/migrate_taxonomy.py` | `operator-deferred` | Depends on W0.2 config/knowledge storage. |
 | `scripts/organize_obsidian.py` | `operator-deferred` | Depends on W0.2 path/storage and W3 projection activation. |
 | `scripts/refresh_data_source.py` | `macos-only` | Invokes the current macOS key/process adapter. |
@@ -149,8 +169,9 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 2. **W0.2B.1:** provide concrete macOS/Windows path identities and prove path
    alias, Unicode, long-path, missing-final, UNC-syntax, reserved-name, and
    reparse and held-ancestor boundaries without migrating existing callers.
-3. **W0.2B.2:** add private-storage enforcement and atomic publication, then
-   migrate only the explicitly authorized storage owners.
+3. **W0.2B.2:** implement private storage and atomic publication; migrate only
+   config, monitor checkpoints, and source inventory. Remaining storage owners
+   retain their deferred classification and separate caller migrations.
 4. **W0.3:** adapt secrets behind the contract. Notifications, target opening,
    tray behavior, packaging, and logon startup remain W6.
 5. **W1.1–W1.3:** extract the canonical WeChat source contract, add one
