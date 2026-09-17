@@ -15,7 +15,8 @@ concurrency:
 
 jobs:
   windows-import:
-    name: Windows x64 / Python 3.11 storage and import boundary
+    # This check name is required by the repository's main-branch ruleset.
+    name: Windows x64 / Python 3.11 import boundary
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
