@@ -99,6 +99,35 @@ def encode_cursor_token(create_time, rowid) -> str:
     )
 
 
+# The two structural method names that describe the legacy timestamp-page
+# subset. ``source_capabilities`` reports ``shard_pages`` when a source exposes
+# either one, so page dispatch must accept exactly the same subset; keeping the
+# names in one place stops the capability check and the reader from drifting.
+_TIMESTAMP_PAGE_METHODS = (
+    "get_cursor_messages_for_shard",
+    "get_messages_for_shard",
+)
+
+
+def _timestamp_page_reader(source):
+    """Resolve the timestamp page reader, or fail closed as a bounded error.
+
+    ``source_capabilities`` accepts readers that expose only
+    ``get_cursor_messages_for_shard`` as the ``shard_pages`` capability, so this
+    dispatch must resolve that same subset. Reading the fallback as an eager
+    ``getattr`` default would evaluate ``source.get_messages_for_shard`` even
+    when the cursor variant is present and raise ``AttributeError`` for that
+    legitimate shape; a present-but-non-callable attribute must also fail closed
+    rather than leak ``TypeError``. Only callable members are admissible, and a
+    source that exposes none of them is a content-free source failure.
+    """
+    for name in _TIMESTAMP_PAGE_METHODS:
+        candidate = getattr(source, name, None)
+        if callable(candidate):
+            return candidate
+    raise SourceUnavailableError("source_shard_unavailable")
+
+
 def decode_cursor_token(token, *, since_ts=0) -> tuple[int, int]:
     """Decode one keyset token, or the timestamp floor when it is absent.
 
@@ -131,9 +160,7 @@ def source_capabilities(source) -> frozenset:
     exposed = []
     if callable(getattr(source, "get_source_inventory", None)):
         exposed.append("source_inventory")
-    if callable(getattr(source, "get_messages_for_shard", None)) or callable(
-        getattr(source, "get_cursor_messages_for_shard", None)
-    ):
+    if any(callable(getattr(source, name, None)) for name in _TIMESTAMP_PAGE_METHODS):
         exposed.append("shard_pages")
     if callable(getattr(source, "get_cursor_page_for_shard", None)):
         exposed.append("keyset_pages")
@@ -368,11 +395,7 @@ def read_source_page(
 
     seen = set(seen_ids or ())
     request_limit = page_limit + len(seen)
-    reader = getattr(
-        source,
-        "get_cursor_messages_for_shard",
-        source.get_messages_for_shard,
-    )
+    reader = _timestamp_page_reader(source)
     messages = reader(
         username,
         source_shard_id,
