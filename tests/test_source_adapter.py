@@ -362,6 +362,106 @@ class SourcePageTests(unittest.TestCase):
         self.assertEqual(events, ["enter", "body", "exit"])
 
 
+class TimestampSubsetDispatchTests(unittest.TestCase):
+    """Readers exposing only one timestamp method must still dispatch cleanly."""
+
+    class _CursorOnlySource:
+        """The bounded ``shard_pages`` subset: no ``get_messages_for_shard``."""
+
+        def __init__(self, rows=None):
+            self.rows = list(rows or [])
+            self.calls = []
+
+        def get_cursor_messages_for_shard(
+            self,
+            _username,
+            source_shard_id,
+            *,
+            since_ts=0,
+            limit=500,
+            page_forward=False,
+            since_inclusive=False,
+        ):
+            self.calls.append((source_shard_id, since_ts, limit))
+            rows = [
+                dict(row) for row in self.rows if int(row["timestamp"]) >= since_ts
+            ]
+            rows.sort(key=lambda row: int(row["timestamp"]))
+            return rows[:limit]
+
+    def test_cursor_only_reader_is_not_masked_by_the_missing_plain_reader(self):
+        # The regression: `source_capabilities` accepts a reader that only
+        # exposes `get_cursor_messages_for_shard`, so dispatch must not eagerly
+        # evaluate the absent `get_messages_for_shard` fallback.
+        rows = [_message("m0", 10), _message("m1", 10), _message("m2", 11)]
+        source = self._CursorOnlySource(rows)
+        self.assertFalse(hasattr(source, "get_messages_for_shard"))
+        self.assertEqual(source_capabilities(source), frozenset({"shard_pages"}))
+
+        page, next_cursor, exhausted = read_source_page(
+            source, "chat", "shard-1", cursor_timestamp=10, seen_ids={"m0"}, limit=10
+        )
+
+        self.assertEqual([item["source_message_id"] for item in page], ["m1", "m2"])
+        self.assertEqual(next_cursor, "")
+        self.assertTrue(exhausted)
+        # The legacy request still widens by the identities already consumed.
+        self.assertEqual(source.calls, [("shard-1", 10, 11)])
+
+    def test_timestamp_only_reader_keeps_the_legacy_fallback_path(self):
+        source = _LegacySource([_message("m0", 10), _message("m1", 10)])
+        self.assertFalse(hasattr(source, "get_cursor_messages_for_shard"))
+        self.assertEqual(source_capabilities(source), frozenset({"shard_pages"}))
+
+        page, next_cursor, exhausted = read_source_page(
+            source, "chat", "shard-1", cursor_timestamp=10, seen_ids={"m0"}, limit=10
+        )
+
+        self.assertEqual([item["source_message_id"] for item in page], ["m1"])
+        self.assertEqual(next_cursor, "")
+        self.assertTrue(exhausted)
+        self.assertEqual(source.requested_limits, [11])
+
+    def test_unsupported_reader_shapes_fail_closed_as_bounded_errors(self):
+        class _NoReader:
+            pass
+
+        class _NonCallableReader:
+            get_cursor_messages_for_shard = None
+            get_messages_for_shard = "not callable"
+
+        for source in (_NoReader(), _NonCallableReader()):
+            with self.subTest(source=type(source).__name__):
+                self.assertEqual(source_capabilities(source), frozenset())
+                with self.assertRaises(SourceUnavailableError) as raised:
+                    read_source_page(source, "chat", "shard-1")
+                self.assertEqual(raised.exception.code, "source_shard_unavailable")
+                self.assertIn(raised.exception.code, SOURCE_ERROR_CODES)
+
+    def test_cursor_variant_wins_when_both_timestamp_readers_exist(self):
+        rows = [_message("m0", 5)]
+        source = _LegacySource(rows)
+        used = []
+
+        def _cursor_reader(_username, _shard, **_kwargs):
+            used.append("cursor")
+            return [dict(row) for row in rows]
+
+        def _plain_reader(*_args, **_kwargs):
+            used.append("plain")
+            return []
+
+        source.get_cursor_messages_for_shard = _cursor_reader
+        source.get_messages_for_shard = _plain_reader
+
+        page, _next_cursor, _exhausted = read_source_page(
+            source, "chat", "shard-1", cursor_timestamp=5, limit=10
+        )
+
+        self.assertEqual(used, ["cursor"])
+        self.assertEqual([item["source_message_id"] for item in page], ["m0"])
+
+
 class CanonicalReaderParityTests(unittest.TestCase):
     """The seam must page exactly like the production macOS reader."""
 
