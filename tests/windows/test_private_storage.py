@@ -33,9 +33,13 @@ from core.platform.windows_private_storage import (
 )
 from tests.windows.native_probe import WindowsNativeProbe
 from tests.windows.storage_doubles import (
+    AclApplicationApi,
     StubNative,
     StubPathService,
+    build_native_double,
     no_blocking_wait,
+    operational_path,
+    temporary_prefix,
 )
 
 
@@ -512,13 +516,21 @@ class WindowsPermissionRequestContractTests(unittest.TestCase):
     """Existing ancestors must be inspected without requesting WRITE_DAC.
 
     The double refuses any DACL-write request the way a normal user's drive
-    root does, so asking for more than the exact target fails this test.
+    root does, so asking for more than the exact target fails this test. The
+    expected paths come from the same host conversion the storage layer uses,
+    so they hold on POSIX paths and on drive-letter Windows paths alike.
     """
+
+    ROOT = operational_path("/")
+    STATE = operational_path("/state")
+    PRIVATE = operational_path("/state/private")
+    TARGET = operational_path("/state/private/target")
+    VALUE = operational_path("/state/value.bin")
 
     def test_existing_ancestors_are_never_opened_for_dacl_write(self):
         native = StubNative(
-            directories={"\\", "\\state"},
-            deny_write_dacl={"\\", "\\state"},
+            directories={self.ROOT, self.STATE},
+            deny_write_dacl={self.ROOT, self.STATE},
         )
         storage = WindowsPrivateStorage(
             paths=StubPathService(),
@@ -527,21 +539,21 @@ class WindowsPermissionRequestContractTests(unittest.TestCase):
 
         storage.ensure_directory("/state/private/target")
 
-        self.assertNotIn(("\\", True), native.open_calls)
-        self.assertNotIn(("\\state", True), native.open_calls)
+        self.assertNotIn((self.ROOT, True), native.open_calls)
+        self.assertNotIn((self.STATE, True), native.open_calls)
         self.assertEqual(
             sorted(native.created_directories),
-            ["\\state\\private", "\\state\\private\\target"],
+            [self.PRIVATE, self.TARGET],
         )
         self.assertEqual(
             sorted(native.secured),
-            ["\\state\\private", "\\state\\private\\target"],
+            [self.PRIVATE, self.TARGET],
         )
 
     def test_exact_existing_directory_is_still_secured(self):
         native = StubNative(
-            directories={"\\", "\\state"},
-            deny_write_dacl={"\\"},
+            directories={self.ROOT, self.STATE},
+            deny_write_dacl={self.ROOT},
         )
         storage = WindowsPrivateStorage(
             paths=StubPathService(),
@@ -550,15 +562,15 @@ class WindowsPermissionRequestContractTests(unittest.TestCase):
 
         storage.ensure_directory("/state")
 
-        self.assertIn(("\\state", True), native.open_calls)
-        self.assertEqual(native.secured, ["\\state"])
+        self.assertIn((self.STATE, True), native.open_calls)
+        self.assertEqual(native.secured, [self.STATE])
         self.assertEqual(native.created_directories, [])
 
     def test_verify_never_requests_dacl_write(self):
         native = StubNative(
-            directories={"\\state"},
-            files={"\\state\\value.bin": b"value"},
-            deny_write_dacl={"\\state", "\\state\\value.bin"},
+            directories={self.STATE},
+            files={self.VALUE: b"value"},
+            deny_write_dacl={self.STATE, self.VALUE},
         )
         storage = WindowsPrivateStorage(
             paths=StubPathService(),
@@ -569,14 +581,14 @@ class WindowsPermissionRequestContractTests(unittest.TestCase):
 
         self.assertEqual(
             native.open_calls,
-            [("\\state\\value.bin", False)],
+            [(self.VALUE, False)],
         )
 
     def test_ensure_file_requests_dacl_write_for_the_target_only(self):
         native = StubNative(
-            directories={"\\state"},
-            files={"\\state\\value.bin": b"value"},
-            deny_write_dacl={"\\state"},
+            directories={self.STATE},
+            files={self.VALUE: b"value"},
+            deny_write_dacl={self.STATE},
         )
         storage = WindowsPrivateStorage(
             paths=StubPathService(),
@@ -587,9 +599,65 @@ class WindowsPermissionRequestContractTests(unittest.TestCase):
 
         self.assertEqual(
             native.open_calls,
-            [("\\state\\value.bin", True)],
+            [(self.VALUE, True)],
         )
-        self.assertEqual(native.secured, ["\\state\\value.bin"])
+        self.assertEqual(native.secured, [self.VALUE])
+
+
+class AclApplicationPathTests(unittest.TestCase):
+    """The private DACL must be applied as a descriptor to the exact target.
+
+    The aclapi setter requests auto-inheritance, which rewrote existing
+    children in the previous CI run. This test pins the replacement path
+    locally: the raw handle-based descriptor setter, a request that carries no
+    auto-inheritance bits and no owner/group/SACL, and a descriptor whose only
+    offset points at the two-ACE ACL. Real DACL behavior is proven by the
+    Windows-native tests.
+    """
+
+    def test_dacl_is_applied_with_the_raw_descriptor_setter(self):
+        api = AclApplicationApi()
+        native = build_native_double(api)
+
+        native.apply_private_dacl(object())
+
+        self.assertEqual(api.entries_in_acl_calls, 1)
+        self.assertEqual(api.freed, 1)
+        self.assertEqual(api.aclapi_setter_calls, [])
+        self.assertEqual(len(api.applications), 1)
+        information, control, dacl_offset = api.applications[0]
+        self.assertEqual(
+            information,
+            windows_storage._DACL_SECURITY_INFORMATION,
+        )
+        self.assertEqual(
+            control,
+            windows_storage._PRIVATE_DESCRIPTOR_CONTROL,
+        )
+        self.assertFalse(control & windows_storage._SE_DACL_AUTO_INHERIT_REQ)
+        self.assertFalse(control & windows_storage._SE_DACL_AUTO_INHERITED)
+        self.assertTrue(control & windows_storage._SE_DACL_PRESENT)
+        self.assertTrue(control & windows_storage._SE_DACL_PROTECTED)
+        self.assertEqual(dacl_offset, 20)
+
+    def test_descriptor_embeds_the_acl_and_leaves_other_offsets_empty(self):
+        # Well-formed ACL header: revision 2, 8 bytes, no ACEs.
+        acl_bytes = bytes([0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00])
+        api = AclApplicationApi(acl_bytes=acl_bytes)
+        native = build_native_double(api)
+
+        native.apply_private_dacl(object())
+
+        raw = api.descriptors[0]
+        view = windows_storage._SECURITY_DESCRIPTOR.from_buffer_copy(raw)
+        self.assertEqual(view.Revision, windows_storage._SECURITY_DESCRIPTOR_REVISION)
+        self.assertEqual(view.Sbz1, 0)
+        self.assertEqual(view.OffsetOwner, 0)
+        self.assertEqual(view.OffsetGroup, 0)
+        self.assertEqual(view.OffsetSacl, 0)
+        self.assertEqual(view.OffsetDacl, ctypes.sizeof(view))
+        self.assertEqual(len(raw), ctypes.sizeof(view) + len(acl_bytes))
+        self.assertEqual(raw[view.OffsetDacl :], acl_bytes)
 
 
 class WindowsPublisherCleanupContractTests(unittest.TestCase):
@@ -602,9 +670,10 @@ class WindowsPublisherCleanupContractTests(unittest.TestCase):
     """
 
     def test_pre_create_failure_never_deletes_a_candidate(self):
+        existing = operational_path("/state/existing.bin")
         native = StubNative(
-            directories={"\\", "\\state"},
-            files={"\\state\\existing.bin": b"old"},
+            directories={operational_path("/"), operational_path("/state")},
+            files={existing: b"old"},
             create_private_file_error=OSError(5, "create failed"),
             create_private_file_error_is_pre_create=True,
         )
@@ -620,12 +689,13 @@ class WindowsPublisherCleanupContractTests(unittest.TestCase):
         self.assertEqual(len(native.attempts), 1)
         self.assertEqual(native.deleted, [])
         self.assertEqual(native.created_files, [])
-        self.assertEqual(native.files, {"\\state\\existing.bin": b"old"})
+        self.assertEqual(native.files, {existing: b"old"})
 
     def test_post_create_failure_is_cleaned_by_the_native_owner_only(self):
+        existing = operational_path("/state/existing.bin")
         native = StubNative(
-            directories={"\\", "\\state"},
-            files={"\\state\\existing.bin": b"old"},
+            directories={operational_path("/"), operational_path("/state")},
+            files={existing: b"old"},
             create_private_file_error=OSError(5, "acl failure"),
         )
         storage = WindowsPrivateStorage(
@@ -639,12 +709,13 @@ class WindowsPublisherCleanupContractTests(unittest.TestCase):
 
         self.assertEqual(len(native.attempts), 1)
         self.assertEqual(native.deleted, native.created_files)
-        self.assertEqual(native.files, {"\\state\\existing.bin": b"old"})
+        self.assertEqual(native.files, {existing: b"old"})
 
     def test_candidate_collision_keeps_the_pre_existing_file(self):
+        target = operational_path("/state/value.bin")
         native = StubNative(
-            directories={"\\", "\\state"},
-            files={"\\state\\value.bin": b"old"},
+            directories={operational_path("/"), operational_path("/state")},
+            files={target: b"old"},
             collide_attempts=1,
         )
         storage = WindowsPrivateStorage(
@@ -656,14 +727,14 @@ class WindowsPublisherCleanupContractTests(unittest.TestCase):
         publisher.write_bytes("/state/value.bin", b"new")
 
         collided = native.attempts[0]
-        self.assertTrue(collided.startswith("\\state\\.wgo-publish-"))
+        self.assertTrue(collided.startswith(temporary_prefix("/state")))
         self.assertEqual(native.attempts[1], native.moves[-1][0])
         self.assertNotEqual(native.attempts[1], collided)
         # The older file that owned the colliding name is untouched.
         self.assertEqual(native.files[collided], b"pre-existing temporary")
         self.assertNotIn(collided, native.deleted)
-        self.assertEqual(native.files["\\state\\value.bin"], b"new")
-        self.assertEqual(native.moves[-1][1], "\\state\\value.bin")
+        self.assertEqual(native.files[target], b"new")
+        self.assertEqual(native.moves[-1][1], target)
 
 
 if __name__ == "__main__":

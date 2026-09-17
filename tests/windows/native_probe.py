@@ -161,12 +161,14 @@ class WindowsNativeProbe:
     def _last_error() -> int:
         return int(ctypes.get_last_error())
 
-    def sddl(self, path: str) -> str:
+    def sddl(self, path) -> str:
         """Render the owner plus DACL of a named object as SDDL."""
+        # ctypes wchar_t* parameters accept str only; callers pass PathLike.
+        target = os.fspath(path)
         information = _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
         descriptor = ctypes.c_void_p()
         status = self.advapi32.GetNamedSecurityInfoW(
-            path,
+            target,
             _SE_FILE_OBJECT,
             information,
             None,
@@ -196,8 +198,9 @@ class WindowsNativeProbe:
             if descriptor.value:
                 self.kernel32.LocalFree(descriptor)
 
-    def grant_everyone(self, path: str, *, directory: bool) -> None:
+    def grant_everyone(self, path, *, directory: bool) -> None:
         """Replace the DACL with one broad ``Everyone`` allow ACE."""
+        target = os.path.abspath(os.fspath(path))
         size = wintypes.DWORD(_SECURITY_MAX_SID_SIZE)
         everyone = ctypes.create_string_buffer(_SECURITY_MAX_SID_SIZE)
         if not self.advapi32.CreateWellKnownSid(
@@ -234,7 +237,7 @@ class WindowsNativeProbe:
             raise ctypes.WinError(int(status))
         try:
             status = self.advapi32.SetNamedSecurityInfoW(
-                os.path.abspath(path),
+                target,
                 _SE_FILE_OBJECT,
                 _DACL_SECURITY_INFORMATION,
                 None,
@@ -247,10 +250,12 @@ class WindowsNativeProbe:
         if status != 0:
             raise ctypes.WinError(int(status))
 
-    def create_reparse_point(self, link_path: str, target_path: str) -> None:
+    def create_reparse_point(self, link_path, target_path) -> None:
         """Create a mount-point junction; needs no elevated privilege."""
-        substitute = "\\??\\" + os.path.abspath(target_path)
-        display = os.path.abspath(target_path)
+        link = os.path.abspath(os.fspath(link_path))
+        target = os.path.abspath(os.fspath(target_path))
+        substitute = "\\??\\" + target
+        display = target
         path_buffer = ctypes.create_unicode_buffer(substitute + display)
         data = _MountPointReparseData(
             ReparseTag=_IO_REPARSE_TAG_MOUNT_POINT,
@@ -270,7 +275,7 @@ class WindowsNativeProbe:
             ctypes.sizeof(path_buffer) - 2,
         )
         handle = self.kernel32.CreateFileW(
-            os.path.abspath(link_path),
+            link,
             _GENERIC_WRITE,
             _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
             None,

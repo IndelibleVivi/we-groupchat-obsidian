@@ -1,10 +1,13 @@
 """Windows private storage and atomic byte publication for W0.2B.2.
 
 Privacy on Windows is a per-object DACL question, so this backend uses native
-``ctypes`` calls only: ``SetSecurityInfo`` applies a protected DACL that grants
-the current user and LocalSystem full access, and ``GetSecurityInfo`` inspects
-the DACL through a retained handle. ``chmod`` is never treated as Windows
-privacy evidence and neither PowerShell nor ``icacls`` is invoked.
+``ctypes`` calls only: a self-relative descriptor carrying a protected DACL
+that grants the current user and LocalSystem full access is applied to the
+exact target handle with ``NtSetSecurityObject``, and ``GetSecurityInfo``
+inspected through a retained handle verifies it. The ``aclapi`` setter is
+deliberately not used: it requests auto-inheritance, which rewrites existing
+children of a container. ``chmod`` is never treated as Windows privacy
+evidence and neither PowerShell nor ``icacls`` is invoked.
 
 Path admission (local NTFS, reparse-point and case-sensitivity rejection, long
 paths, reserved names) stays owned by :mod:`core.platform.windows_paths`; this
@@ -78,9 +81,18 @@ _MOVEFILE_WRITE_THROUGH = 0x00000008
 _SE_FILE_OBJECT = 1
 _OWNER_SECURITY_INFORMATION = 0x00000001
 _DACL_SECURITY_INFORMATION = 0x00000004
-_PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 _SE_DACL_PRESENT = 0x0004
 _SE_DACL_PROTECTED = 0x1000
+# Auto-inheritance request/inherited bits. The private descriptor must not
+# carry them: requesting auto-inheritance is what made the previous
+# ``SetSecurityInfo`` call rewrite existing children.
+_SE_DACL_AUTO_INHERIT_REQ = 0x0100
+_SE_DACL_AUTO_INHERITED = 0x0400
+_SE_SELF_RELATIVE = 0x8000
+_SECURITY_DESCRIPTOR_REVISION = 1
+_PRIVATE_DESCRIPTOR_CONTROL = (
+    _SE_SELF_RELATIVE | _SE_DACL_PRESENT | _SE_DACL_PROTECTED
+)
 
 _ACL_SIZE_INFORMATION_CLASS = 2
 _ACCESS_ALLOWED_ACE_TYPE = 0x00
@@ -161,6 +173,54 @@ class _EXPLICIT_ACCESS_W(ctypes.Structure):
         ("grfInheritance", _DWORD),
         ("Trustee", _TRUSTEE_W),
     ]
+
+
+class _ACL_HEADER(ctypes.Structure):
+    _fields_ = [
+        ("AclRevision", ctypes.c_uint8),
+        ("Sbz1", ctypes.c_uint8),
+        ("AclSize", _WORD),
+        ("AceCount", _WORD),
+        ("Sbz2", _WORD),
+    ]
+
+
+class _SECURITY_DESCRIPTOR(ctypes.Structure):
+    _fields_ = [
+        ("Revision", ctypes.c_uint8),
+        ("Sbz1", ctypes.c_uint8),
+        ("Control", _WORD),
+        ("OffsetOwner", _DWORD),
+        ("OffsetGroup", _DWORD),
+        ("OffsetSacl", _DWORD),
+        ("OffsetDacl", _DWORD),
+    ]
+
+
+def _self_relative_security_descriptor(acl_bytes: bytes) -> ctypes.Array:
+    """Wrap ACL bytes in a self-relative descriptor with no auto-inheritance.
+
+    The native object setter accepts a file handle and changes only its DACL.
+    Its documented user-mode entrypoint is ``NtSetSecurityObject``:
+    https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetsecurityobject
+    Unlike the ``aclapi`` wrappers it does not inject an auto-inheritance
+    request, so the update is confined to the object whose handle it is called
+    with. Only ``SE_DACL_PRESENT | SE_DACL_PROTECTED | SE_SELF_RELATIVE`` are
+    set: no owner/group/SACL, and neither ``SE_DACL_AUTO_INHERIT_REQ`` nor
+    ``SE_DACL_AUTO_INHERITED``.
+    """
+    offset = ctypes.sizeof(_SECURITY_DESCRIPTOR)
+    buffer = ctypes.create_string_buffer(offset + len(acl_bytes))
+    descriptor = _SECURITY_DESCRIPTOR.from_buffer(buffer)
+    descriptor.Revision = _SECURITY_DESCRIPTOR_REVISION
+    descriptor.Sbz1 = 0
+    descriptor.Control = _PRIVATE_DESCRIPTOR_CONTROL
+    descriptor.OffsetOwner = 0
+    descriptor.OffsetGroup = 0
+    descriptor.OffsetSacl = 0
+    descriptor.OffsetDacl = offset
+    ctypes.memmove(ctypes.byref(buffer, offset), acl_bytes, len(acl_bytes))
+    return buffer
 
 
 def _allowed_ace_sid(ace_address: int) -> ctypes.c_void_p:
@@ -293,6 +353,7 @@ class _WindowsPrivateStorageNative:
             raise OSError("Windows private-storage APIs are unavailable")
         self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self.advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        self.ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
         self._bind()
         self._user_sid = self._current_user_sid()
         self._system_sid = self._well_known_sid(_WIN_LOCAL_SYSTEM_SID)
@@ -389,16 +450,8 @@ class _WindowsPrivateStorageNative:
             ctypes.POINTER(ctypes.c_void_p),
         ]
         self.advapi32.SetEntriesInAclW.restype = wintypes.DWORD
-        self.advapi32.SetSecurityInfo.argtypes = [
-            handle,
-            ctypes.c_int,
-            wintypes.DWORD,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        self.advapi32.SetSecurityInfo.restype = wintypes.DWORD
+        # The propagating aclapi setter is intentionally not bound: applying a
+        # private DACL must never be able to fall back to it.
         self.advapi32.GetSecurityInfo.argtypes = [
             handle,
             ctypes.c_int,
@@ -429,6 +482,14 @@ class _WindowsPrivateStorageNative:
             ctypes.POINTER(ctypes.c_void_p),
         ]
         self.advapi32.GetAce.restype = wintypes.BOOL
+        self.ntdll.NtSetSecurityObject.argtypes = [
+            handle,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        self.ntdll.NtSetSecurityObject.restype = ctypes.c_int32
+        self.ntdll.RtlNtStatusToDosError.argtypes = [ctypes.c_int32]
+        self.ntdll.RtlNtStatusToDosError.restype = _DWORD
 
     @staticmethod
     def _last_error() -> int:
@@ -598,10 +659,10 @@ class _WindowsPrivateStorageNative:
         self,
         handle: wintypes.HANDLE,
     ) -> None:
-        # No ACE carries an inheritance flag. SetSecurityInfo propagates
-        # inheritable ACEs to existing unprotected children, which would
-        # re-ACL objects this call does not own; every object this module
-        # creates is secured explicitly instead.
+        # No ACE carries an inheritance flag, and the descriptor is applied
+        # with the handle-based raw setter. The aclapi wrappers request
+        # auto-inheritance, which rewrites existing children (removing the
+        # ACEs they inherited); this path must change only the target object.
         entries = (_EXPLICIT_ACCESS_W * 2)()
         keepalive: list[ctypes.Array] = []
         for index, sid in enumerate((self._user_sid, self._system_sid)):
@@ -627,23 +688,36 @@ class _WindowsPrivateStorageNative:
                 native_error=int(status),
             )
         try:
-            status = self.advapi32.SetSecurityInfo(
-                handle,
-                _SE_FILE_OBJECT,
-                _DACL_SECURITY_INFORMATION
-                | _PROTECTED_DACL_SECURITY_INFORMATION,
-                None,
-                None,
+            if not acl.value:
+                raise PrivateStorageError(
+                    "private_storage_permission",
+                    reason="acl_build_failed",
+                )
+            header = ctypes.cast(
                 acl,
-                None,
+                ctypes.POINTER(_ACL_HEADER),
+            ).contents
+            acl_size = int(header.AclSize)
+            if acl_size < ctypes.sizeof(_ACL_HEADER):
+                raise PrivateStorageError(
+                    "private_storage_permission",
+                    reason="acl_build_failed",
+                )
+            descriptor = _self_relative_security_descriptor(
+                ctypes.string_at(acl, acl_size)
+            )
+            status = self.ntdll.NtSetSecurityObject(
+                handle,
+                _DACL_SECURITY_INFORMATION,
+                descriptor,
             )
         finally:
             self.kernel32.LocalFree(acl)
-        if status != 0:
+        if status < 0:
             raise PrivateStorageError(
                 "private_storage_permission",
                 reason="acl_apply_failed",
-                native_error=int(status),
+                native_error=int(self.ntdll.RtlNtStatusToDosError(status)),
             )
 
     def owner_is_trusted(self, handle: wintypes.HANDLE) -> bool:

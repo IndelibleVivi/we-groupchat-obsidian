@@ -10,10 +10,16 @@ lives in the Windows-only tests and in ``native_probe``.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import os
 import signal
+import types
 
 from core.platform.contracts import PathIdentity
+from core.platform.windows_private_storage import (
+    _SECURITY_DESCRIPTOR,
+    _WindowsPrivateStorageNative,
+)
 
 
 _DIRECTORY_ATTRIBUTE = 0x10
@@ -54,18 +60,109 @@ class StubHandle:
 
 
 class StubPathService:
-    """Minimal path service that maps an absolute path to a Windows form."""
+    """Minimal path service that maps a host-absolute path to a Windows form.
+
+    The input is whatever ``os.path.abspath`` produced on the running host, so
+    the conversion only replaces separators. It must not add a drive or a
+    leading backslash: on Windows the host already supplies the drive.
+    """
 
     def describe(self, path, *, source_root=None) -> PathIdentity:
         display = os.fspath(path)
         operational = display.replace("/", "\\")
-        if not operational.startswith("\\"):
-            operational = "\\" + operational
         return PathIdentity(
             display_path=display,
             operational_path=operational,
             identity_key="stub:" + operational,
         )
+
+
+def operational_path(path) -> str:
+    """Return the Windows-form path the storage layer will derive on this host."""
+    return os.path.abspath(os.fspath(path)).replace("/", "\\")
+
+
+def temporary_prefix(directory) -> str:
+    return operational_path(directory) + "\\" + ".wgo-publish-"
+
+
+def _minimal_acl_bytes(ace_count: int = 1) -> bytes:
+    """Return a well-formed ACL buffer with ``ace_count`` placeholder ACEs."""
+    ace = bytes([0x00, 0x00]) + (0).to_bytes(2, "little") + bytes(8)
+    body = ace * ace_count
+    size = 8 + len(body)
+    header = bytes([0x02, 0x00]) + size.to_bytes(2, "little")
+    header += ace_count.to_bytes(2, "little") + bytes(2)
+    return header + body
+
+
+class AclApplicationApi:
+    """advapi32/kernel32 pair that records the DACL application path.
+
+    This is not ACL evidence. It exists so a test running on any host can pin
+    which native API and which descriptor the storage layer hands to Windows:
+    the raw handle-based descriptor setter with a request that carries no
+    auto-inheritance bits, and never the propagating ``aclapi`` setter.
+    """
+
+    def __init__(self, acl_bytes: bytes | None = None):
+        self.acl_bytes = (
+            _minimal_acl_bytes() if acl_bytes is None else bytes(acl_bytes)
+        )
+        self.entries_in_acl_calls = 0
+        self.aclapi_setter_calls: list[tuple] = []
+        self.applications: list[tuple[int, int, int]] = []
+        self.descriptors: list[bytes] = []
+        self.freed = 0
+        self.failure_status = 0
+        self._acl_buffer = None
+        self.advapi32 = types.SimpleNamespace(
+            SetEntriesInAclW=self._set_entries_in_acl,
+            SetSecurityInfo=self._aclapi_set_security_info,
+        )
+        self.ntdll = types.SimpleNamespace(
+            NtSetSecurityObject=self._set_native_object_security,
+            RtlNtStatusToDosError=lambda status: 5,
+        )
+        self.kernel32 = types.SimpleNamespace(LocalFree=self._local_free)
+
+    def _set_entries_in_acl(self, count, entries, old_acl, new_acl):
+        self.entries_in_acl_calls += 1
+        self._acl_buffer = ctypes.create_string_buffer(
+            self.acl_bytes,
+            len(self.acl_bytes),
+        )
+        new_acl._obj.value = ctypes.addressof(self._acl_buffer)
+        return self.failure_status
+
+    def _set_native_object_security(self, handle, information, descriptor):
+        raw = bytes(descriptor)
+        self.descriptors.append(raw)
+        view = _SECURITY_DESCRIPTOR.from_buffer_copy(raw)
+        self.applications.append(
+            (int(information), int(view.Control), int(view.OffsetDacl))
+        )
+        return 0
+
+    def _aclapi_set_security_info(self, *args):
+        self.aclapi_setter_calls.append(args)
+        return 0
+
+    def _local_free(self, pointer):
+        self.freed += 1
+        return None
+
+
+def build_native_double(api: AclApplicationApi):
+    """Build the real native layer over the recording API surface."""
+    native = object.__new__(_WindowsPrivateStorageNative)
+    native.kernel32 = api.kernel32
+    native.advapi32 = api.advapi32
+    native.ntdll = api.ntdll
+    native._user_sid = bytes.fromhex("010100000000000100000000")
+    native._system_sid = bytes.fromhex("010100000000000512000000")
+    native._administrators_sid = bytes.fromhex("010200000000000520000000")
+    return native
 
 
 class StubNative:
