@@ -44,6 +44,26 @@ class NormalizeAIErrorTests(unittest.TestCase):
             "AI API 请求频率超限，请稍后再试",
         )
 
+    def test_per_minute_quota_exceeded_reports_rate_limit(self):
+        error = RuntimeError(
+            "Error code: 429 - Quota exceeded for quota metric "
+            "'Generate requests' and limit 'Requests per minute'"
+        )
+        self.assertEqual(
+            normalize_ai_error(error),
+            "AI API 请求频率超限，请稍后再试",
+        )
+
+    def test_explicit_credit_exhaustion_wins_over_429(self):
+        error = RuntimeError(
+            'Error code: 429 - {"error":{"code":"insufficient_quota",'
+            '"message":"Quota exceeded. Check your billing details."}}'
+        )
+        self.assertEqual(
+            normalize_ai_error(error),
+            "AI 额度已用完，请充值或等待额度重置后再试",
+        )
+
     def test_quota_exhaustion_is_not_briefly_retryable(self):
         self.assertFalse(is_retryable_ai_error(RuntimeError("Credits exhausted")))
 

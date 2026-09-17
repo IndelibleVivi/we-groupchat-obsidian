@@ -285,6 +285,12 @@ invalidation 在同一 SQLite transaction 提交，event path 与 menu timer 重
 Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 commit，retry 会按稳定
 `source_batch_id` 直接复用 canonical event、修 projection 并推进原 batch，不再次调用 AI。
 
+### AI 错误提示
+
+明确的 credits / balance 不足会提示额度已用完，即使代理把它包装在认证错误里。
+`429` 请求频率限制（包括每分钟 `quota exceeded`）会提示稍后再试；这类响应本身
+不表示需要充值或重新配置 API Key。
+
 ### 文档地图
 
 - `README.md` / `README.zh-CN.md`：当前用户、operator、隐私和项目概览 authority。

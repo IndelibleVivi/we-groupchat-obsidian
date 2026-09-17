@@ -8,7 +8,6 @@ QUOTA_EXHAUSTED_MARKERS = (
     "credits exhausted",
     "insufficient balance",
     "insufficient_quota",
-    "quota exceeded",
     "余额不足",
     "额度已用完",
     "额度不足",
@@ -26,8 +25,8 @@ def normalize_ai_error(error, provider="AI"):
     text = _strip_html(raw)
     lower = text.lower()
 
-    # Quota exhaustion must win over every generic check below: proxies wrap it
-    # in 401/429/503 envelopes whose text often also contains "auth" or "key".
+    # Explicit credit/balance exhaustion wins over proxy 401/429/503 envelopes.
+    # Bare "quota exceeded" also describes per-minute limits, not just billing.
     if any(marker in lower for marker in QUOTA_EXHAUSTED_MARKERS):
         return f"{provider} 额度已用完，请充值或等待额度重置后再试"
     if "429" in text or "rate" in lower:
