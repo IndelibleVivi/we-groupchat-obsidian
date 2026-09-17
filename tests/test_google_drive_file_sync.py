@@ -1,5 +1,6 @@
 import hashlib
 import json
+import multiprocessing as mp
 import os
 import sqlite3
 import tempfile
@@ -17,6 +18,74 @@ from core.wechat_db import WeChatSourceDegraded
 
 
 ARCHIVE_ID = "11111111-2222-4333-8444-555555555555"
+
+
+class _SchemaMigrationConnection:
+    """Synchronize constructor migration edges without changing production code."""
+
+    def __init__(self, connection, barrier):
+        self._connection = connection
+        self._barrier = barrier
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def executescript(self, sql):
+        result = self._connection.executescript(sql)
+        # Both constructors finish the idempotent base schema before either
+        # starts the additive migration.  A serialized implementation may then
+        # let only one process enter its write transaction at a time.
+        self._barrier.wait(timeout=10)
+        return result
+
+    def execute(self, sql, parameters=()):
+        cursor = self._connection.execute(sql, parameters)
+        normalized = " ".join(str(sql).split()).lower()
+        if (
+            normalized == "pragma table_info(drive_scan_shards)"
+            and not self._connection.in_transaction
+        ):
+            # Reproduce the old check-then-ALTER window deterministically: both
+            # processes materialize the absent-column result before either may
+            # execute ALTER.  With BEGIN IMMEDIATE this branch is not entered.
+            rows = cursor.fetchall()
+            self._barrier.wait(timeout=10)
+            return iter(rows)
+        return cursor
+
+
+class _FailingMigrationConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def execute(self, sql, parameters=()):
+        normalized = " ".join(str(sql).split()).lower()
+        if normalized.startswith("alter table drive_scan_shards add column"):
+            raise sqlite3.OperationalError("fixture migration failure")
+        return self._connection.execute(sql, parameters)
+
+
+def _construct_with_schema_barrier(config, barrier, results):
+    class _BarrierGoogleDriveFileSync(GoogleDriveFileSync):
+        def _connect(self):
+            return _SchemaMigrationConnection(super()._connect(), barrier)
+
+    try:
+        _BarrierGoogleDriveFileSync(
+            config,
+            archive_id_factory=lambda: ARCHIVE_ID,
+        )
+    except Exception as exc:
+        results.put({
+            "outcome": "error",
+            "type": type(exc).__name__,
+            "message": str(exc),
+        })
+    else:
+        results.put({"outcome": "success"})
 
 
 def keyset_page(rows, *, cursor_token="", since_ts=0, limit=500):
@@ -657,6 +726,129 @@ class GoogleDriveFileSyncTests(unittest.TestCase):
         shard = self.rows("drive_scan_shards")[0]
         self.assertEqual(shard["source_cursor_token"], "")
         self.assertEqual(shard["source_state"], "healthy")
+
+    def test_concurrent_constructors_serialize_old_ledger_migration(self):
+        self.service(FakeSource({}))
+        conn = sqlite3.connect(self.ledger)
+        try:
+            conn.execute(
+                "INSERT INTO drive_meta(key, value) "
+                "VALUES ('concurrent_migration_marker', 'keep')"
+            )
+            conn.execute(
+                "ALTER TABLE drive_scan_shards DROP COLUMN source_cursor_token"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        context = mp.get_context("spawn")
+        barrier = context.Barrier(2)
+        results = context.Queue()
+        workers = [
+            context.Process(
+                target=_construct_with_schema_barrier,
+                args=(self.config, barrier, results),
+            )
+            for _ in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+        try:
+            outcomes = [results.get(timeout=20) for _ in workers]
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertEqual(worker.exitcode, 0)
+        finally:
+            for worker in workers:
+                if worker.is_alive():
+                    worker.terminate()
+                    worker.join(timeout=5)
+            results.close()
+            results.join_thread()
+
+        self.assertEqual(
+            sorted(outcome["outcome"] for outcome in outcomes),
+            ["success", "success"],
+        )
+        conn = sqlite3.connect(self.ledger)
+        try:
+            columns = [
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(drive_scan_shards)"
+                )
+            ]
+            marker = conn.execute(
+                "SELECT value FROM drive_meta "
+                "WHERE key = 'concurrent_migration_marker'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(columns.count("source_cursor_token"), 1)
+        self.assertEqual(marker, ("keep",))
+
+    def test_failed_old_ledger_migration_rolls_back_and_retries(self):
+        self.service(FakeSource({}))
+        conn = sqlite3.connect(self.ledger)
+        try:
+            conn.execute(
+                "INSERT INTO drive_meta(key, value) "
+                "VALUES ('failed_migration_marker', 'keep')"
+            )
+            conn.execute(
+                "ALTER TABLE drive_scan_shards DROP COLUMN source_cursor_token"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        class _FailingMigrationService(GoogleDriveFileSync):
+            def _connect(self):
+                return _FailingMigrationConnection(super()._connect())
+
+        with self.assertRaisesRegex(
+            sqlite3.OperationalError, "fixture migration failure"
+        ):
+            _FailingMigrationService(
+                self.config,
+                archive_id_factory=lambda: ARCHIVE_ID,
+            )
+
+        conn = sqlite3.connect(self.ledger)
+        try:
+            failed_columns = [
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(drive_scan_shards)"
+                )
+            ]
+            failed_marker = conn.execute(
+                "SELECT value FROM drive_meta "
+                "WHERE key = 'failed_migration_marker'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertNotIn("source_cursor_token", failed_columns)
+        self.assertEqual(failed_marker, ("keep",))
+
+        self.service(FakeSource({}))
+        conn = sqlite3.connect(self.ledger)
+        try:
+            retried_columns = [
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(drive_scan_shards)"
+                )
+            ]
+            retried_marker = conn.execute(
+                "SELECT value FROM drive_meta "
+                "WHERE key = 'failed_migration_marker'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(retried_columns.count("source_cursor_token"), 1)
+        self.assertEqual(retried_marker, ("keep",))
 
     def test_cursor_cas_failure_rolls_back_queue_rows_and_token(self):
         source = FakeSource({
