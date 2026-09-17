@@ -1,16 +1,19 @@
-# Windows portability map (storage and protected credentials)
+# Windows portability map (shared foundation and source seam)
 
 The full Windows programme contract, `WGO-WIN-SPEC-2`, remains external
 owner-review candidate material and is not distributed with this repository.
 This document is the in-repository authority for the completed storage
-foundation, W0.3 API/OAuth credential boundary and living portability classification. It does not claim
+foundation, W0.3 API/OAuth credentials, W1.1 shared source seam and living
+portability classification. Contributor sequencing and exact-build acceptance
+are in [Windows development](WINDOWS-DEVELOPMENT.md). It does not claim
 completion or approval of the full external Windows programme.
 
 W0.2A supplied native shared/exclusive file locks. W0.2B.1 supplied concrete
 path identities. **W0.2B.2** adds private storage and atomic publication and
 migrates only `ConfigStore`, `MonitorStateStore`, and `SourceInventoryStore`.
-The accepted implementation baseline is the public main integrating monitor
-acceptance, quota messages, and idle-manifest reuse (`efe54ed`).
+The storage tranche was integrated in `fc0f301`; the credential tranche in
+`7f0bd9c`. W1.1 starts from that public main. These are source baselines,
+not installed/live or Windows feature-support claims.
 
 Windows identity remains local-NTFS-only. UNC is a syntax fixture; reparse
 points and unsupported namespaces/filesystems remain rejected. The native secret service now supports API/OAuth credentials. No Windows source,
@@ -90,6 +93,28 @@ Native API authority: Microsoft [CredWriteW](https://learn.microsoft.com/en-us/w
 [CredDeleteW](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-creddeletew),
 and [CREDENTIALW](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw).
 
+## W1.1 source seam
+
+`core/source_adapter.py` owns the shared `WeChatSource` protocol and stateless
+source capability, cursor, inventory-binding, page and error helpers. The current
+Mac `WeChatDB` implements the reader; monitor, resource capture and Direct Drive
+reuse its shared rules. Resource and Direct reads prefer bounded keyset pages,
+including large same-second buckets. Timestamp-only legacy adapters retain their
+existing completeness behavior and growing same-second request; they do not
+claim the keyset bound. Direct ledgers add an empty-default `source_cursor_token`
+column while preserving existing rows; queue insert and token advancement share
+one transaction. This is a local cursor addition, with no remote Drive schema
+change. Decode/generation/inventory failures retain
+their bounded source codes instead of being collapsed into an unrelated error.
+
+The seam never writes checkpoints or owns the expected shard set. Monitor still
+requires complete inventory; resource and Direct may consume present shards only
+while reporting degraded source state. `core/source_contract.py` continues to own
+Markdown provenance. Existing reader method signatures, message/generation
+identities and monitor/inventory state formats remain unchanged. Mac schema/query/cache
+implementation is not a Windows reader; actual Windows source/cache work begins
+with the exact-build evidence in the [development guide](WINDOWS-DEVELOPMENT.md).
+
 ## Classification
 
 - `windows-import-safe`: imports in a fresh Windows Python 3.11 process. This
@@ -167,14 +192,15 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/resource_backup.py` | `deferred-w0.2` | Direct `fcntl`, path identity, target lock, and atomic semantics; Windows is W5. |
 | `core/resource_capture.py` | `deferred-w0.2` | Direct `fcntl` and source/config dependencies; Windows is W4. |
 | `core/review_queue.py` | `deferred-w0.2` | Transitively imports ConfigStore/private storage; Windows activation is W3. |
-| `core/source_contract.py` | `windows-import-safe` | Existing shared source-metadata helpers; canonical WeChatSource extraction is W1.1. |
+| `core/source_adapter.py` | `windows-import-safe` | Canonical read-source protocol and shared capability, cursor, inventory, page and error helpers; no durable-state ownership. |
+| `core/source_contract.py` | `windows-import-safe` | Generated Markdown provenance helpers; unrelated to WeChat source reading. |
 | `core/state_storage.py` | `windows-import-safe` | Platform IO binding for the three migrated JSON state owners; no schema or revision authority. |
 | `core/source_inventory.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve completeness, revisions, and read-only inspection; source activation remains W1+. |
 | `core/source_metadata_plan.py` | `deferred-w0.2` | Transitively imports digest/knowledge/config storage. |
 | `core/taxonomy_assignment.py` | `windows-import-safe` | Platform-neutral taxonomy resolution. |
 | `core/taxonomy_migration.py` | `deferred-w0.2` | Direct `fcntl` and knowledge storage. |
 | `core/url_safety.py` | `windows-import-safe` | Stdlib-only canonical URL display/export/prompt redaction. |
-| `core/wechat_db.py` | `windows-import-safe` | Existing shared crypto/query import surface; schema/source adapters are W1.1+. |
+| `core/wechat_db.py` | `windows-import-safe` | Current Mac WeChatSource implementation; import-safe only. Windows schema, key provider and private decrypted cache remain W1.2+. |
 | `core/wechat_resign.py` | `macos-only` | Exact-target AppKit/codesign/sudo re-sign orchestration; Windows key-provider authorization belongs to W1+. |
 | `core/wechat_signing_identity.py` | `macos-only` | macOS `security`/openssl adapter owning the persistent self-signed re-sign identity keychain; no Windows signing support. |
 | `core/wechat_source_guard.py` | `macos-only` | `fcntl`, macOS key/process adapter, and osascript notification behavior. |
@@ -189,7 +215,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `scripts/configure_monitor.py` | `operator-deferred` | Depends on config, source, keychain, and knowledge activation. |
 | `scripts/daily_digest.py` | `operator-deferred` | Depends on W0.2 storage and W3 activation. |
 | `scripts/google_drive_file_sync.py` | `operator-deferred` | Depends on current auth/config/source adapters. |
-| `scripts/health_check.py` | `macos-only` | Privacy-safe reliability matrix plus LaunchAgent/notification/macOS source diagnostics; its Windows line reports the W0.2B.2 bounded state-storage source boundary. |
+| `scripts/health_check.py` | `macos-only` | Privacy-safe reliability matrix plus LaunchAgent/notification/macOS source diagnostics; its Windows line reports the shared storage/credential foundation without claiming product support. |
 | `scripts/migrate_taxonomy.py` | `operator-deferred` | Depends on W0.2 config/knowledge storage. |
 | `scripts/organize_obsidian.py` | `operator-deferred` | Depends on W0.2 path/storage and W3 projection activation. |
 | `scripts/refresh_data_source.py` | `macos-only` | Invokes the current macOS key/process adapter. |
@@ -215,8 +241,9 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 4. **W0.3:** native API/OAuth credential adapters and current consumers are wired.
    Imported source-key records follow exact-build validation in W1.3. Notifications, target opening,
    tray behavior, packaging, and logon startup remain W6.
-5. **W1.1–W1.3:** extract the canonical WeChat source contract, add one
-   exact-build Windows probe/schema profile, and add a verified key provider.
+5. **W1.1:** current Mac reader and consumers use the shared source seam.
+   **E1 / W1.2–W1.3:** collect real Windows evidence, implement one exact-build
+   probe/schema profile and a protected verified key provider/private cache.
 6. **W2–W6:** enable read-only source, knowledge, resources, backup, then tray,
    packaging, and logon startup only after their separate live gates.
 

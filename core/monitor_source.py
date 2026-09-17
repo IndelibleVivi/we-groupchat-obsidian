@@ -6,6 +6,15 @@ import hashlib
 import heapq
 import json
 
+from .source_adapter import (
+    encode_cursor_token,
+    normalize_source_error,
+    # Canonical capability check lives in source_adapter. Importing the name
+    # keeps the existing `from .monitor_source import supports_monitor_source_cursors`
+    # callers (core/monitor.py, scripts/catch_up_monitor.py) working unchanged.
+    supports_monitor_source_cursors,
+)
+
 
 _ACTIVE_STATES = frozenset({"present", "generation_changed"})
 
@@ -32,12 +41,6 @@ class MonitorSourceBatch:
     source_batch_id: str
 
 
-def supports_monitor_source_cursors(db) -> bool:
-    return callable(getattr(db, "get_source_inventory", None)) and callable(
-        getattr(db, "get_cursor_page_for_shard", None)
-    )
-
-
 def _checkpoint(value) -> float:
     try:
         return max(0.0, float(value or 0))
@@ -45,24 +48,12 @@ def _checkpoint(value) -> float:
         return 0.0
 
 
-def _cursor_token(timestamp: float, rowid: int) -> str:
-    return json.dumps(
-        [max(0, int(timestamp)), max(0, int(rowid))],
-        separators=(",", ":"),
-    )
-
-
-def _exception_code(exc: Exception, fallback: str) -> str:
-    code = str(getattr(exc, "code", "") or "").strip()
-    return code or fallback
-
-
 def _read_inventory(db) -> tuple[dict, tuple[dict, ...]]:
     try:
         snapshot = db.get_source_inventory(update=True)
     except Exception as exc:
         raise MonitorSourceError(
-            _exception_code(exc, "source_inventory_unavailable")
+            normalize_source_error(exc, fallback="source_inventory_unavailable")
         ) from exc
     if not isinstance(snapshot, dict):
         raise MonitorSourceError("source_inventory_invalid")
@@ -215,7 +206,7 @@ def _message_position(message: dict, generation_id: str) -> tuple[tuple, str]:
         raise MonitorSourceError("source_envelope_invalid") from exc
     if create_time < 0 or rowid < 0:
         raise MonitorSourceError("source_envelope_invalid")
-    return (create_time, source_message_id), _cursor_token(create_time, rowid)
+    return (create_time, source_message_id), encode_cursor_token(create_time, rowid)
 
 
 def _is_visible(message: dict) -> bool:
@@ -238,7 +229,7 @@ def initialize_monitor_source_state(db, checkpoint) -> dict:
     # WeChat timestamps have one-second precision.  Starting at row 0 may
     # replay at most the current second, but it cannot lose a row inserted
     # later in that same second after first enable.
-    start = _cursor_token(_checkpoint(checkpoint), 0)
+    start = encode_cursor_token(_checkpoint(checkpoint), 0)
     cursors = {
         row["logical_shard_id"]: {
             "generation_id": row["generation_id"],
@@ -285,7 +276,7 @@ def read_monitor_source_batch(
     inventory_revision = int(snapshot["inventory_revision"])
     previous_checkpoint = _checkpoint(state.get("last_checked_ts"))
     previous_cursors = _normalized_state_cursors(state.get("source_cursors"))
-    migration_start = _cursor_token(previous_checkpoint, 0)
+    migration_start = encode_cursor_token(previous_checkpoint, 0)
 
     # Existing installations without per-shard cursors retain their one-time
     # compatibility migration.  Once any shard binding exists, however, a
@@ -328,7 +319,7 @@ def read_monitor_source_batch(
             except MonitorSourceError as inventory_exc:
                 raise inventory_exc from exc
             raise MonitorSourceError(
-                _exception_code(exc, "source_shard_unavailable")
+                normalize_source_error(exc, fallback="source_shard_unavailable")
             ) from exc
         if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
             raise MonitorSourceError("source_page_invalid")

@@ -31,7 +31,14 @@ from .config import (
     update_config,
 )
 from .url_safety import URL_RE
-from .wechat_db import WeChatSourceDegraded
+from .source_adapter import (
+    SourceUnavailableError,
+    bind_source_inventory,
+    normalize_source_error,
+    read_source_page,
+    source_snapshot,
+    source_state_evidence,
+)
 
 
 SCHEMA_VERSION = 3
@@ -518,144 +525,6 @@ class SelectedResourceCapture:
         finally:
             conn.close()
 
-    def _source_inventory_binding(self, chats):
-        """Read one source revision and map its present generations to chats."""
-        chats = list(chats or [])
-        if self.source is None:
-            evidence = {
-                "schema": "we-groupchat-obsidian.source-inventory.v1",
-                "source_namespace": "",
-                "inventory_revision": 0,
-                "inventory_digest": "",
-                "complete": False,
-                "counts": {},
-                "error_codes": ["source_unavailable"],
-            }
-            return {
-                "complete": False,
-                "inventory_digest": "",
-                "inventory_revision": 0,
-                "source_namespace": "",
-                "counts": {},
-                "error_codes": ["source_unavailable"],
-                "error_code": "source_unavailable",
-                "degraded_shards": 1,
-                "shards_by_username": {},
-                "evidence": evidence,
-            }
-
-        inventory_reader = getattr(self.source, "get_source_inventory", None)
-        if callable(inventory_reader):
-            try:
-                inventory = dict(inventory_reader(update=True, sensitive=False) or {})
-            except WeChatSourceDegraded as exc:
-                code = self._source_error_code(exc)
-                evidence = {
-                    "schema": "we-groupchat-obsidian.source-inventory.v1",
-                    "source_namespace": "",
-                    "inventory_revision": 0,
-                    "inventory_digest": "",
-                    "complete": False,
-                    "counts": {},
-                    "error_codes": [code],
-                }
-                return {
-                    "complete": False,
-                    "inventory_digest": "",
-                    "inventory_revision": 0,
-                    "source_namespace": "",
-                    "counts": {},
-                    "error_codes": [code],
-                    "error_code": code,
-                    "degraded_shards": 1,
-                    "shards_by_username": {},
-                    "evidence": evidence,
-                }
-            source_shards = [
-                str(value)
-                for value in inventory.get("present_generation_ids") or []
-                if str(value)
-            ]
-            counts = {
-                str(key): int(value or 0)
-                for key, value in (inventory.get("counts") or {}).items()
-            }
-            error_codes = [
-                str(value)
-                for value in inventory.get("error_codes") or []
-                if str(value)
-            ]
-            complete = bool(inventory.get("complete"))
-            error_code = error_codes[0] if error_codes else (
-                "" if complete else "source_inventory_incomplete"
-            )
-            degraded_shards = sum(
-                counts.get(state, 0)
-                for state in ("missing_file", "key_missing", "cache_only", "unreadable")
-            )
-            evidence = {
-                "schema": str(inventory.get("schema") or ""),
-                "source_namespace": str(inventory.get("source_namespace") or ""),
-                "inventory_revision": int(inventory.get("inventory_revision") or 0),
-                "inventory_digest": str(inventory.get("inventory_digest") or ""),
-                "complete": complete,
-                "counts": counts,
-                "error_codes": error_codes,
-            }
-            return {
-                **evidence,
-                "error_code": error_code,
-                "degraded_shards": max(1, degraded_shards) if not complete else 0,
-                "shards_by_username": {
-                    chat["username"]: list(source_shards) for chat in chats
-                },
-                "evidence": evidence,
-            }
-
-        shards_by_username = {}
-        error_codes = []
-        degraded_shards = 0
-        for chat in chats:
-            username = chat["username"]
-            source_failed = False
-            try:
-                source_shards = list(self.source.get_message_shards(username))
-            except WeChatSourceDegraded as exc:
-                degraded_shards += 1
-                error_codes.append(self._source_error_code(exc))
-                source_shards = []
-                source_failed = True
-            if not source_shards and not source_failed:
-                degraded_shards += 1
-                if not error_codes:
-                    error_codes.append("source_shards_unavailable")
-            shards_by_username[username] = source_shards
-        manifest = [
-            {
-                "chat_key": chat["chat_key"],
-                "source_shards": list(shards_by_username.get(chat["username"], [])),
-            }
-            for chat in chats
-        ]
-        digest = self._digest_json(manifest)
-        complete = degraded_shards == 0
-        evidence = {
-            "schema": "legacy-source-adapter.v1",
-            "source_namespace": "",
-            "inventory_revision": 0,
-            "inventory_digest": digest,
-            "complete": complete,
-            "counts": {},
-            "error_codes": list(dict.fromkeys(error_codes)),
-        }
-        return {
-            **evidence,
-            "error_code": error_codes[0] if error_codes else "",
-            "degraded_shards": degraded_shards,
-            "shards_by_username": shards_by_username,
-            "evidence": evidence,
-        }
-
     def _record_source_inventory_evidence(
         self,
         binding,
@@ -663,22 +532,11 @@ class SelectedResourceCapture:
         degraded_shards=None,
         error_code="",
     ):
-        evidence = dict((binding or {}).get("evidence") or {})
-        degraded = (
-            int((binding or {}).get("degraded_shards") or 0)
-            if degraded_shards is None
-            else int(degraded_shards or 0)
-        )
         self._meta_set_many({
-            "source_state": "source_degraded" if degraded else "healthy",
-            "source_error_code": str(
-                error_code or (binding or {}).get("error_code") or ""
-            ),
-            "source_inventory_evidence": json.dumps(
-                evidence,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
+            **source_state_evidence(
+                binding,
+                degraded_shards=degraded_shards,
+                error_code=error_code,
             ),
             "last_scan_at": self.now_func(),
         })
@@ -941,28 +799,6 @@ class SelectedResourceCapture:
         finally:
             conn.close()
 
-    @staticmethod
-    def _source_error_code(exc):
-        code = str(getattr(exc, "code", "") or "")
-        if code in {
-            "source_shard_unavailable",
-            "source_shard_unknown",
-            "source_shards_unavailable",
-            "source_cache_only",
-            "source_inventory_incomplete",
-            "source_inventory_uninitialized",
-            "source_inventory_scan_failed",
-            "source_inventory_corrupt",
-            "source_inventory_lock_unavailable",
-            "source_inventory_write_failed",
-            "source_missing_file",
-            "source_key_missing",
-            "source_unreadable",
-            "source_snapshot_failed",
-        }:
-            return code
-        return "source_shard_unavailable"
-
     def _mark_shard_degraded(self, username, source_shard_id, code):
         conn = self._connect()
         try:
@@ -977,68 +813,6 @@ class SelectedResourceCapture:
             conn.commit()
         finally:
             conn.close()
-
-    def _source_page(
-        self,
-        username,
-        source_shard_id,
-        cursor_timestamp,
-        seen_ids,
-        limit,
-        *,
-        cursor_token="",
-    ):
-        if self.source is None:
-            raise ResourceCaptureError("source_unavailable")
-        keyset_reader = getattr(self.source, "get_cursor_page_for_shard", None)
-        if callable(keyset_reader):
-            result = keyset_reader(
-                username,
-                source_shard_id,
-                cursor_token=str(cursor_token or ""),
-                since_ts=max(0, int(cursor_timestamp)),
-                limit=max(1, int(limit)),
-            )
-            messages = list((result or {}).get("messages") or [])
-            return (
-                messages,
-                str((result or {}).get("next_cursor") or cursor_token or ""),
-                bool((result or {}).get("exhausted")),
-            )
-
-        # Compatibility adapters still use timestamp + identity filtering. Keep
-        # their request strictly bounded; production WeChatDB uses the opaque
-        # keyset path above and therefore handles arbitrarily large same-second
-        # buckets without growing this request.
-        request_limit = max(1, int(limit))
-        reader = getattr(
-            self.source,
-            "get_cursor_messages_for_shard",
-            self.source.get_messages_for_shard,
-        )
-        messages = reader(
-            username,
-            source_shard_id,
-            since_ts=max(0, int(cursor_timestamp)),
-            limit=request_limit,
-            page_forward=True,
-            since_inclusive=True,
-        )
-        fresh = []
-        for message in messages:
-            timestamp = int(message.get("timestamp") or 0)
-            identity = str(message.get("source_message_id") or "")
-            if not identity or timestamp < cursor_timestamp:
-                continue
-            if timestamp == cursor_timestamp and identity in seen_ids:
-                continue
-            fresh.append(message)
-        fresh.sort(key=lambda item: (
-            int(item.get("timestamp") or 0),
-            str(item.get("source_message_id") or ""),
-        ))
-        page = fresh[:limit]
-        return page, "", len(messages) < request_limit or not page
 
     @staticmethod
     def _cursor_after(messages, old_timestamp, old_ids):
@@ -1231,7 +1005,7 @@ class SelectedResourceCapture:
                 "captured_files": 0,
             }
         if self.source is None:
-            binding = self._source_inventory_binding(chats)
+            binding = bind_source_inventory(self.source, chats)
             self._record_source_inventory_evidence(binding)
             return {
                 "state": "source_unavailable",
@@ -1245,7 +1019,7 @@ class SelectedResourceCapture:
                 "source_counts": {},
                 "source_error_codes": ["source_unavailable"],
             }
-        binding = self._source_inventory_binding(chats)
+        binding = bind_source_inventory(self.source, chats)
         initialized = self._initialize_selected_chat_cursors_locked()["new_chats"]
         max_messages = max(1, int(
             self.config.get("resource_backup_max_messages_per_scan", 500)
@@ -1274,13 +1048,17 @@ class SelectedResourceCapture:
                 except (TypeError, ValueError, json.JSONDecodeError):
                     seen_ids = set()
                 try:
-                    messages, next_cursor_token, _exhausted = self._source_page(
-                        chat["username"], source_shard_id,
-                        cursor_timestamp, seen_ids, max_messages,
+                    messages, next_cursor_token, _exhausted = read_source_page(
+                        self.source,
+                        chat["username"],
+                        source_shard_id,
                         cursor_token=str(shard["source_cursor_token"] or ""),
+                        cursor_timestamp=cursor_timestamp,
+                        seen_ids=seen_ids,
+                        limit=max_messages,
                     )
-                except WeChatSourceDegraded as exc:
-                    code = self._source_error_code(exc)
+                except SourceUnavailableError as exc:
+                    code = normalize_source_error(exc)
                     self._mark_shard_degraded(chat["username"], source_shard_id, code)
                     degraded_shards += 1
                     source_error_code = code
@@ -1603,7 +1381,7 @@ class SelectedResourceCapture:
                 "error_code": "source_unavailable",
             })
         self.cleanup_backfill_runs()
-        binding = self._source_inventory_binding(chats)
+        binding = bind_source_inventory(self.source, chats)
         run_id = self._create_backfill_run(mode, from_timestamp, chats)
         page_size = min(2_000, max(500, int(
             self.config.get("resource_backup_max_messages_per_scan", BACKFILL_PAGE_SIZE)
@@ -1634,14 +1412,18 @@ class SelectedResourceCapture:
                 cursor_token = ""
                 while True:
                     try:
-                        page, next_cursor_token, exhausted = self._source_page(
-                            chat["username"], source_shard_id,
-                            cursor_timestamp, seen_ids, page_size,
+                        page, next_cursor_token, exhausted = read_source_page(
+                            self.source,
+                            chat["username"],
+                            source_shard_id,
                             cursor_token=cursor_token,
+                            cursor_timestamp=cursor_timestamp,
+                            seen_ids=seen_ids,
+                            limit=page_size,
                         )
-                    except WeChatSourceDegraded as exc:
+                    except SourceUnavailableError as exc:
                         degraded_shards += 1
-                        source_error_code = self._source_error_code(exc)
+                        source_error_code = normalize_source_error(exc)
                         break
                     if not page:
                         break
@@ -1731,7 +1513,9 @@ class SelectedResourceCapture:
                     source_complete=False,
                     error_code="source_inventory_unavailable",
                 )
-            current_binding = self._source_inventory_binding(self.selected_chats())
+            current_binding = bind_source_inventory(
+                self.source, self.selected_chats()
+            )
             self._record_source_inventory_evidence(current_binding)
             if not bool(current_binding.get("complete")):
                 return self._backfill_result(
@@ -1873,21 +1657,13 @@ class SelectedResourceCapture:
                 mode=mode,
                 from_timestamp=from_timestamp,
             )
-        snapshot = getattr(self.source, "source_snapshot", None)
-        if snapshot is not None:
-            with snapshot():
-                return self._plan_backfill(
-                    from_timestamp,
-                    include_links=include_links,
-                    include_files=include_files,
-                    mode=mode,
-                )
-        return self._plan_backfill(
-            from_timestamp,
-            include_links=include_links,
-            include_files=include_files,
-            mode=mode,
-        )
+        with source_snapshot(self.source):
+            return self._plan_backfill(
+                from_timestamp,
+                include_links=include_links,
+                include_files=include_files,
+                mode=mode,
+            )
 
     def _retry_delay(self, attempt_count):
         base = max(1, int(self.config.get("attachment_archive_retry_base_seconds", 300)))

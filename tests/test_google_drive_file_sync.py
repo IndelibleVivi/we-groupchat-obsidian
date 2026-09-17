@@ -12,11 +12,48 @@ from core.google_drive_client import (
     GoogleDriveError,
     GoogleDriveRetryableError,
 )
-from core.google_drive_file_sync import GoogleDriveFileSync, _month
+from core.google_drive_file_sync import DriveSyncError, GoogleDriveFileSync, _month
 from core.wechat_db import WeChatSourceDegraded
 
 
 ARCHIVE_ID = "11111111-2222-4333-8444-555555555555"
+
+
+def keyset_page(rows, *, cursor_token="", since_ts=0, limit=500):
+    """Emulate the production ``(create_time, rowid)`` keyset page.
+
+    The fixture position is the row's 1-based order in the shard fixture, so a
+    bucket larger than the page size still pages completely, exactly like the
+    real macOS reader. This keeps the fixture production-shaped instead of
+    exercising the legacy timestamp/de-duplication fallback.
+    """
+    page_limit = max(1, int(limit))
+    positioned = sorted(
+        (
+            (int(message["timestamp"]), position, message)
+            for position, message in enumerate(rows, start=1)
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    after = (
+        tuple(json.loads(cursor_token))
+        if cursor_token
+        else (max(0, int(since_ts)), 0)
+    )
+    pending = [
+        entry for entry in positioned if (entry[0], entry[1]) > after
+    ]
+    page = pending[:page_limit]
+    next_cursor = cursor_token
+    if page:
+        next_cursor = json.dumps(
+            [page[-1][0], page[-1][1]], separators=(",", ":")
+        )
+    return {
+        "messages": [entry[2] for entry in page],
+        "next_cursor": next_cursor,
+        "exhausted": len(pending) <= page_limit,
+    }
 
 
 def file_message(identity, timestamp, name, data=None, *, declared_hash="", kind="file"):
@@ -82,6 +119,22 @@ class FakeSource:
             since_inclusive=since_inclusive,
         )
 
+    def get_cursor_page_for_shard(
+        self,
+        username,
+        _source_shard_id,
+        *,
+        cursor_token="",
+        since_ts=0,
+        limit=500,
+    ):
+        return keyset_page(
+            self.messages_by_chat.get(username, []),
+            cursor_token=cursor_token,
+            since_ts=since_ts,
+            limit=limit,
+        )
+
 
 class RecoveringShardSource:
     def __init__(self, chat, shard_messages):
@@ -115,6 +168,24 @@ class RecoveringShardSource:
         ]
         rows.sort(key=lambda message: (message["timestamp"], message["source_message_id"]))
         return rows[:limit] if page_forward else rows[-limit:]
+
+    def get_cursor_page_for_shard(
+        self,
+        username,
+        source_shard_id,
+        *,
+        cursor_token="",
+        since_ts=0,
+        limit=500,
+    ):
+        if username != self.chat or source_shard_id in self.failed:
+            raise WeChatSourceDegraded("source_shard_unavailable")
+        return keyset_page(
+            self.shard_messages[source_shard_id],
+            cursor_token=cursor_token,
+            since_ts=since_ts,
+            limit=limit,
+        )
 
 
 class InventoryDriveSource(RecoveringShardSource):
@@ -351,6 +422,328 @@ class GoogleDriveFileSyncTests(unittest.TestCase):
         self.assertTrue(all(row["chat_username"] == self.chat_a for row in items))
         self.assertFalse(os.path.exists(self.config["monitor_knowledge_db"]))
         self.assertNotIn(self.chat_b, {call[0] for call in source.calls})
+
+    def test_large_same_second_bucket_pages_completely_across_restarts(self):
+        data = b"same-second bytes"
+        source = FakeSource({
+            self.chat_a: [
+                file_message(f"wgmsg_same_{index}", self.timestamp, f"{index}.txt", data)
+                for index in range(5)
+            ],
+        })
+        service = self.service(source)
+        self.initialize(service)
+
+        queued = []
+        for _ in range(6):
+            result = self.service(source).scan()
+            queued.append(result["queued"])
+            if result["queued"] == 0:
+                break
+
+        self.assertEqual(queued, [2, 2, 1, 0])
+        items = self.rows("drive_sync_items")
+        self.assertEqual(
+            sorted(row["source_message_id"] for row in items),
+            [f"wgmsg_same_{index}" for index in range(5)],
+        )
+        self.assertEqual(len(items), 5)
+        shard = self.rows("drive_scan_shards")[0]
+        self.assertEqual(
+            shard["source_cursor_token"], f"[{self.timestamp},5]"
+        )
+        self.assertEqual(shard["source_state"], "healthy")
+
+    def test_decode_failure_reports_exact_code_and_never_advances(self):
+        class EmptyShardSource:
+            def get_message_shards(self, _username):
+                return ["shard-a"]
+
+            def get_cursor_page_for_shard(
+                self,
+                _username,
+                _source_shard_id,
+                *,
+                cursor_token="",
+                since_ts=0,
+                limit=500,
+            ):
+                del since_ts, limit
+                return {
+                    "messages": [],
+                    "next_cursor": cursor_token,
+                    "exhausted": True,
+                }
+
+        class DecodeFailingSource:
+            def get_message_shards(self, _username):
+                return ["shard-a"]
+
+            def get_cursor_page_for_shard(
+                self,
+                _username,
+                _source_shard_id,
+                *,
+                cursor_token="",
+                since_ts=0,
+                limit=500,
+            ):
+                del cursor_token, since_ts, limit
+                raise WeChatSourceDegraded("source_message_decode_failed")
+
+        service = self.service(EmptyShardSource())
+        self.initialize(service)
+        service.scan()
+        before = self.rows("drive_scan_shards")
+        self.assertEqual(len(before), 1)
+
+        degraded = self.service(DecodeFailingSource()).scan()
+
+        self.assertEqual(degraded["state"], "source_degraded")
+        self.assertEqual(degraded["error_code"], "source_message_decode_failed")
+        self.assertEqual(degraded["queued"], 0)
+        self.assertEqual(self.rows("drive_sync_items"), [])
+        after = self.rows("drive_scan_shards")
+        self.assertEqual(len(after), 1)
+        self.assertEqual(
+            after[0]["cursor_timestamp"], before[0]["cursor_timestamp"]
+        )
+        self.assertEqual(
+            after[0]["source_cursor_token"], before[0]["source_cursor_token"]
+        )
+        self.assertEqual(after[0]["source_state"], "source_degraded")
+        self.assertEqual(
+            after[0]["last_error_code"], "source_message_decode_failed"
+        )
+        status = self.service(DecodeFailingSource()).status()
+        self.assertEqual(status["source_state"], "source_degraded")
+        self.assertNotIn(self.chat_a, json.dumps(degraded))
+
+    def test_old_ledger_gains_the_cursor_token_column_without_losing_state(self):
+        class LegacyTimestampSource:
+            """Pre-keyset reader: timestamp pages only, no opaque cursor."""
+
+            def __init__(self, rows):
+                self.rows = [dict(row) for row in rows]
+
+            def get_message_shards(self, _username):
+                return ["shard-a"]
+
+            def get_messages_for_shard(
+                self,
+                _username,
+                _source_shard_id,
+                *,
+                since_ts=0,
+                limit=500,
+                page_forward=False,
+                since_inclusive=False,
+            ):
+                rows = [
+                    dict(row)
+                    for row in self.rows
+                    if (
+                        int(row["timestamp"]) >= since_ts
+                        if since_inclusive
+                        else int(row["timestamp"]) > since_ts
+                    )
+                ]
+                rows.sort(
+                    key=lambda row: (row["timestamp"], row["source_message_id"])
+                )
+                return rows[:limit]
+
+        def legacy_rows():
+            return [
+                file_message("wgmsg_old_0", self.timestamp, "0.txt", b"x"),
+                file_message("wgmsg_old_1", self.timestamp, "1.txt", b"x"),
+                file_message("wgmsg_old_2", self.timestamp, "2.txt", b"x"),
+            ]
+
+        self.service(FakeSource({}))
+        conn = sqlite3.connect(self.ledger)
+        try:
+            conn.execute(
+                """
+                INSERT INTO drive_scan_state(
+                    chat_username, cursor_timestamp, cursor_message_ids_json, updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (self.chat_a, self.timestamp, '["wgmsg_old_0","wgmsg_old_1"]', 1.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO drive_scan_shards(
+                    chat_username, source_shard_id, cursor_timestamp,
+                    cursor_message_ids_json, source_state, last_error_code, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.chat_a,
+                    "shard-a",
+                    self.timestamp,
+                    '["wgmsg_old_0","wgmsg_old_1"]',
+                    "source_degraded",
+                    "source_shard_unavailable",
+                    42.0,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO drive_sync_items(
+                    source_message_id, resource_index, chat_username, chat_key,
+                    chat_alias, source_timestamp, source_month, original_name,
+                    status, attempt_count, next_retry_at, last_error_code,
+                    created_at, updated_at
+                ) VALUES ('wgmsg_legacy', 0, ?, 'ck', 'Alpha group', ?, ?, 'legacy.txt',
+                          'waiting_cache', 3, 1780009999.0, 'local_file_missing',
+                          1780000000.0, 1780000000.0)
+                """,
+                (self.chat_a, self.timestamp, _month(self.timestamp)),
+            )
+            conn.execute(
+                "INSERT INTO drive_meta(key, value) VALUES ('legacy_marker', 'keep')"
+            )
+            # Recreate the pre-W1.1 shard table: no source_cursor_token column.
+            conn.execute(
+                "ALTER TABLE drive_scan_shards DROP COLUMN source_cursor_token"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.service(LegacyTimestampSource(legacy_rows()))
+
+        conn = sqlite3.connect(self.ledger)
+        try:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(drive_scan_shards)")
+            }
+        finally:
+            conn.close()
+        self.assertIn("source_cursor_token", columns)
+
+        shard = self.rows("drive_scan_shards")[0]
+        self.assertEqual(shard["cursor_timestamp"], self.timestamp)
+        self.assertEqual(
+            shard["cursor_message_ids_json"], '["wgmsg_old_0","wgmsg_old_1"]'
+        )
+        self.assertEqual(shard["source_cursor_token"], "")
+        self.assertEqual(shard["source_state"], "source_degraded")
+        self.assertEqual(shard["last_error_code"], "source_shard_unavailable")
+        self.assertEqual(shard["updated_at"], 42.0)
+
+        item = self.rows("drive_sync_items")[0]
+        self.assertEqual(item["source_message_id"], "wgmsg_legacy")
+        self.assertEqual(item["status"], "waiting_cache")
+        self.assertEqual(item["attempt_count"], 3)
+        self.assertEqual(item["next_retry_at"], 1780009999.0)
+        self.assertEqual(item["last_error_code"], "local_file_missing")
+
+        result = self.service(LegacyTimestampSource(legacy_rows())).scan()
+
+        self.assertEqual(result["state"], "healthy")
+        self.assertEqual(result["queued"], 1)
+        items = {
+            row["source_message_id"]: row for row in self.rows("drive_sync_items")
+        }
+        self.assertEqual(sorted(items), ["wgmsg_legacy", "wgmsg_old_2"])
+        self.assertEqual(items["wgmsg_legacy"]["status"], "waiting_cache")
+        self.assertEqual(items["wgmsg_legacy"]["attempt_count"], 3)
+        self.assertEqual(items["wgmsg_legacy"]["next_retry_at"], 1780009999.0)
+        self.assertEqual(
+            items["wgmsg_legacy"]["last_error_code"], "local_file_missing"
+        )
+        shard = self.rows("drive_scan_shards")[0]
+        self.assertEqual(shard["source_cursor_token"], "")
+        self.assertEqual(shard["source_state"], "healthy")
+
+    def test_cursor_cas_failure_rolls_back_queue_rows_and_token(self):
+        source = FakeSource({
+            self.chat_a: [
+                file_message("wgmsg_cas", self.timestamp, "cas.txt", b"x")
+            ],
+        })
+        service = self.service(source)
+        self.initialize(service)
+        original_shard_state = service._shard_state
+
+        def stale_read(chat_username, source_shard_id, seed):
+            row = original_shard_state(chat_username, source_shard_id, seed)
+            conn = service._connect()
+            try:
+                conn.execute(
+                    """
+                    UPDATE drive_scan_shards
+                    SET cursor_timestamp = ?, source_cursor_token = ?
+                    WHERE chat_username = ? AND source_shard_id = ?
+                    """,
+                    (
+                        int(row["cursor_timestamp"]) + 5,
+                        "[7,7]",
+                        chat_username,
+                        source_shard_id,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            return row
+
+        service._shard_state = stale_read
+
+        with self.assertRaises(DriveSyncError) as raised:
+            service.scan()
+
+        self.assertEqual(raised.exception.code, "source_cursor_changed")
+        self.assertEqual(self.rows("drive_sync_items"), [])
+        shard = self.rows("drive_scan_shards")[0]
+        self.assertEqual(shard["cursor_timestamp"], self.timestamp - 1 + 5)
+        self.assertEqual(shard["source_cursor_token"], "[7,7]")
+
+    def test_queue_insert_failure_rolls_back_the_shard_cursor(self):
+        source = FakeSource({
+            self.chat_a: [
+                file_message("wgmsg_insert", self.timestamp, "i.txt", b"x")
+            ],
+        })
+        service = self.service(source)
+        self.initialize(service)
+
+        def failing_insert(conn, chat, messages, now):
+            conn.execute(
+                """
+                INSERT INTO drive_sync_items(
+                    source_message_id, resource_index, chat_username, chat_key,
+                    chat_alias, source_timestamp, source_month, original_name,
+                    created_at, updated_at
+                ) VALUES ('wgmsg_partial', 0, ?, 'ck', 'Alpha group', ?, ?, 'p.txt', ?, ?)
+                """,
+                (
+                    chat["username"],
+                    self.timestamp,
+                    _month(self.timestamp),
+                    now,
+                    now,
+                ),
+            )
+            raise RuntimeError("fixture queue insert failure")
+
+        service._insert_file_items = failing_insert
+
+        with self.assertRaises(RuntimeError):
+            service.scan()
+
+        # ``_shard_state`` commits the shard's first observation before the
+        # scan's own transaction, so the row must exist but still hold the
+        # initial cursor: neither the partial queue row nor the cursor advance
+        # may survive the failed page.
+        self.assertEqual(self.rows("drive_sync_items"), [])
+        shard = self.rows("drive_scan_shards")[0]
+        self.assertEqual(shard["cursor_timestamp"], self.timestamp - 1)
+        self.assertEqual(shard["cursor_message_ids_json"], "[]")
+        self.assertEqual(shard["source_cursor_token"], "")
+        self.assertEqual(shard["source_state"], "healthy")
 
     def test_failed_shard_never_advances_past_unseen_file_and_recovers_exactly_once(self):
         source = RecoveringShardSource(

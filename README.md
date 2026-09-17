@@ -19,7 +19,9 @@ API/OAuth credentials now use the platform secret interface (Mac Keychain or
 Windows Credential Manager); Ollama needs no credential-store access.
 This is source portability, not a Windows application: WeChat discovery, source keys,
 database reads, monitoring, backup, tray UI, autostart and packaging remain
-unsupported. See [`docs/WINDOWS-PORT-MAP.md`](docs/WINDOWS-PORT-MAP.md).
+unsupported. The current Mac source seam and bounded reading rules are shared
+for the next adapter. See the [port map](docs/WINDOWS-PORT-MAP.md) and
+[Windows contributor handoff](docs/WINDOWS-DEVELOPMENT.md).
 
 A local-first macOS tool for reading your own WeChat desktop database, summarizing group chats, searching messages, and turning high-value group-chat updates into an Obsidian-friendly Markdown knowledge base.
 

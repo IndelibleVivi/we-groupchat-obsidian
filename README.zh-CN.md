@@ -14,8 +14,9 @@ Windows 迁移当前处于 **共享存储与受保护凭据基础阶段**。原�
 不把 POSIX mode bits 当作权限证明；路径仍限本地 NTFS，并拒绝 reparse point。
 API/OAuth 凭据已接入平台 secret 接口（Mac Keychain / Windows Credential Manager）；
 Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows app：微信发现、来源密钥、数据库读取、monitor、backup、
-托盘、自启和打包尚不支持。分阶段契约见
-[`docs/WINDOWS-PORT-MAP.md`](docs/WINDOWS-PORT-MAP.md)。
+托盘、自启和打包尚不支持。当前 Mac source 的共享契约和有界读取规则已整理。分阶段契约见
+[port map](docs/WINDOWS-PORT-MAP.md)，参与适配请从
+[Windows 开发接手说明](docs/WINDOWS-DEVELOPMENT.md) 开始。
 
 一个本地优先的 macOS 微信群聊总结工具。它读取你电脑上的微信本地数据库，生成群聊摘要、关键词搜索结果，并把值得关注的新消息整理成 Obsidian-friendly Markdown 笔记。
 
@@ -751,7 +752,9 @@ setup.py                 # py2app 打包入口
 ai/                      # 可替换 AI provider 适配层
 core/
   config.py / app_runtime.py     # main-config 与 menu-process ownership
-  wechat_db.py / source_contract.py # source、snapshot、shard/message identity
+  wechat_db.py             # 当前 Mac reader、snapshot、shard/message identity
+  source_adapter.py        # 共享读取契约、分页与 inventory binding
+  source_contract.py       # 生成 Markdown 的 provenance
   monitor.py / monitor_state.py / knowledge.py # 关注推送 CAS state、durable ledger 与 Markdown projection
   attachment_archive.py         # attachment occurrence、resolver 与私有 CAS
   attachment_backup.py          # archive filesystem snapshot / verify / restore plan
