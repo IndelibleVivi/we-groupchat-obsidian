@@ -148,6 +148,8 @@ Its most important boundaries are:
   separate delivered bytes from every unresolved/attention state. Delivered
   month pages list one row per digest plus occurrence counts and link to the one
   shared CAS copy; pending pages never expose a target link.
+  Repeated runs preserve unchanged index pages and ownership manifests without
+  rewriting them; missing generated pages are still rebuilt.
   Scan, backfill, projection, and handoff hold canonical selection under the
   capture lock; real-output-root and target locks serialize aliases and
   cross-database writers. Busy, unknown, or nested failure states fail closed
