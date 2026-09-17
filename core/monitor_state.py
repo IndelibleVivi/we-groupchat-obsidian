@@ -6,11 +6,10 @@ from dataclasses import dataclass
 import json
 import os
 import stat
-import tempfile
 from typing import Callable
 
-from .config import ensure_private_dir, ensure_private_file
-from .platform import LockBusy, LockMode, create_file_lock
+from .platform import LockBusy, LockMode
+from .state_storage import StateFileNotRegular, StateStorage
 
 
 MONITOR_STATE_SCHEMA = "we-groupchat-obsidian.monitor-state.v1"
@@ -42,25 +41,26 @@ class MonitorStateSnapshot:
 class MonitorStateStore:
     """Own locked reads and compare-and-swap writes for one state file."""
 
-    def __init__(self, path: str | os.PathLike[str], *, file_lock=None):
+    def __init__(self, path: str | os.PathLike[str], *, file_lock=None, platform_services=None):
         self.path = os.path.abspath(os.path.expanduser(os.fspath(path)))
-        self.lock_path = self.path + ".lock"
         self._file_lock = file_lock
+        self._storage = StateStorage(self.path, platform_services=platform_services)
 
     def _lock_service(self):
         if self._file_lock is None:
-            self._file_lock = create_file_lock()
+            self._file_lock = self._storage.services.require("locks")
         return self._file_lock
 
     def _lock(self, *, exclusive: bool):
-        directory = os.path.dirname(self.path)
         try:
-            ensure_private_dir(directory)
+            path = self._storage.prepare()
             return self._lock_service().acquire(
-                self.lock_path,
+                path + ".lock",
                 mode=LockMode.EXCLUSIVE if exclusive else LockMode.SHARED,
                 blocking=True,
             )
+        except StateFileNotRegular as exc:
+            raise MonitorStateError("monitor_state_not_regular") from exc
         except OSError as exc:
             raise MonitorStateError("monitor_state_lock_unavailable") from exc
 
@@ -83,7 +83,7 @@ class MonitorStateStore:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
-            fd = os.open(self.path, flags)
+            fd = os.open(self._storage.operational_path(), flags)
         except OSError as exc:
             raise MonitorStateError("monitor_state_not_regular") from exc
 
@@ -144,59 +144,17 @@ class MonitorStateStore:
         revision: int,
         existed_before: bool,
     ) -> MonitorStateSnapshot:
-        directory = os.path.dirname(self.path)
-        ensure_private_dir(directory)
-        temp_fd, temp_path = tempfile.mkstemp(
-            prefix=f".{os.path.basename(self.path)}.",
-            suffix=".tmp",
-            dir=directory,
-        )
-        try:
-            fchmod = getattr(os, "fchmod", None)
-            if callable(fchmod):
-                try:
-                    fchmod(temp_fd, 0o600)
-                except OSError:
-                    pass
-            payload = {
-                # Old readers reject v2 rather than ignoring pending work.
-                # Once acknowledged, ordinary state remains downgrade-readable.
-                "schema": (
-                    MONITOR_PENDING_STATE_SCHEMA
-                    if "pending_source_batch" in data else MONITOR_STATE_SCHEMA
-                ),
-                "revision": int(revision),
-                **self._state_data(data),
-            }
-            with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
-                temp_fd = -1
-                json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, self.path)
-            temp_path = ""
-            ensure_private_file(self.path)
-
-            try:
-                directory_fd = os.open(directory, os.O_RDONLY)
-            except OSError:
-                directory_fd = -1
-            if directory_fd >= 0:
-                try:
-                    os.fsync(directory_fd)
-                except OSError:
-                    pass
-                finally:
-                    os.close(directory_fd)
-        finally:
-            if temp_fd >= 0:
-                os.close(temp_fd)
-            if temp_path:
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
+        payload = {
+            # Old readers reject v2 rather than ignoring pending work.
+            "schema": (
+                MONITOR_PENDING_STATE_SCHEMA
+                if "pending_source_batch" in data else MONITOR_STATE_SCHEMA
+            ),
+            "revision": int(revision),
+            **self._state_data(data),
+        }
+        encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        self._storage.write_bytes(encoded)
 
         return MonitorStateSnapshot(
             data=self._state_data(data),
@@ -229,9 +187,9 @@ class MonitorStateStore:
         timeout that could expire while a provider is still responding.
         """
         try:
-            ensure_private_dir(os.path.dirname(self.path))
+            path = self._storage.prepare()
             handle = self._lock_service().acquire(
-                self.path + ".run.lock", mode=LockMode.EXCLUSIVE, blocking=False,
+                path + ".run.lock", mode=LockMode.EXCLUSIVE, blocking=False,
             )
         except LockBusy as exc:
             raise MonitorStateError("monitor_worker_busy") from exc
@@ -252,7 +210,7 @@ class MonitorStateStore:
     def inspect(self) -> MonitorStateSnapshot:
         """Read atomic state without creating a directory or lock file.
 
-        State publication uses ``os.replace``, so an observation sees either
+        State publication uses the platform's atomic replace, so an observation sees either
         the complete old file or the complete new file.  Writers still use the
         locked ``read``/``commit`` surfaces; this method exists for health and
         other strictly read-only diagnostics.

@@ -1,6 +1,7 @@
 """Platform contracts and factory seams for staged portability work."""
 
 from .contracts import (
+    AtomicPublisher,
     AutostartService,
     AutostartStatus,
     FileLock,
@@ -16,6 +17,7 @@ from .contracts import (
     PlatformName,
     PlatformServices,
     PrivateStorage,
+    PrivateStorageError,
     ProcessIdentity,
     ProcessService,
     ReparsePointConflict,
@@ -25,14 +27,17 @@ from .factory import (
     InvalidPlatformServicesProviderResult,
     PlatformFactoryMismatch,
     PlatformServicesUnavailable,
+    create_atomic_publisher,
     create_file_lock,
     create_path_service,
     create_platform_services,
+    create_private_storage,
     detect_platform,
     register_platform_services,
 )
 
 __all__ = [
+    "AtomicPublisher",
     "AutostartService",
     "AutostartStatus",
     "FileLock",
@@ -51,13 +56,16 @@ __all__ = [
     "PlatformServices",
     "PlatformServicesUnavailable",
     "PrivateStorage",
+    "PrivateStorageError",
     "ProcessIdentity",
     "ProcessService",
     "ReparsePointConflict",
     "SecretStore",
+    "create_atomic_publisher",
     "create_file_lock",
     "create_path_service",
     "create_platform_services",
+    "create_private_storage",
     "detect_platform",
     "register_platform_services",
 ]

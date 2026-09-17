@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   windows-import:
+    # This check name is required by the repository's main-branch ruleset.
     name: Windows x64 / Python 3.11 import boundary
     runs-on: windows-2022
     timeout-minutes: 30
@@ -27,11 +28,12 @@ jobs:
           cache: pip
       - name: Install base and Windows-safe dependencies
         run: python -m pip install -r requirements.txt
-      - name: Verify W0.2B.1 Windows locks, paths, inventory, and public boundary
+      - name: Verify W0.2B.2 Windows storage, locks, paths, and public boundary
         run: >-
           python -m unittest
           tests.windows
           tests.test_repository_layout
+          tests.test_state_storage
           tests.test_config.ConfigTests.test_config_store_preserves_concurrent_disjoint_process_updates
           tests.test_monitor_state.MonitorStateStoreTests.test_two_processes_cannot_replace_the_same_revision
           tests.test_source_inventory.SourceInventoryStoreTests.test_concurrent_reconcile_preserves_inventory_union_and_revisions

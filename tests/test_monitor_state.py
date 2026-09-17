@@ -143,7 +143,8 @@ class MonitorStateStoreTests(unittest.TestCase):
     def test_interrupted_temporary_write_preserves_canonical_state(self):
         first = self.store.initialize_if_absent({"last_checked_ts": 10})
 
-        with patch("core.monitor_state.os.replace", side_effect=OSError("interrupted")):
+        before_names = set(Path(self.tmp.name).iterdir())
+        with patch.object(self.store._storage.services.atomic_publisher, "_replace", side_effect=OSError("interrupted")):
             with self.assertRaises(MonitorStateError) as caught:
                 self.store.commit(first.revision, {"last_checked_ts": 11})
 
@@ -151,7 +152,7 @@ class MonitorStateStoreTests(unittest.TestCase):
         retained = self.store.read()
         self.assertEqual(retained.revision, first.revision)
         self.assertEqual(retained.data["last_checked_ts"], 10)
-        self.assertEqual(list(Path(self.tmp.name).glob(".state.json.*.tmp")), [])
+        self.assertEqual(set(Path(self.tmp.name).iterdir()), before_names)
 
     def test_explicit_reset_to_now_is_atomic_and_preserves_other_fields(self):
         self.store.initialize_if_absent({

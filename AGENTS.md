@@ -47,7 +47,7 @@
   distinguish monitor healthy/missing/corrupt/conflict, source inventory
   completeness/counts, raw cursor progress, mounted handoff with provider sync
   unknown, separate Direct Drive verification, disabled link preview, legacy
-  read-only/send-retired MCP, and the Windows W0.2B.1 lock-and-path-only boundary.
+  read-only/send-retired MCP, and the Windows W0.2B.2 bounded state-storage boundary.
   Health inspection must not scan source, initialize/migrate the source
   inventory, open CAS payload objects, `stat` the protected WeChat container,
   or promote mounted evidence to remote
@@ -109,17 +109,15 @@
 ## Windows port staging
 
 - The full Windows programme contract, `WGO-WIN-SPEC-2`, remains external
-  owner-review candidate material. `PR-W0.2B.1` is authorized as a bounded
-  path-identity foundation; `docs/WINDOWS-PORT-MAP.md` is its sole
-  in-repository executable authority and the living module/import
-  classification.
-- `app.py` remains the macOS shell. W0.2B.1 must not add Windows source reads, key
-  acquisition, monitor activation, attachment/backup behavior, tray UI,
-  autostart, packaging or message sending.
+  owner-review candidate material. W0.2B.2 is the bounded private-storage and
+  atomic-publication tranche; `docs/WINDOWS-PORT-MAP.md` is its in-repository
+  authority and the living module/import classification.
+- `app.py` remains the macOS shell. W0.2B.2 must not add Windows source reads,
+  keys, monitor activation, attachment/backup behavior, tray UI, autostart,
+  packaging or message sending.
 - `core/platform/` owns platform contracts and fail-closed provider selection.
-  W0.2A supplies concrete macOS/Windows file-lock adapters. W0.2B.1 adds only
-  concrete path-identity providers. Atomic publication and private storage
-  remain W0.2B.2; secrets remain W0.3;
+  W0.2A supplies native locks, W0.2B.1 path identity, and W0.2B.2 private
+  storage plus atomic byte publication. Secrets remain W0.3;
   notifications/open/autostart/tray/packaging remain W6; source adapters begin
   in W1.
 - W0.2A migrates direct lock ownership only in `core/config.py`,
@@ -132,8 +130,21 @@
   must never pass through POSIX shell unescaping. Initial live identity support
   is local NTFS; UNC remains syntax-only, and reparse points, case-sensitive
   directories, unsupported filesystems/namespaces, root escape, reserved names,
-  and trailing-dot/space components fail closed. Do not migrate existing
-  storage/resource/source callers in this phase.
+  and trailing-dot/space components fail closed.
+- W0.2B.2 migrates only `ConfigStore`, `MonitorStateStore`, and
+  `SourceInventoryStore` via `core/state_storage.py`. This binding owns path
+  admission and platform IO, never JSON schemas, config revisions, monitor CAS,
+  source completeness or logical source identities. The stores retain those
+  authorities and their on-disk representations. Atomic writes must secure the
+  temporary file before payload bytes, preserve the old target on pre-replace
+  failure, and never delete the destination as a replacement fallback.
+  Windows privacy requires verified NTFS DACLs; chmod is not evidence.
+  Lock preparation must not change an existing state file's permissions before
+  its owner validates it; private replacement belongs to the write path.
+  Read-only monitor/inventory inspection must not create storage or change
+  permissions. Do not migrate archive, knowledge, resource or other storage
+  callers implicitly: existing config permission helpers remain solely for
+  those current unmigrated consumers.
 - `docs/WINDOWS-PORT-MAP.md` is the living module inventory. Every root,
   `ai/`, `core/`, `ui/` and `scripts/` Python module must remain classified,
   and only modules marked `windows-import-safe` enter the Windows import gate.
@@ -189,12 +200,13 @@ private/public publication, app-bundle rebuild, LaunchAgent reload and live
 acceptance are separate gates. Do not mutate live config/data or reload a live
 agent merely because source tests pass.
 
-For W0.2B.1 on Windows, also run:
+For W0.2B.2 on Windows, also run:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest `
   tests.windows `
   tests.test_repository_layout `
+  tests.test_state_storage `
   tests.test_config.ConfigTests.test_config_store_preserves_concurrent_disjoint_process_updates `
   tests.test_monitor_state.MonitorStateStoreTests.test_two_processes_cannot_replace_the_same_revision `
   tests.test_source_inventory.SourceInventoryStoreTests.test_concurrent_reconcile_preserves_inventory_union_and_revisions

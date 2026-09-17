@@ -2,7 +2,9 @@
 
 W0.2A supplies concrete macOS and Windows file-lock adapters. W0.2B.1 adds
 path identity without activating storage, source, monitor, or UI behavior.
-Later platform capabilities remain fail-closed until their owning phases.
+W0.2B.2 adds concrete private-storage and atomic byte publication behind the
+``private_storage`` and ``atomic_publisher`` capabilities. Later platform
+capabilities remain fail-closed until their owning phases.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ _PLATFORM_SERVICE_NAMES = (
     "locks",
     "paths",
     "private_storage",
+    "atomic_publisher",
     "secrets",
     "processes",
     "notifications",
@@ -110,6 +113,38 @@ class PrivateStorage(Protocol):
     def verify(self, path: str | PathLike[str]) -> bool: ...
 
 
+class PrivateStorageError(OSError):
+    """Content-free private-storage or publication-policy failure.
+
+    ``code`` is a stable machine token, ``reason`` is a bounded token that
+    never contains a path, and ``native_error`` carries the operating-system
+    error number when one was reported. The exception subclasses ``OSError``
+    so callers that already map operating-system failures keep working.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        reason: str = "",
+        native_error: int | None = None,
+    ):
+        self.code = str(code)
+        self.reason = str(reason)
+        self.native_error = native_error
+        super().__init__(
+            self.code if not self.reason else f"{self.code}:{self.reason}"
+        )
+        if native_error is not None:
+            self.errno = native_error
+
+
+class AtomicPublisher(Protocol):
+    """Replace one target's bytes through a single atomic publication step."""
+
+    def write_bytes(self, path: str | PathLike[str], data: bytes) -> None: ...
+
+
 class SecretStore(Protocol):
     def save(self, account: str, secret: str) -> None: ...
 
@@ -165,6 +200,7 @@ class PlatformServices:
     locks: FileLock | None = None
     paths: PathService | None = None
     private_storage: PrivateStorage | None = None
+    atomic_publisher: AtomicPublisher | None = None
     secrets: SecretStore | None = None
     processes: ProcessService | None = None
     notifications: NotificationService | None = None
