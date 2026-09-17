@@ -1388,10 +1388,13 @@ class MountedResourceBackup:
             "paths": sorted(current),
         })
         manifest_path = os.path.join(base_root, INDEX_MANIFEST_NAME)
+        # An unchanged ownership manifest should not create a fresh sync-folder
+        # write on every timer tick. Reuse the admitted, atomic text writers.
+        text = payload.decode("utf-8")
         if target_view:
-            self._target_atomic_bytes(manifest_path, payload)
+            self._target_text_if_changed(manifest_path, text)
         else:
-            self._projection_atomic_bytes(manifest_path, payload)
+            self._projection_text_if_changed(manifest_path, text)
 
     def _delivery_row(self, digest):
         conn = self._connect()

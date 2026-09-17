@@ -17,6 +17,7 @@ from urllib.parse import unquote
 from unittest.mock import Mock, patch
 
 import scripts.resource_backup as resource_backup_cli
+import core.resource_backup as resource_backup
 from core.resource_backup import (
     BACKUP_SCHEMA,
     DESTINATION_MARKER_NAME,
@@ -1217,6 +1218,52 @@ class ResourceBackupTests(unittest.TestCase):
         self.assertEqual(second["reused"], 2)
         hash_path.assert_not_called()
         source_path.assert_not_called()
+
+    def test_idle_rerun_preserves_projection_files_without_atomic_writes(self):
+        backup = self._backup(self._ready_capture())
+        self.assertEqual(backup.run()["state"], "sync_delegated")
+        manifests = [
+            Path(backup.obsidian_projection_root) / ".resource-index-manifest.json",
+            Path(backup.backup_root) / "views" / ".resource-index-manifest.json",
+        ]
+        before = [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in manifests]
+
+        with patch(
+            "core.resource_backup._atomic_bytes",
+            wraps=resource_backup._atomic_bytes,
+        ) as publish:
+            result = backup.run()
+
+        self.assertEqual(result["state"], "idle")
+        self.assertEqual(result["snapshot"]["state"], "unchanged")
+        self.assertEqual(result["target_index_files_written"], 0)
+        publish.assert_not_called()
+        self.assertEqual(
+            [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in manifests],
+            before,
+        )
+
+    def test_idle_rerun_repairs_missing_indexes_with_unchanged_manifests(self):
+        backup = self._backup(self._ready_capture())
+        self.assertEqual(backup.run()["state"], "sync_delegated")
+        roots = [
+            Path(backup.obsidian_projection_root),
+            Path(backup.backup_root) / "views",
+        ]
+        manifests = [root / ".resource-index-manifest.json" for root in roots]
+        before = [p.read_bytes() for p in manifests]
+        pages = [root / "00-资源索引.md" for root in roots]
+        expected = [p.read_bytes() for p in pages]
+        for page in pages:
+            page.unlink()
+
+        result = backup.run()
+
+        self.assertEqual(result["state"], "idle")
+        self.assertEqual([p.read_bytes() for p in pages], expected)
+        self.assertEqual([p.read_bytes() for p in manifests], before)
+        self.assertGreater(result["obsidian"]["files_written"], 0)
+        self.assertGreater(result["target_index_files_written"], 0)
 
     def test_receipt_backed_plan_and_status_do_not_hash_target_bytes(self):
         capture = self._ready_capture()

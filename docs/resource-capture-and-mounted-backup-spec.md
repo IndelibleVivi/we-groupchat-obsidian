@@ -284,8 +284,11 @@ point to the actual generated filename. Two unmanaged collisions fail closed
 rather than overwriting either file.
 
 Each Obsidian and mounted-view surface has its own hidden ownership manifest
-containing `archive_id` and the exact managed path set. Every render writes an
-explicit scope root even when the selection is empty. Stale paths are removed
+containing `archive_id` and the exact managed path set. Every render maintains an
+explicit scope root even when the selection is empty. Unchanged index pages and
+ownership manifests are reused without publication; new or changed manifests,
+including schema migrations, are still published atomically. Missing managed
+pages are rebuilt even when their manifest is unchanged. Stale paths are removed
 only when the prior manifest or ownership marker proves they are app-generated;
 unmanaged files are preserved. Rendering, managed GC, and mounted handoff hold
 the capture operation lock so their selected-chat scope remains canonical for

@@ -120,6 +120,7 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
   `00-打开微信资源备份.md`。平行的 `文件备份`、`待补齐附件` 与 `资源索引` views 会把已交付
   bytes 和所有未完成/需处理状态真正分开；已备份月页每个 digest 只列一行并显示 occurrence 次数，
   待补齐页绝不提供 target link。
+  重复运行不会重写内容未变的索引页和 ownership manifest；缺失的生成页面仍会自动补齐。
 - Direct Google Drive 文件同步是另一条可选 advanced lane：只扫描用户选定群聊，以 per-chat ×
   message-shard cursor 防止 partial shard read 推进遗漏。File message 不需要 Knowledge hit 就会进入
   durable queue 和 archive-owned provider-neutral CAS catalog；每个 digest 只上传一次，>5 MiB upload 按
