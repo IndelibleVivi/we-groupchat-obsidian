@@ -1,8 +1,8 @@
 """Independent native evidence helpers for the W0.2B.2 Windows tests.
 
 These helpers intentionally use a different API surface from the production
-backend: the named security descriptor APIs plus SDDL rendering for DACL
-evidence, and a raw ``FSCTL_SET_REPARSE_POINT`` mount point for the reparse
+backend: ``GetFileSecurityW`` plus SDDL rendering of the stored descriptor
+for DACL evidence, and a raw ``FSCTL_SET_REPARSE_POINT`` mount point for the reparse
 case. A Windows assertion here is therefore real platform evidence instead of
 a restatement of the implementation under test.
 
@@ -111,17 +111,6 @@ class WindowsNativeProbe:
         ]
         self.kernel32.DeviceIoControl.restype = wintypes.BOOL
 
-        self.advapi32.GetNamedSecurityInfoW.argtypes = [
-            wintypes.LPCWSTR,
-            ctypes.c_int,
-            wintypes.DWORD,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        self.advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
         self.advapi32.GetFileSecurityW.argtypes = [
             wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
@@ -167,41 +156,26 @@ class WindowsNativeProbe:
         return int(ctypes.get_last_error())
 
     def sddl(self, path) -> str:
-        """Render the owner plus DACL of a named object as SDDL."""
-        # ctypes wchar_t* parameters accept str only; callers pass PathLike.
-        target = os.fspath(path)
+        """Render the stored owner/DACL, without aclapi inheritance conversion.
+
+        Native CI proved GetNamedSecurityInfo can clear displayed INHERITED_ACE
+        flags after a parent's inheritance model changes even when the child's
+        stored descriptor is byte-identical. Read the stored descriptor first
+        so these assertions compare the object actually being protected.
+        """
         information = _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
-        descriptor = ctypes.c_void_p()
-        status = self.advapi32.GetNamedSecurityInfoW(
-            target,
-            _SE_FILE_OBJECT,
-            information,
-            None,
-            None,
-            None,
-            None,
-            ctypes.byref(descriptor),
-        )
-        if status != 0:
-            raise ctypes.WinError(int(status))
+        descriptor = ctypes.create_string_buffer(self.descriptor_bytes(path))
+        text = wintypes.LPWSTR()
+        length = wintypes.DWORD(0)
+        if not self.advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, _SDDL_REVISION_1, information,
+            ctypes.byref(text), ctypes.byref(length),
+        ):
+            raise ctypes.WinError(self._last_error())
         try:
-            text = wintypes.LPWSTR()
-            length = wintypes.DWORD(0)
-            if not self.advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                descriptor,
-                _SDDL_REVISION_1,
-                information,
-                ctypes.byref(text),
-                ctypes.byref(length),
-            ):
-                raise ctypes.WinError(self._last_error())
-            try:
-                return str(text.value)
-            finally:
-                self.kernel32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+            return str(text.value)
         finally:
-            if descriptor.value:
-                self.kernel32.LocalFree(descriptor)
+            self.kernel32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
 
     def descriptor_bytes(self, path) -> bytes:
         """Read the stored owner/DACL descriptor independently of aclapi SDDL."""
