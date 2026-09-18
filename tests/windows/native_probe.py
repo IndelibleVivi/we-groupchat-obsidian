@@ -2,7 +2,7 @@
 
 These helpers intentionally use a different API surface from the production
 backend: ``GetFileSecurityW`` plus SDDL rendering of the stored descriptor
-for DACL evidence, and a raw ``FSCTL_SET_REPARSE_POINT`` mount point for the reparse
+for DACL evidence, and the ``mklink /J`` shell built-in for the reparse
 case. A Windows assertion here is therefore real platform evidence instead of
 a restatement of the implementation under test.
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import os
+import subprocess
 
 
 _SE_FILE_OBJECT = 1
@@ -30,18 +31,6 @@ _TRUSTEE_IS_USER = 1
 
 _WIN_WORLD_SID = 1
 _SECURITY_MAX_SID_SIZE = 68
-
-_GENERIC_WRITE = 0x40000000
-_FILE_SHARE_READ = 0x00000001
-_FILE_SHARE_WRITE = 0x00000002
-_FILE_SHARE_DELETE = 0x00000004
-_OPEN_EXISTING = 3
-_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
-_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
-_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
-_FSCTL_SET_REPARSE_POINT = 0x000900A4
 
 
 class _TrusteeW(ctypes.Structure):
@@ -63,18 +52,6 @@ class _ExplicitAccessW(ctypes.Structure):
     ]
 
 
-class _MountPointReparseData(ctypes.Structure):
-    _fields_ = [
-        ("ReparseTag", wintypes.DWORD),
-        ("ReparseDataLength", wintypes.WORD),
-        ("Reserved", wintypes.WORD),
-        ("SubstituteNameOffset", wintypes.WORD),
-        ("SubstituteNameLength", wintypes.WORD),
-        ("PrintNameOffset", wintypes.WORD),
-        ("PrintNameLength", wintypes.WORD),
-    ]
-
-
 class WindowsNativeProbe:
     def __init__(self):
         if os.name != "nt" or not hasattr(ctypes, "WinDLL"):
@@ -84,32 +61,8 @@ class WindowsNativeProbe:
         self._bind()
 
     def _bind(self) -> None:
-        handle = wintypes.HANDLE
         self.kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
         self.kernel32.LocalFree.restype = wintypes.HLOCAL
-        self.kernel32.CloseHandle.argtypes = [handle]
-        self.kernel32.CloseHandle.restype = wintypes.BOOL
-        self.kernel32.CreateFileW.argtypes = [
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            wintypes.LPVOID,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            handle,
-        ]
-        self.kernel32.CreateFileW.restype = handle
-        self.kernel32.DeviceIoControl.argtypes = [
-            handle,
-            wintypes.DWORD,
-            wintypes.LPVOID,
-            wintypes.DWORD,
-            wintypes.LPVOID,
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-            wintypes.LPVOID,
-        ]
-        self.kernel32.DeviceIoControl.restype = wintypes.BOOL
 
         self.advapi32.GetFileSecurityW.argtypes = [
             wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
@@ -244,53 +197,37 @@ class WindowsNativeProbe:
         if status != 0:
             raise ctypes.WinError(int(status))
 
-    def create_reparse_point(self, link_path, target_path) -> None:
-        """Create a mount-point junction; needs no elevated privilege."""
-        link = os.path.abspath(os.fspath(link_path))
-        target = os.path.abspath(os.fspath(target_path))
-        substitute = "\\??\\" + target
-        display = target
-        path_buffer = ctypes.create_unicode_buffer(substitute + display)
-        data = _MountPointReparseData(
-            ReparseTag=_IO_REPARSE_TAG_MOUNT_POINT,
-            ReparseDataLength=8 + (ctypes.sizeof(path_buffer) - 2),
-            Reserved=0,
-            SubstituteNameOffset=0,
-            SubstituteNameLength=len(substitute) * 2,
-            PrintNameOffset=len(substitute) * 2,
-            PrintNameLength=len(display) * 2,
+    def create_directory_junction(self, link_path, target_path) -> None:
+        """Create a real NTFS directory junction; needs no elevated privilege.
+
+        Uses the same ``mklink /J`` route as the Windows path-identity
+        fixtures: the shell built-in creates a genuine mount-point reparse
+        point through the NTFS driver, so the rejection evidence stays native
+        while a standard user can still build the fixture. This replaces the
+        former hand-built ``FSCTL_SET_REPARSE_POINT`` buffer, which was never
+        exercised by CI and failed with ``ERROR_INVALID_REPARSE_DATA`` on a
+        standard-user host.
+        """
+        command_processor = os.environ.get("COMSPEC")
+        if not command_processor:
+            raise OSError("COMSPEC is unavailable for the junction fixture")
+        completed = subprocess.run(
+            [
+                command_processor,
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                os.path.abspath(os.fspath(link_path)),
+                os.path.abspath(os.fspath(target_path)),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
         )
-        buffer_size = ctypes.sizeof(data) + ctypes.sizeof(path_buffer) - 2
-        buffer = ctypes.create_string_buffer(buffer_size)
-        ctypes.memmove(buffer, ctypes.byref(data), ctypes.sizeof(data))
-        ctypes.memmove(
-            ctypes.byref(buffer, ctypes.sizeof(data)),
-            path_buffer,
-            ctypes.sizeof(path_buffer) - 2,
-        )
-        handle = self.kernel32.CreateFileW(
-            link,
-            _GENERIC_WRITE,
-            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
-            None,
-            _OPEN_EXISTING,
-            _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-        if handle == _INVALID_HANDLE_VALUE:
-            raise ctypes.WinError(self._last_error())
-        try:
-            returned = wintypes.DWORD(0)
-            if not self.kernel32.DeviceIoControl(
-                handle,
-                _FSCTL_SET_REPARSE_POINT,
-                buffer,
-                buffer_size,
-                None,
-                0,
-                ctypes.byref(returned),
-                None,
-            ):
-                raise ctypes.WinError(self._last_error())
-        finally:
-            self.kernel32.CloseHandle(handle)
+        if completed.returncode != 0:
+            raise OSError(
+                "directory junction fixture failed: "
+                f"returncode={completed.returncode}"
+            )

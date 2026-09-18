@@ -204,6 +204,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/wechat_resign.py` | `macos-only` | Exact-target AppKit/codesign/sudo re-sign orchestration; Windows key-provider authorization belongs to W1+. |
 | `core/wechat_signing_identity.py` | `macos-only` | macOS `security`/openssl adapter owning the persistent self-signed re-sign identity keychain; no Windows signing support. |
 | `core/wechat_source_guard.py` | `macos-only` | `fcntl`, macOS key/process adapter, and osascript notification behavior. |
+| `core/windows_source_probe.py` | `windows-import-safe` | E1a bounded read-only probe: exact executable/root admission via WindowsPathService, build/hash observation, layout classification, and versioned content-free receipt. No schema, key, cache, reader, cursor or inventory authority; ctypes seams load lazily. |
 | `ui/__init__.py` | `windows-import-safe` | Empty reusable UI package boundary; Windows tray is W6. |
 | `scripts/__init__.py` | `windows-import-safe` | Empty operator package boundary. |
 | `scripts/attachment_archive.py` | `operator-deferred` | Depends on W0.2 storage and W5 attachment authorization. |
@@ -218,6 +219,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `scripts/health_check.py` | `macos-only` | Privacy-safe reliability matrix plus LaunchAgent/notification/macOS source diagnostics; its Windows line reports the shared storage/credential foundation without claiming product support. |
 | `scripts/migrate_taxonomy.py` | `operator-deferred` | Depends on W0.2 config/knowledge storage. |
 | `scripts/organize_obsidian.py` | `operator-deferred` | Depends on W0.2 path/storage and W3 projection activation. |
+| `scripts/probe_wechat_windows.py` | `windows-import-safe` | E1a thin foreground operator entrypoint; requires explicit `--wechat-exe` and `--source-root`. No discovery, background, tray or autostart caller; stdout is the allowlisted receipt only. |
 | `scripts/refresh_data_source.py` | `macos-only` | Invokes the current macOS key/process adapter. |
 | `scripts/resign_wechat.py` | `macos-only` | Explicit-consent thin CLI for the exact-target macOS re-sign operation. |
 | `scripts/repair_relation_markdown.py` | `operator-deferred` | Depends on knowledge/config storage. |

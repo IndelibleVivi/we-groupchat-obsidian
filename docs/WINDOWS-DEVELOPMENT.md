@@ -133,6 +133,24 @@ Mac 全回归仍由 portability workflow 独立运行。
 PR 或 CI。分享前审阅 receipt；必要的私有详情与公开摘要分开保存。密码/API key 不作为
 命令行参数粘贴。未知、不可读、多账号歧义均是待处理状态，不等于“无消息”或健康。
 
+### E1a 只读 probe 与 content-free receipt
+
+`scripts/probe_wechat_windows.py` 是 E1a 的前台 operator 入口，必须显式给出
+`--wechat-exe` 与 `--source-root`；不做磁盘级发现，没有后台、托盘或自启动调用者。
+实现位于 `core/windows_source_probe.py`：路径准入、NTFS/reparse 限制和 root 包含性
+复用 `WindowsPathService`，本模块只负责 WeChat 可执行文件身份、布局分类和 receipt
+构造。
+
+- receipt schema：`we-groupchat-obsidian.windows-e1a-receipt.v1`，输出确定性
+  （无时间戳、无随机），逐字段 allowlist；账号目录名、绝对路径和原始异常不进入输出。
+- 布局签名 v1：`wechat-win-msg-tree:v1`（root 下唯一账号目录含 `msg/*.db`）。不匹配、
+  多候选、不可读、reparse 冲突、root escape、未知 build 都是可区分的失败状态；
+  `not_run` 列出未执行的观察项。
+- 退出码：`0` 唯一候选，`1` 非唯一/未知/不可读/不支持，`2` 用法或平台错误。
+- 合成测试 `tests/windows/test_windows_source_probe.py` 通过注入覆盖全部分类，并递归
+  检查完整 receipt 与 CLI 输出（含失败用例）不含私有内容；native 观察只在审阅过的
+  commit 上、机主明确同意后运行一次。
+
 ## 适配顺序与每一阶段的验收
 
 | 阶段 | 可交付范围 | 进入下一阶段的证据 |

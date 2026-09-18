@@ -252,8 +252,9 @@ class WindowsPrivateStorageTests(unittest.TestCase):
         try:
             os.symlink(str(target), str(link_path), target_is_directory=True)
         except OSError:
-            Path(link_path).mkdir()
-            self.probe.create_reparse_point(str(link_path), str(target))
+            # A standard user cannot create symlinks; the junction route is
+            # the mandatory standard-user reparse rejection fixture.
+            self.probe.create_directory_junction(str(link_path), str(target))
 
     def test_broad_inherited_grant_is_rejected_then_removed(self):
         value = self.root / "value.bin"
