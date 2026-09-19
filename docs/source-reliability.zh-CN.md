@@ -117,6 +117,26 @@ namespace 加 normalized relative path 构成；文件替换或 key rotation 只
 与 Direct Drive scanner 可以继续消费明确列出的 present generation，但整轮仍报告
 `source_degraded`。缺失 shard 回来后从自己的 cursor 继续，occurrence dedup 会阻止重复写入。
 
+### 有界 source-read 负载
+
+Long-lived app cycle 可以刷新 contacts 等 presentation cache，但不会因此丢弃已验证的 decrypted-DB
+record。只有 DB、WAL、key、configured cache path 或已发布 payload identity 要求失效时，才重建
+encrypted cache。一次 bounded multi-page traversal 的 page read 复用同一份 inventory/spec snapshot，
+并用 private hard link 固定 immutable published decrypted payload；plaintext SQLite input 仍通过
+Online Backup 取得包含 committed WAL state 的 snapshot。Key 变化并发布 current payload 后，会清理
+同一 logical shard 在 private cache 中的 obsolete regular-file sibling。Topic Monitor 在原有 final
+verification boundary 重新观察 inventory，因此这种复用不会削弱 replacement、新 shard 或
+incomplete source 检测。
+
+Inventory observation、decrypt/rebuild、snapshot 与 page read 按 source namespace 共用一把 reentrant
+in-process gate。每个 public shard page 会持 gate 到 read-only SQLite query 与 decode 结束，避免
+invalidation 把消失的 published cache 静默重建为空库并产生 false EOF。进入 AI/provider、
+attachment-byte resolution、projection write 或 remote Drive work 前必须释放 gate。累计的 in-memory
+counters 只保存 stage/byte counts、timing、invalidation reason 与 worker concurrency；per-cycle delta
+按当前 worker 归属，不会把另一条重叠 cycle 的工作重复算进来。有实际 source 活动的
+monitor/resource cycle 最多输出一条 path-free、content-free summary。Resource summary 还会报告本轮
+真正 atomic publish 的本地 projection file 数量与 encoded bytes；内容不变时两项都为零。
+
 ### Monitor raw-row cursor authority
 
 `core/monitor_source.py` 把 complete inventory 变成一批 bounded monitor work。Durable
@@ -131,7 +151,9 @@ replay/reconciliation 提供 exact input，不授权复制旧 cursor 或借用 g
 Reader 为每个 present shard 保留 bounded page，再按 `create_time` 与稳定 `source_message_id`
 做 k-way merge，并在 configured raw-row budget 停止。可提交 token 只从最后一条真正消费的 row
 派生，不能拿 fetched page end 冒充。被 presentation cleaning 过滤的 row 同样消耗 budget、推进
-自己的 shard cursor，但绝不进入 AI prompt。只有 filtered row 的批次返回
+自己的 shard cursor，但绝不进入 AI prompt。Resource 与 Direct Drive consumer 在存在 opaque keyset
+cursor 时会把 legacy same-second ID JSON 保持为空；只有 timestamp-only legacy reader 才保留这个
+compatibility set，因此大型 same-second bucket 的 durable cursor state 仍为 O(1)。只有 filtered row 的批次返回
 `source_advanced_no_visible`；只有同一份 complete inventory 下所有 shard 的 verified raw EOF
 才能返回 `no_messages`。
 

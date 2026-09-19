@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 
 from core import source_adapter
@@ -16,6 +17,9 @@ from core.source_adapter import (
     normalize_source_error,
     read_source_page,
     source_capabilities,
+    source_cycle_stage_stats,
+    source_stage_stats,
+    format_source_stage_summary,
     source_snapshot,
 )
 from core.wechat_db import WeChatDB, WeChatSourceDegraded
@@ -360,6 +364,105 @@ class SourcePageTests(unittest.TestCase):
         with source_snapshot(_SnapshotSource()):
             events.append("body")
         self.assertEqual(events, ["enter", "body", "exit"])
+
+    def test_source_stage_summary_is_optional_content_free_and_delta_based(self):
+        class _StatsSource:
+            def __init__(self):
+                self.stats = {
+                    "inventory_scans": 10,
+                    "inventory_reuses": 20,
+                    "inventory_seconds": 1.0,
+                    "cache_hits": 30,
+                    "cache_rebuilds": 4,
+                    "cache_rebuild_cold": 1,
+                    "cache_rebuild_db": 1,
+                    "cache_rebuild_wal": 1,
+                    "cache_rebuild_key": 1,
+                    "cache_rebuild_cache_path": 0,
+                    "cache_rebuild_published_missing": 0,
+                    "cache_rebuild_published_replaced": 0,
+                    "decrypted_pages": 40,
+                    "decrypted_bytes": 163840,
+                    "decrypt_seconds": 2.0,
+                    "snapshot_count": 3,
+                    "snapshot_bytes": 8192,
+                    "snapshot_seconds": 0.5,
+                    "source_workers": 5,
+                    "active_source_workers": 0,
+                    "peak_source_workers": 1,
+                    "contended_source_workers": 2,
+                    "source_wait_seconds": 0.25,
+                }
+
+            def source_stage_stats(self):
+                return dict(self.stats)
+
+        source = _StatsSource()
+        before = source_stage_stats(source)
+        source.stats.update({
+            "inventory_scans": 12,
+            "inventory_reuses": 23,
+            "cache_hits": 34,
+            "decrypted_pages": 45,
+            "decrypted_bytes": 184320,
+            "contended_source_workers": 3,
+            "source_wait_seconds": 0.5,
+        })
+        after = source_stage_stats(source)
+        rendered = format_source_stage_summary(
+            "monitor",
+            before,
+            after,
+            projection_files_written=2,
+            projection_bytes_written=4096,
+        )
+
+        self.assertIn("cycle=monitor", rendered)
+        self.assertIn("inventory_scans=2", rendered)
+        self.assertIn("inventory_reuses=3", rendered)
+        self.assertIn("cache_hits=4", rendered)
+        self.assertIn("decrypted_pages=5", rendered)
+        self.assertIn("decrypted_bytes=20480", rendered)
+        self.assertIn("contended=1", rendered)
+        self.assertIn("projection_files=2", rendered)
+        self.assertIn("projection_bytes=4096", rendered)
+        self.assertNotIn("/Users", rendered)
+        self.assertIsNone(source_stage_stats(_LegacySource()))
+        self.assertEqual(
+            format_source_stage_summary("resource", None, after),
+            "",
+        )
+        self.assertEqual(
+            format_source_stage_summary("resource", after, after),
+            "",
+        )
+
+    def test_cycle_stage_metrics_are_isolated_by_worker_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = WeChatDB(tmp, {})
+            main_before = source_cycle_stage_stats(source)
+            worker_delta = []
+
+            def record_worker():
+                before = source_cycle_stage_stats(source)
+                source._add_source_stage_stats(inventory_scans=1)
+                after = source_cycle_stage_stats(source)
+                worker_delta.append(
+                    after["inventory_scans"] - before["inventory_scans"]
+                )
+
+            thread = threading.Thread(target=record_worker)
+            thread.start()
+            thread.join(2)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(worker_delta, [1])
+            main_after = source_cycle_stage_stats(source)
+            self.assertEqual(
+                main_after["inventory_scans"] - main_before["inventory_scans"],
+                0,
+            )
+            self.assertEqual(source_stage_stats(source)["inventory_scans"], 1)
 
 
 class TimestampSubsetDispatchTests(unittest.TestCase):

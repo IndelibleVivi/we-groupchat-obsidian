@@ -186,6 +186,133 @@ def source_snapshot(source):
         yield
 
 
+_SOURCE_STAGE_NUMERIC_FIELDS = (
+    "inventory_scans",
+    "inventory_reuses",
+    "inventory_seconds",
+    "cache_hits",
+    "cache_rebuilds",
+    "cache_rebuild_cold",
+    "cache_rebuild_db",
+    "cache_rebuild_wal",
+    "cache_rebuild_key",
+    "cache_rebuild_cache_path",
+    "cache_rebuild_published_missing",
+    "cache_rebuild_published_replaced",
+    "decrypted_pages",
+    "decrypted_bytes",
+    "decrypt_seconds",
+    "snapshot_count",
+    "snapshot_bytes",
+    "snapshot_seconds",
+    "source_workers",
+    "active_source_workers",
+    "peak_source_workers",
+    "contended_source_workers",
+    "source_wait_seconds",
+)
+
+
+def _read_source_stage_stats(source, reader_name):
+    reader = getattr(source, reader_name, None)
+    if not callable(reader):
+        return None
+    try:
+        raw = reader()
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    result = {}
+    for field in _SOURCE_STAGE_NUMERIC_FIELDS:
+        value = raw.get(field, 0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            value = 0
+        result[field] = value
+    return result
+
+
+def source_stage_stats(source):
+    """Read optional process-wide content-free source metrics."""
+    return _read_source_stage_stats(source, "source_stage_stats")
+
+
+def source_cycle_stage_stats(source):
+    """Read current-worker metrics, falling back for legacy instrumented sources."""
+    result = _read_source_stage_stats(source, "source_cycle_stage_stats")
+    return result if result is not None else source_stage_stats(source)
+
+
+def format_source_stage_summary(
+    cycle,
+    before,
+    after,
+    *,
+    projection_files_written=0,
+    projection_bytes_written=0,
+):
+    """Format one path-free per-cycle delta from cumulative source metrics."""
+    has_source_stats = isinstance(before, dict) and isinstance(after, dict)
+    before = before if has_source_stats else {}
+    after = after if has_source_stats else {}
+    cycle_name = str(cycle) if cycle in {"monitor", "resource", "drive"} else "source"
+
+    def count(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0
+        return max(0, int(value))
+
+    projection_files = count(projection_files_written)
+    projection_bytes = count(projection_bytes_written)
+
+    def delta(field):
+        return max(0, after.get(field, 0) - before.get(field, 0))
+
+    def milliseconds(field):
+        return int(round(float(delta(field)) * 1000))
+
+    activity_fields = tuple(
+        field
+        for field in _SOURCE_STAGE_NUMERIC_FIELDS
+        if field not in {"active_source_workers", "peak_source_workers"}
+    )
+    if (
+        not any(delta(field) for field in activity_fields)
+        and not projection_files
+        and not projection_bytes
+    ):
+        return ""
+
+    return (
+        f"[source-stage] cycle={cycle_name} "
+        f"inventory_scans={int(delta('inventory_scans'))} "
+        f"inventory_reuses={int(delta('inventory_reuses'))} "
+        f"inventory_ms={milliseconds('inventory_seconds')} "
+        f"cache_hits={int(delta('cache_hits'))} "
+        f"cache_rebuilds={int(delta('cache_rebuilds'))} "
+        f"rebuild_cold={int(delta('cache_rebuild_cold'))} "
+        f"rebuild_db={int(delta('cache_rebuild_db'))} "
+        f"rebuild_wal={int(delta('cache_rebuild_wal'))} "
+        f"rebuild_key={int(delta('cache_rebuild_key'))} "
+        f"rebuild_cache_path={int(delta('cache_rebuild_cache_path'))} "
+        f"rebuild_published_missing={int(delta('cache_rebuild_published_missing'))} "
+        f"rebuild_published_replaced={int(delta('cache_rebuild_published_replaced'))} "
+        f"decrypted_pages={int(delta('decrypted_pages'))} "
+        f"decrypted_bytes={int(delta('decrypted_bytes'))} "
+        f"decrypt_ms={milliseconds('decrypt_seconds')} "
+        f"snapshots={int(delta('snapshot_count'))} "
+        f"snapshot_bytes={int(delta('snapshot_bytes'))} "
+        f"snapshot_ms={milliseconds('snapshot_seconds')} "
+        f"workers={int(delta('source_workers'))} "
+        f"active={int(after.get('active_source_workers', 0))} "
+        f"peak={int(after.get('peak_source_workers', 0))} "
+        f"contended={int(delta('contended_source_workers'))} "
+        f"wait_ms={milliseconds('source_wait_seconds')} "
+        f"projection_files={projection_files} "
+        f"projection_bytes={projection_bytes}"
+    )
+
+
 def bind_source_inventory(source, chats) -> dict:
     """Describe one source revision for the resource and Drive consumers.
 

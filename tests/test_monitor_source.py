@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 import unittest
@@ -286,6 +287,48 @@ class MonitorSourceCursorTests(unittest.TestCase):
             ["B10", "B11", "A11", "A12"],
         )
         self.assertTrue(batch.source_eof)
+
+    def test_source_scope_ends_before_provider_work(self):
+        events = []
+
+        class ScopedCursorDB(CursorDB):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.source_scope_active = False
+
+            @contextmanager
+            def source_snapshot(self):
+                self.source_scope_active = True
+                events.append("source-enter")
+                try:
+                    yield self
+                finally:
+                    events.append("source-exit")
+                    self.source_scope_active = False
+
+            def get_cursor_page_for_shard(self, *args, **kwargs):
+                events.append(f"page:{self.source_scope_active}")
+                return super().get_cursor_page_for_shard(*args, **kwargs)
+
+        db = ScopedCursorDB({
+            "logical-a": (
+                "generation-a",
+                [raw_message("generation-a", 1, 11, "可见消息")],
+            ),
+        })
+        save_state({"last_checked_ts": 10}, self.state_file)
+
+        def evaluate(*_args):
+            events.append(f"provider:{db.source_scope_active}")
+            return {"match": False, "score": 20}
+
+        result = self.monitor(db, evaluate).check_once()
+
+        self.assertEqual(result["status"], "no_match")
+        self.assertEqual(
+            events,
+            ["source-enter", "page:True", "source-exit", "provider:False"],
+        )
 
     def test_partially_consumed_prefetch_commits_only_last_consumed_row(self):
         db = CursorDB({

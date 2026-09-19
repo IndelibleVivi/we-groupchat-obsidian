@@ -134,6 +134,7 @@ from core.monitor import (
     state_file_for_chat,
 )
 from core.monitor_state import MonitorStateError
+from core.source_adapter import format_source_stage_summary, source_cycle_stage_stats
 from ai.factory import create_provider
 
 # Summary history save directory
@@ -793,6 +794,8 @@ class WeGroupchatObsidianApp(rumps.App):
             if manual:
                 _notify("资源索引与本地备份", "正在运行", "当前更新尚未结束。")
             return
+        source_stats_before = source_cycle_stage_stats(self.db)
+        result = {}
         try:
             config = load_config()
             if not manual and not config.get("resource_backup_enabled", False):
@@ -849,6 +852,22 @@ class WeGroupchatObsidianApp(rumps.App):
                 "backup": {"state": "failed", "error_code": type(exc).__name__},
             }
         finally:
+            projection = (
+                ((result or {}).get("backup") or {}).get("obsidian") or {}
+            )
+            summary = format_source_stage_summary(
+                "resource",
+                source_stats_before,
+                source_cycle_stage_stats(self.db),
+                projection_files_written=projection.get(
+                    "projection_files_written", 0
+                ),
+                projection_bytes_written=projection.get(
+                    "projection_bytes_written", 0
+                ),
+            )
+            if summary:
+                print(summary)
             self._resource_backup_lock.release()
         self._run_on_main(self._finish_resource_backup_run, result, manual)
 
@@ -1870,13 +1889,14 @@ class WeGroupchatObsidianApp(rumps.App):
                 _notify("关注推送", "正在检查", "上一轮检查还没结束")
             return
 
+        source_stats_before = source_cycle_stage_stats(self.db)
         try:
             chats = self._monitor_chats()
             if not chats:
                 raise MonitorConfigError("监控群聊未配置")
             if self.db and hasattr(self.db, "refresh_cache_view"):
                 self.db.refresh_cache_view()
-                print("[monitor] refreshed WeChat DB cache view")
+                print("[monitor] refreshed WeChat presentation cache view")
             had_error = False
             for chat in chats:
                 try:
@@ -1915,6 +1935,13 @@ class WeGroupchatObsidianApp(rumps.App):
             )
             self._handle_monitor_error(f"检查失败: {e}", manual)
         finally:
+            summary = format_source_stage_summary(
+                "monitor",
+                source_stats_before,
+                source_cycle_stage_stats(self.db),
+            )
+            if summary:
+                print(summary)
             self._monitor_lock.release()
 
     def _handle_monitor_result(self, result, manual=False, dry_run=False):

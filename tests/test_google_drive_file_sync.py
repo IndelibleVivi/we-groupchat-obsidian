@@ -497,10 +497,12 @@ class GoogleDriveFileSyncTests(unittest.TestCase):
         source = FakeSource({
             self.chat_a: [
                 file_message(f"wgmsg_same_{index}", self.timestamp, f"{index}.txt", data)
-                for index in range(5)
+                for index in range(1_205)
             ],
         })
         service = self.service(source)
+        service.config["google_drive_file_sync_max_messages_per_scan"] = 500
+        self.config["google_drive_file_sync_max_messages_per_scan"] = 500
         self.initialize(service)
 
         queued = []
@@ -510,17 +512,18 @@ class GoogleDriveFileSyncTests(unittest.TestCase):
             if result["queued"] == 0:
                 break
 
-        self.assertEqual(queued, [2, 2, 1, 0])
+        self.assertEqual(queued, [500, 500, 205, 0])
         items = self.rows("drive_sync_items")
         self.assertEqual(
             sorted(row["source_message_id"] for row in items),
-            [f"wgmsg_same_{index}" for index in range(5)],
+            sorted(f"wgmsg_same_{index}" for index in range(1_205)),
         )
-        self.assertEqual(len(items), 5)
+        self.assertEqual(len(items), 1_205)
         shard = self.rows("drive_scan_shards")[0]
         self.assertEqual(
-            shard["source_cursor_token"], f"[{self.timestamp},5]"
+            shard["source_cursor_token"], f"[{self.timestamp},1205]"
         )
+        self.assertEqual(shard["cursor_message_ids_json"], "[]")
         self.assertEqual(shard["source_state"], "healthy")
 
     def test_decode_failure_reports_exact_code_and_never_advances(self):

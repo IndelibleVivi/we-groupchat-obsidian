@@ -146,6 +146,33 @@ and Direct Drive scanners may continue consuming the listed present generations,
 but their result remains `source_degraded`; when a missing shard returns, its own
 cursor resumes and occurrence deduplication prevents duplicates.
 
+### Bounded source-read load
+
+A long-lived app cycle may refresh contacts and other presentation caches without
+discarding the validated decrypted-database records. An encrypted cache is
+rebuilt only when its database, WAL, key, configured cache path, or published
+payload identity requires invalidation. A bounded multi-page traversal reuses
+one inventory/spec snapshot for its page reads and pins each immutable published
+decrypted payload with a private hard link; plaintext SQLite inputs still use
+Online Backup so committed WAL state is included. After a key change publishes
+the current payload, obsolete regular-file siblings for that logical shard are
+removed from the private cache. Topic Monitor performs a fresh inventory
+observation at its existing final verification boundary, so this reuse does not
+weaken replacement, new-shard, or incomplete-source detection.
+
+Inventory observation, decrypt/rebuild, snapshot, and page reads share one
+reentrant in-process gate per source namespace. Each public shard page keeps the
+gate through its read-only SQLite query and decode, so invalidation cannot turn a
+missing published cache into an empty database or false EOF. The gate is released before
+AI/provider work, attachment-byte resolution, projection writes, and remote
+Drive work. Cumulative in-memory counters contain only stage counts, byte counts,
+timings, invalidation reasons, and worker concurrency; the per-cycle delta is
+attributed to the current worker rather than another overlapping cycle. An active
+monitor or resource cycle emits at most one path-free, content-free summary. The
+resource summary also reports the count and encoded byte size of local
+projection files that were actually atomically published; unchanged output
+contributes zero.
+
 ### Monitor raw-row cursor authority
 
 `core/monitor_source.py` turns that complete inventory into one bounded monitor
@@ -165,6 +192,10 @@ by `create_time` and stable `source_message_id`, and stops at the configured raw
 row budget. It derives each committed token from the last row actually consumed,
 not from a fetched page end. Rows removed by presentation cleaning still consume
 that budget and advance their shard cursor, but they never enter the AI prompt.
+Resource and Direct Drive consumers likewise keep their legacy same-second ID
+JSON empty when an opaque keyset cursor is available; only timestamp-only legacy
+readers retain that compatibility set, so a large same-second bucket stays O(1)
+in durable cursor state.
 Filtered-only progress returns `source_advanced_no_visible`; `no_messages` is
 reserved for verified raw EOF on every shard under the same complete inventory.
 

@@ -9,6 +9,7 @@ import json
 from .source_adapter import (
     encode_cursor_token,
     normalize_source_error,
+    source_snapshot,
     # Canonical capability check lives in source_adapter. Importing the name
     # keeps the existing `from .monitor_source import supports_monitor_source_cursors`
     # callers (core/monitor.py, scripts/catch_up_monitor.py) working unchanged.
@@ -261,6 +262,25 @@ def verify_monitor_source_inventory(db, digest: str, revision: int) -> None:
 
 
 def read_monitor_source_batch(
+    db,
+    username: str,
+    state: dict,
+    *,
+    raw_limit: int,
+    page_size: int = 128,
+) -> MonitorSourceBatch:
+    """Read one batch while holding only the bounded heavy-source phase."""
+    with source_snapshot(db):
+        return _read_monitor_source_batch_scoped(
+            db,
+            username,
+            state,
+            raw_limit=raw_limit,
+            page_size=page_size,
+        )
+
+
+def _read_monitor_source_batch_scoped(
     db,
     username: str,
     state: dict,

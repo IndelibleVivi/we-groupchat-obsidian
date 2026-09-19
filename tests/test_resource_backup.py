@@ -11,7 +11,7 @@ import tempfile
 import threading
 import unittest
 import uuid
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from urllib.parse import unquote
 from unittest.mock import Mock, patch
@@ -506,7 +506,7 @@ class ResourceBackupTests(unittest.TestCase):
                 "source_message_id": f"wgmsg_same_{index}",
                 "resources": [],
             }
-            for index in range(5)
+            for index in range(1_205)
         ]
         capture = SelectedResourceCapture(
             self.config,
@@ -515,7 +515,7 @@ class ResourceBackupTests(unittest.TestCase):
             random_func=lambda: 0.5,
             archive_id_factory=lambda: "00000000-0000-0000-0000-000000000001",
         )
-        capture.config["resource_backup_max_messages_per_scan"] = 2
+        capture.config["resource_backup_max_messages_per_scan"] = 500
         capture.initialize_selected_chat_cursors(start_timestamp=0)
 
         captured = []
@@ -533,7 +533,7 @@ class ResourceBackupTests(unittest.TestCase):
             if result["captured_links"] == 0:
                 break
 
-        self.assertEqual(captured, [2, 2, 1, 0])
+        self.assertEqual(captured, [500, 500, 205, 0])
         conn = sqlite3.connect(self.capture_db)
         conn.row_factory = sqlite3.Row
         try:
@@ -547,13 +547,14 @@ class ResourceBackupTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(len(shards), 1)
-        self.assertEqual(shards[0]["source_cursor_token"], f"[{timestamp},5]")
+        self.assertEqual(shards[0]["source_cursor_token"], f"[{timestamp},1205]")
+        self.assertEqual(shards[0]["cursor_message_ids_json"], "[]")
         self.assertEqual(shards[0]["source_state"], "healthy")
         self.assertEqual(
             sorted(row["source_message_id"] for row in occurrences),
-            [f"wgmsg_same_{index}" for index in range(5)],
+            sorted(f"wgmsg_same_{index}" for index in range(1_205)),
         )
-        self.assertEqual(len(occurrences), 5)
+        self.assertEqual(len(occurrences), 1_205)
 
     def _backup(self, capture, *, mode="redacted"):
         return MountedResourceBackup(
@@ -1331,7 +1332,16 @@ class ResourceBackupTests(unittest.TestCase):
 
     def test_idle_rerun_preserves_projection_files_without_atomic_writes(self):
         backup = self._backup(self._ready_capture())
-        self.assertEqual(backup.run()["state"], "sync_delegated")
+        first = backup.run()
+        self.assertEqual(first["state"], "sync_delegated")
+        self.assertGreater(
+            first["obsidian"]["projection_files_written"],
+            0,
+        )
+        self.assertGreater(
+            first["obsidian"]["projection_bytes_written"],
+            0,
+        )
         manifests = [
             Path(backup.obsidian_projection_root) / ".resource-index-manifest.json",
             Path(backup.backup_root) / "views" / ".resource-index-manifest.json",
@@ -1347,6 +1357,8 @@ class ResourceBackupTests(unittest.TestCase):
         self.assertEqual(result["state"], "idle")
         self.assertEqual(result["snapshot"]["state"], "unchanged")
         self.assertEqual(result["target_index_files_written"], 0)
+        self.assertEqual(result["obsidian"]["projection_files_written"], 0)
+        self.assertEqual(result["obsidian"]["projection_bytes_written"], 0)
         publish.assert_not_called()
         self.assertEqual(
             [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in manifests],
@@ -2490,6 +2502,49 @@ class ResourceBackupTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "future_scan_state")
         self.assertEqual(result["scan"]["state"], "future_scan_state")
+
+    def test_capture_run_releases_source_snapshot_before_file_resolution(self):
+        capture = self._capture()
+        active = {"source": False}
+        events = []
+
+        @contextmanager
+        def snapshot():
+            active["source"] = True
+            events.append("enter")
+            try:
+                yield
+            finally:
+                active["source"] = False
+                events.append("exit")
+
+        def scan():
+            events.append(f"scan:{active['source']}")
+            return {"state": "healthy"}
+
+        def resolve(*, limit, consent_check=None):
+            del limit, consent_check
+            events.append(f"resolve:{active['source']}")
+            return {
+                "state": "healthy",
+                "processed": 0,
+                "ready_local": 0,
+                "failed": 0,
+            }
+
+        capture.source.source_snapshot = snapshot
+        with (
+            patch.object(capture, "_scan_locked", side_effect=scan),
+            patch.object(
+                capture,
+                "_resolve_pending_files_locked",
+                side_effect=resolve,
+            ),
+        ):
+            result = capture.run(resolve_files=True)
+
+        self.assertEqual(result["state"], "healthy")
+        self.assertEqual(events, ["enter", "scan:True", "exit", "resolve:False"])
 
     def test_shared_outcome_requires_nested_scan_success(self):
         outcome = evaluate_resource_backup_outcome(

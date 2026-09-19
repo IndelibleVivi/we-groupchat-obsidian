@@ -15,6 +15,41 @@ class RefreshingDB:
         self.refreshes += 1
 
 
+class StatsDB(RefreshingDB):
+    def __init__(self):
+        super().__init__()
+        self.stats_calls = 0
+
+    def source_stage_stats(self):
+        self.stats_calls += 1
+        scans = 0 if self.stats_calls == 1 else 2
+        return {
+            "inventory_scans": scans,
+            "inventory_reuses": scans,
+            "inventory_seconds": 0.01 * scans,
+            "cache_hits": scans,
+            "cache_rebuilds": 0,
+            "cache_rebuild_cold": 0,
+            "cache_rebuild_db": 0,
+            "cache_rebuild_wal": 0,
+            "cache_rebuild_key": 0,
+            "cache_rebuild_cache_path": 0,
+            "cache_rebuild_published_missing": 0,
+            "cache_rebuild_published_replaced": 0,
+            "decrypted_pages": 0,
+            "decrypted_bytes": 0,
+            "decrypt_seconds": 0.0,
+            "snapshot_count": 0,
+            "snapshot_bytes": 0,
+            "snapshot_seconds": 0.0,
+            "source_workers": scans,
+            "active_source_workers": 0,
+            "peak_source_workers": 1,
+            "contended_source_workers": 0,
+            "source_wait_seconds": 0.0,
+        }
+
+
 class AppMonitorResilienceTests(unittest.TestCase):
     def test_one_chat_failure_does_not_skip_later_chats(self):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
@@ -53,6 +88,34 @@ class AppMonitorResilienceTests(unittest.TestCase):
         self.assertEqual(len(handled_errors), 1)
         self.assertIn("First", handled_errors[0])
         self.assertEqual(app.db.refreshes, 1)
+
+    def test_monitor_emits_one_content_free_source_stage_summary(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app._monitor_lock = threading.Lock()
+        app._monitor_last_error = ""
+        app.config = {}
+        app.db = StatsDB()
+        app._monitor_chats = lambda: [
+            {"username": "private-fixture@chatroom", "name": "Private Fixture"},
+        ]
+        app._handle_monitor_result = lambda *_args, **_kwargs: None
+        app._handle_monitor_error = lambda *_args, **_kwargs: None
+
+        class FakeMonitor:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def check_once(self, dry_run=False):
+                return {"status": "no_messages"}
+
+        output = StringIO()
+        with patch("app.TopicMonitor", FakeMonitor), redirect_stdout(output):
+            app._run_monitor_check(manual=False, dry_run=False)
+
+        rendered = output.getvalue()
+        self.assertEqual(rendered.count("[source-stage] cycle=monitor"), 1)
+        self.assertNotIn("private-fixture", rendered)
+        self.assertNotIn("Private Fixture", rendered)
 
     def test_invalid_response_is_reported_as_failure_without_erasing_error_episode(self):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)

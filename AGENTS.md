@@ -30,7 +30,9 @@
   `create_time` then `source_message_id`, and only actually consumed rows may
   advance tentative cursors. Filtered rows advance without entering an AI
   prompt; `no_messages` requires verified raw EOF under the same complete
-  inventory. A generation change or state-revision conflict commits no cursor.
+  inventory. Resource and Direct Drive keyset cursors must keep legacy
+  same-second ID JSON empty; only timestamp-only readers may accumulate it. A
+  generation change or state-revision conflict commits no cursor.
   Knowledge events created before a state conflict reuse their stable
   `source_batch_id` on retry and must not create a second canonical event. If
   that committed event's managed topic Markdown is missing, reuse repairs the
@@ -182,8 +184,16 @@
   indexes, digests, target views and SVG exports are rebuildable projections.
 - Attachment-byte consent is process/session-local and must never be persisted.
   WeChat decrypted caches and source shard/message identities are namespaced by
-  source root; plaintext SQLite snapshots use Online Backup so WAL state is not
-  lost.
+  source root. Presentation-cache refresh must preserve validated decrypted-cache
+  records; DB/WAL/key/published-payload identity changes still invalidate them.
+  One bounded traversal reuses its inventory/spec snapshot, while explicit final
+  inventory verification remains a fresh observation. Same-source inventory,
+  decrypt, snapshot and page work share one reentrant in-process gate that must
+  cover each public page's read-only query/decode body and be released before
+  provider/network, attachment resolution or projection work. A successful key
+  change keeps only the current regular canonical payload for its logical shard.
+  Immutable published decrypted payloads may be pinned by private hard link;
+  plaintext SQLite snapshots use Online Backup so WAL state is not lost.
 - Source-inventory evidence is path-free and content-free. A mounted snapshot's
   `catalog_complete` marker binds the durable exported catalog only; its
   separate `source_observation.complete` field is the authority for whether the

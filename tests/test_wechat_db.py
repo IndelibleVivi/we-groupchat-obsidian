@@ -4,6 +4,7 @@ import os
 import sqlite3
 import struct
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -174,6 +175,7 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
                 published = db._cache_path(rel_path)
                 self.assertNotEqual(pinned, published)
                 self.assertTrue(os.path.isfile(published))
+                self.assertEqual(os.stat(pinned).st_ino, os.stat(published).st_ino)
                 replacement = os.path.join(self.tmp.name, "replacement.db")
                 conn = sqlite3.connect(replacement)
                 try:
@@ -197,6 +199,7 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
                 name.startswith(".partial-")
                 for name in os.listdir(db.cache_dir)
             ))
+            self.assertEqual(db.source_stage_stats()["snapshot_bytes"], 0)
 
     def test_cache_namespace_and_key_fingerprint_isolate_source_roots(self):
         rel_path = "message/message_2.db"
@@ -237,6 +240,81 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(value, os.path.join(first_root, rel_path))
+
+    def test_warm_refresh_reuses_decryption_and_real_identity_changes_rebuild(self):
+        rel_path = "message/message_8.db"
+        encrypted_path = os.path.join(self.tmp.name, rel_path)
+        os.makedirs(os.path.dirname(encrypted_path), exist_ok=True)
+        with open(encrypted_path, "wb") as handle:
+            handle.write(b"encrypted fixture")
+        db = WeChatDB(self.tmp.name, keys={
+            rel_path: {"enc_key": "11" * 32},
+        })
+        decrypt_calls = []
+
+        def fake_decrypt(_source, output, _key):
+            decrypt_calls.append(output)
+            conn = sqlite3.connect(output)
+            try:
+                conn.execute("CREATE TABLE snapshot_value(value TEXT)")
+                conn.execute(
+                    "INSERT INTO snapshot_value VALUES (?)",
+                    (f"build-{len(decrypt_calls)}",),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            return 1
+
+        with (
+            patch.object(db, "_is_plain_sqlite", return_value=False),
+            patch("core.wechat_db.decrypt_database", side_effect=fake_decrypt),
+            patch("core.wechat_db.decrypt_wal", return_value=1),
+        ):
+            for _ in range(4):
+                db.refresh_cache_view()
+                self.assertTrue(db._get_decrypted_db(rel_path))
+            self.assertEqual(len(decrypt_calls), 1)
+
+            with open(encrypted_path, "ab") as handle:
+                handle.write(b"-db-change")
+            db._get_decrypted_db(rel_path)
+            self.assertEqual(len(decrypt_calls), 2)
+
+            with open(encrypted_path + "-wal", "wb") as handle:
+                handle.write(b"wal-change")
+            db._get_decrypted_db(rel_path)
+            self.assertEqual(len(decrypt_calls), 3)
+
+            old_published = db._cache_path(rel_path)
+            db.keys[rel_path] = {"enc_key": "22" * 32}
+            db._get_decrypted_db(rel_path)
+            self.assertEqual(len(decrypt_calls), 4)
+            current_published = db._cache_path(rel_path)
+            self.assertNotEqual(old_published, current_published)
+            self.assertFalse(os.path.exists(old_published))
+            self.assertEqual(db._fallback_cache_path(rel_path), current_published)
+
+            published = db._cache_path(rel_path)
+            replacement = os.path.join(self.tmp.name, "published-replacement.db")
+            conn = sqlite3.connect(replacement)
+            conn.execute("CREATE TABLE replacement(value TEXT)")
+            conn.commit()
+            conn.close()
+            os.replace(replacement, published)
+            db._get_decrypted_db(rel_path)
+            self.assertEqual(len(decrypt_calls), 5)
+
+        stats = db.source_stage_stats()
+        self.assertEqual(stats["cache_hits"], 3)
+        self.assertEqual(stats["cache_rebuilds"], 5)
+        self.assertEqual(stats["cache_rebuild_cold"], 1)
+        self.assertEqual(stats["cache_rebuild_db"], 1)
+        self.assertEqual(stats["cache_rebuild_wal"], 1)
+        self.assertEqual(stats["cache_rebuild_key"], 1)
+        self.assertEqual(stats["cache_rebuild_published_replaced"], 1)
+        self.assertEqual(stats["decrypted_pages"], 8)
+        self.assertGreater(stats["decrypted_bytes"], 0)
 
     def test_plaintext_snapshot_uses_online_backup_and_includes_wal(self):
         rel_path = "message/message_3.db"
@@ -702,6 +780,151 @@ class WeChatSourceEnvelopeTests(unittest.TestCase):
             limit=1,
         )["messages"][0]
         self.assertNotEqual(identities[0], other["source_message_id"])
+
+    def test_traversal_reuses_inventory_specs_and_boundary_rescans(self):
+        username = "inventory-scope@chatroom"
+        table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
+        root = os.path.join(self.tmp.name, "inventory-scope")
+        message_dir = os.path.join(root, "message")
+        os.makedirs(message_dir)
+        path = os.path.join(message_dir, "message_0.db")
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(f"""
+                CREATE TABLE [{table_name}] (
+                    local_type INTEGER, create_time INTEGER,
+                    message_content TEXT, WCDB_CT_message_content INTEGER,
+                    status INTEGER
+                )
+            """)
+            conn.executemany(
+                f"INSERT INTO [{table_name}] VALUES (1, ?, ?, NULL, 0)",
+                [(index, f"sender:\nrow-{index}") for index in range(1, 6)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        db = WeChatDB(root, {})
+        db._contacts = {"sender": "成员"}
+        db._contacts_full = []
+        db._nick_to_remark = {}
+        db._load_contacts = lambda: None
+
+        with patch.object(
+            db,
+            "_message_shard_observations",
+            wraps=db._message_shard_observations,
+        ) as observe, patch(
+            "core.wechat_db.os.listdir",
+            wraps=os.listdir,
+        ) as listdir:
+            with db.source_snapshot():
+                initial = db.get_source_inventory(update=True)
+                generation = initial["present_generation_ids"][0]
+                token = ""
+                while True:
+                    page = db.get_cursor_page_for_shard(
+                        username,
+                        generation,
+                        cursor_token=token,
+                        limit=2,
+                    )
+                    token = page["next_cursor"]
+                    if page["exhausted"]:
+                        break
+                final = db.get_source_inventory(update=True)
+
+        self.assertEqual(initial["inventory_digest"], final["inventory_digest"])
+        self.assertEqual(observe.call_count, 2)
+        self.assertEqual(listdir.call_count, 2)
+        stats = db.source_stage_stats()
+        self.assertEqual(stats["inventory_scans"], 2)
+        self.assertEqual(stats["inventory_reuses"], 3)
+
+
+class WeChatDBSourceGateTests(unittest.TestCase):
+    def test_direct_cursor_page_body_runs_inside_gate_and_missing_db_is_readonly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WeChatDB(tmp, {})
+            state = db._source_heavy_state()
+            observed_depths = []
+
+            def page_body(*_args, **_kwargs):
+                with state.metrics_lock:
+                    observed_depths.append(
+                        state.owner_depths.get(threading.get_ident(), 0)
+                    )
+                return {"messages": [], "next_cursor": "", "exhausted": True}
+
+            with patch.object(
+                db,
+                "_get_cursor_page_for_shard_locked",
+                side_effect=page_body,
+            ):
+                result = db.get_cursor_page_for_shard(
+                    "fixture@chatroom",
+                    "generation-fixture",
+                )
+
+            missing = os.path.join(tmp, "missing.db")
+            with self.assertRaises(sqlite3.OperationalError):
+                db._connect_source_readonly(missing)
+
+            self.assertEqual(result["messages"], [])
+            self.assertEqual(observed_depths, [1])
+            self.assertFalse(os.path.exists(missing))
+
+    def test_same_source_heavy_sections_are_serialized_without_global_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = WeChatDB(tmp, {})
+            second = WeChatDB(tmp, {})
+            state = first._source_heavy_state()
+            real_lock = state.lock
+            contended_attempt = threading.Event()
+
+            class ObservableLock:
+                def acquire(self, blocking=True):
+                    acquired = real_lock.acquire(blocking)
+                    if not blocking and not acquired:
+                        contended_attempt.set()
+                    return acquired
+
+                def release(self):
+                    real_lock.release()
+
+            state.lock = ObservableLock()
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            second_entered = threading.Event()
+
+            def hold_first():
+                with first.source_snapshot():
+                    first_entered.set()
+                    self.assertTrue(release_first.wait(2))
+
+            def enter_second():
+                self.assertTrue(first_entered.wait(2))
+                with second.source_snapshot():
+                    second_entered.set()
+
+            thread_one = threading.Thread(target=hold_first)
+            thread_two = threading.Thread(target=enter_second)
+            thread_one.start()
+            self.assertTrue(first_entered.wait(2))
+            thread_two.start()
+            self.assertTrue(contended_attempt.wait(2))
+            self.assertFalse(second_entered.is_set())
+            release_first.set()
+            thread_one.join(2)
+            thread_two.join(2)
+            self.assertFalse(thread_one.is_alive())
+            self.assertFalse(thread_two.is_alive())
+            self.assertTrue(second_entered.is_set())
+
+            stats = first.source_stage_stats()
+            self.assertEqual(stats["active_source_workers"], 0)
+            self.assertEqual(stats["peak_source_workers"], 1)
+            self.assertGreaterEqual(stats["contended_source_workers"], 1)
 
 
 class WeChatStableSourceMessageIdentityTests(unittest.TestCase):

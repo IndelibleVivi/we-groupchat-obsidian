@@ -983,7 +983,8 @@ class SelectedResourceCapture:
         try:
             with self._operation_lock():
                 self._reload_canonical_config_locked()
-                return self._scan_locked()
+                with source_snapshot(self.source):
+                    return self._scan_locked()
         except ResourceCaptureError as exc:
             if exc.code == "capture_worker_busy":
                 return {
@@ -1067,6 +1068,10 @@ class SelectedResourceCapture:
                 new_timestamp, new_ids = self._cursor_after(
                     messages, cursor_timestamp, seen_ids
                 )
+                if callable(
+                    getattr(self.source, "get_cursor_page_for_shard", None)
+                ):
+                    new_ids = set()
                 now = self.now_func()
                 conn = self._connect()
                 try:
@@ -1956,7 +1961,8 @@ class SelectedResourceCapture:
         try:
             with self._operation_lock():
                 self._reload_canonical_config_locked()
-                scan = self._scan_locked()
+                with source_snapshot(self.source):
+                    scan = self._scan_locked()
                 if str(scan.get("state") or "") == "worker_busy":
                     raise ResourceCaptureError("capture_worker_busy")
                 resolve = (

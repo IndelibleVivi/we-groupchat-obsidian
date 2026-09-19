@@ -502,6 +502,10 @@ class GoogleDriveFileSync:
         return inserted
 
     def scan(self):
+        with source_snapshot(self.source):
+            return self._scan_source()
+
+    def _scan_source(self):
         enabled, paused = self._control_state()
         if not enabled:
             return {"state": "disabled", "scanned": 0, "queued": 0}
@@ -562,6 +566,10 @@ class GoogleDriveFileSync:
                 new_timestamp, new_ids = self._cursor_after(
                     messages, cursor_timestamp, seen_ids
                 )
+                if callable(
+                    getattr(self.source, "get_cursor_page_for_shard", None)
+                ):
+                    new_ids = set()
                 now = self.now_func()
                 conn = self._connect()
                 try:

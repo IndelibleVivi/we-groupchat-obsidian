@@ -2,6 +2,8 @@ import os
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import ANY, Mock, patch
 
 from app import WeGroupchatObsidianApp
@@ -42,6 +44,38 @@ class AppResourceBackupTests(unittest.TestCase):
         capture.run.assert_called_once_with(resolve_limit=50, resolve_files=False)
         backup.run.assert_called_once_with()
         self.assertFalse(app._resource_backup_lock.locked())
+
+    def test_resource_cycle_reports_actual_projection_publish_bytes(self):
+        app = self.make_app(resolve_files=False)
+        capture = Mock()
+        capture.run.return_value = {
+            "state": "healthy",
+            "scan": {"captured_links": 0, "captured_files": 0},
+            "resolve": {"state": "skipped"},
+        }
+        app._resource_capture_service = Mock(return_value=capture)
+        backup = Mock()
+        backup.run.return_value = {
+            "state": "sync_delegated",
+            "obsidian": {
+                "state": "written",
+                "projection_files_written": 3,
+                "projection_bytes_written": 8192,
+            },
+        }
+        output = StringIO()
+
+        with (
+            patch("app.load_config", return_value=app.config),
+            patch("app.MountedResourceBackup.from_config", return_value=backup),
+            redirect_stdout(output),
+        ):
+            app._run_resource_backup_consumer(manual=False)
+
+        rendered = output.getvalue()
+        self.assertEqual(rendered.count("[source-stage] cycle=resource"), 1)
+        self.assertIn("projection_files=3", rendered)
+        self.assertIn("projection_bytes=8192", rendered)
 
     def test_file_resolution_requires_explicit_session_opt_in(self):
         app = self.make_app(resolve_files=True)

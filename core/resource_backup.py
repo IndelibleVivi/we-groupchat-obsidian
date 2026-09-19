@@ -641,6 +641,8 @@ class MountedResourceBackup:
         self.link_export_mode = mode
         self._destination_uuid = ""
         self._schema_ready = False
+        self._projection_files_written = 0
+        self._projection_bytes_written = 0
 
     @classmethod
     def from_config(cls, config, **kwargs):
@@ -1110,6 +1112,8 @@ class MountedResourceBackup:
         _atomic_bytes(path, data, mode=mode)
         if not _within(path, self.obsidian_root):
             raise ResourceBackupError("projection_file_escape")
+        self._projection_files_written += 1
+        self._projection_bytes_written += len(data)
 
     def _projection_text_if_changed(self, path, text):
         data = (str(text).rstrip() + "\n").encode("utf-8")
@@ -2452,13 +2456,28 @@ class MountedResourceBackup:
         occurrences = self.capture.occurrences(selected_only=True)
         root = self.obsidian_projection_root
         self._ensure_projection_dir(root)
+        files_before = self._projection_files_written
+        bytes_before = self._projection_bytes_written
+        files_changed = self._render_indexes_at(
+            root,
+            occurrences,
+            target_view=False,
+        )
         return {
             "state": "written",
-            "files_written": self._render_indexes_at(root, occurrences, target_view=False),
+            "files_written": files_changed,
+            "projection_files_written": (
+                self._projection_files_written - files_before
+            ),
+            "projection_bytes_written": (
+                self._projection_bytes_written - bytes_before
+            ),
             "occurrences": len(occurrences),
         }
 
     def _render_obsidian_indexes_safely(self):
+        files_before = self._projection_files_written
+        bytes_before = self._projection_bytes_written
         try:
             with self._projection_worker_lock():
                 return self._render_obsidian_indexes_owned()
@@ -2470,6 +2489,12 @@ class MountedResourceBackup:
                     else "projection_failed"
                 ),
                 "files_written": 0,
+                "projection_files_written": (
+                    self._projection_files_written - files_before
+                ),
+                "projection_bytes_written": (
+                    self._projection_bytes_written - bytes_before
+                ),
                 "occurrences": len(self.capture.occurrences(selected_only=True)),
                 "error_code": str(
                     getattr(exc, "code", "") or type(exc).__name__
@@ -2627,6 +2652,8 @@ class MountedResourceBackup:
         obsidian = {
             "state": "not_run_worker_busy",
             "files_written": 0,
+            "projection_files_written": 0,
+            "projection_bytes_written": 0,
             "occurrences": 0,
         }
         try:
