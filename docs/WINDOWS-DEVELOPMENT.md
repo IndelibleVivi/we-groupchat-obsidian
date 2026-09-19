@@ -74,6 +74,10 @@ flowchart TB
 checkpoint/progress 的唯一写者；`ConfigStore` 是 main config 的唯一写者。
 Source reader 提供观测、generation、bounded raw pages、canonical envelopes 和
 snapshot 失败，不拥有另一份 cursor、队列或 inventory。
+未来 Windows reader 的 snapshot 语义也必须保持：traversal-local inventory/pin 可以在 page
+边界交错，但同一来源的一页 pin/query/decode 必须串行；第一次 pin 前后都要把实际来源与
+inventory generation 绑定，变化时返回 `source_generation_changed`，不得产出旧 generation 名下的
+row 或 false EOF。
 
 当前 `core/wechat_db.py` 仍含 Mac schema、解密 cache 和 query/presentation 实现。
 它的 import-safe 分类不意味着可以直接读取 Windows 微信。Windows adapter 须在实际

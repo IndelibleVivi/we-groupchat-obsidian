@@ -385,10 +385,7 @@ class WeChatDB:
         self._contacts_full = None  # [{username, nick_name, remark}]
         self._nick_to_remark = {}  # {nick_name: remark} reverse mapping for nickname→alias lookup
         self._emoticon_map = None  # {md5: {cdn_url, aes_key, thumb_url}}
-        self._source_snapshot_depth = 0
-        self._source_snapshot_paths = {}
-        self._scoped_inventory_snapshot = None
-        self._scoped_inventory_specs = None
+        self._source_snapshot_local = threading.local()
         self._source_stage_stats_lock = threading.Lock()
         self._source_stage_counters = dict(self._SOURCE_STAGE_DEFAULTS)
         self._source_cycle_stage_counters = threading.local()
@@ -586,32 +583,58 @@ class WeChatDB:
 
     @contextmanager
     def source_snapshot(self):
-        """Serialize and pin one bounded multi-page source traversal."""
-        with self._source_heavy_section():
-            outermost = self._source_snapshot_depth == 0
-            if outermost:
-                self._scoped_inventory_snapshot = None
-                self._scoped_inventory_specs = None
-            self._source_snapshot_depth += 1
-            try:
-                yield self
-            finally:
-                self._source_snapshot_depth -= 1
-                if self._source_snapshot_depth == 0:
-                    paths = list(self._source_snapshot_paths.values())
-                    self._source_snapshot_paths.clear()
-                    self._scoped_inventory_snapshot = None
-                    self._scoped_inventory_specs = None
-                    for path in paths:
-                        try:
-                            os.unlink(path)
-                        except OSError:
-                            pass
+        """Pin one bounded traversal while letting other pages take turns."""
+        state = self._source_snapshot_state()
+        outermost = state["depth"] == 0
+        if outermost:
+            state["paths"].clear()
+            state["generations"].clear()
+            state["inventory_snapshot"] = None
+            state["inventory_specs"] = None
+        state["depth"] += 1
+        try:
+            yield self
+        finally:
+            state["depth"] -= 1
+            if state["depth"] == 0:
+                paths = list(state["paths"].values())
+                state["paths"].clear()
+                state["generations"].clear()
+                state["inventory_snapshot"] = None
+                state["inventory_specs"] = None
+                for path in paths:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
+    def _source_snapshot_state(self):
+        state = getattr(self._source_snapshot_local, "state", None)
+        if state is None:
+            state = {
+                "depth": 0,
+                "paths": {},
+                "generations": {},
+                "inventory_snapshot": None,
+                "inventory_specs": None,
+            }
+            self._source_snapshot_local.state = state
+        return state
+
+    @contextmanager
+    def _page_source_snapshot(self):
+        state = self._source_snapshot_state()
+        if state["depth"] > 0:
+            yield self
+            return
+        with self.source_snapshot():
+            yield self
 
     def _pin_source_snapshot(self, rel_path, path):
-        if self._source_snapshot_depth <= 0:
+        state = self._source_snapshot_state()
+        if state["depth"] <= 0:
             return path
-        pinned = self._source_snapshot_paths.get(rel_path)
+        pinned = state["paths"].get(rel_path)
         if pinned and os.path.isfile(pinned):
             return pinned
         fd, pinned = tempfile.mkstemp(
@@ -661,7 +684,7 @@ class WeChatDB:
             os.chmod(pinned, 0o600)
         except OSError:
             pass
-        self._source_snapshot_paths[rel_path] = pinned
+        state["paths"][rel_path] = pinned
         snapshot_size = self._file_identity(pinned)
         self._add_source_stage_stats(
             snapshot_count=1,
@@ -741,7 +764,7 @@ class WeChatDB:
         If the database is plaintext SQLite (unencrypted), returns the original path directly.
         """
         db_path = os.path.join(self.db_dir, rel_path)
-        pinned = self._source_snapshot_paths.get(rel_path)
+        pinned = self._source_snapshot_state()["paths"].get(rel_path)
         if pinned and os.path.isfile(pinned):
             return pinned
         if not os.path.exists(db_path):
@@ -1399,6 +1422,50 @@ class WeChatDB:
             )
         ).hexdigest()[:20]
 
+    def _live_source_shard_identity(self, rel_key):
+        source_path = os.path.join(self.db_dir, rel_key)
+        try:
+            source_stat, prefix = self._opened_regular_prefix(source_path)
+        except OSError:
+            return ""
+        return self._source_shard_identity(
+            rel_key,
+            source_stat=source_stat,
+            prefix=prefix,
+        )
+
+    def _discard_source_snapshot_pin(self, rel_key):
+        state = self._source_snapshot_state()
+        pinned = state["paths"].pop(rel_key, "")
+        state["generations"].pop(rel_key, None)
+        if pinned:
+            try:
+                os.unlink(pinned)
+            except OSError:
+                pass
+
+    def _message_shard_read_path(self, spec):
+        """Return a pinned path that is bound to the inventory generation."""
+        rel_key = str(spec["rel_key"])
+        expected_generation = str(spec["source_shard_id"])
+        state = self._source_snapshot_state()
+        pinned = state["paths"].get(rel_key)
+        if pinned and os.path.isfile(pinned):
+            if state["generations"].get(rel_key) != expected_generation:
+                raise WeChatSourceDegraded("source_generation_changed")
+            return pinned
+
+        if self._live_source_shard_identity(rel_key) != expected_generation:
+            raise WeChatSourceDegraded("source_generation_changed")
+        path = self._get_decrypted_db(rel_key)
+        if not path:
+            raise WeChatSourceDegraded("source_shard_unavailable")
+        if self._live_source_shard_identity(rel_key) != expected_generation:
+            self._discard_source_snapshot_pin(rel_key)
+            raise WeChatSourceDegraded("source_generation_changed")
+        state["generations"][rel_key] = expected_generation
+        return path
+
     def _message_shard_observations(self, known_paths=()):
         observations = []
         specs_by_generation = {}
@@ -1499,17 +1566,15 @@ class WeChatDB:
 
     def _source_inventory_snapshot(self, *, update=True, reuse_scoped=False):
         with self._source_heavy_section():
+            state = self._source_snapshot_state()
             if (
                 update
                 and reuse_scoped
-                and self._source_snapshot_depth > 0
-                and self._scoped_inventory_snapshot is not None
+                and state["depth"] > 0
+                and state["inventory_snapshot"] is not None
             ):
-                self._inventory_specs_by_generation = dict(
-                    self._scoped_inventory_specs or {}
-                )
                 self._add_source_stage_stats(inventory_reuses=1)
-                return self._scoped_inventory_snapshot
+                return state["inventory_snapshot"]
             try:
                 if not update:
                     return self.source_inventory_store.inspect(self.source_namespace)
@@ -1535,9 +1600,9 @@ class WeChatDB:
             except SourceInventoryError as exc:
                 raise WeChatSourceDegraded(exc.code) from exc
             self._inventory_specs_by_generation = specs
-            if self._source_snapshot_depth > 0:
-                self._scoped_inventory_snapshot = snapshot
-                self._scoped_inventory_specs = dict(specs)
+            if state["depth"] > 0:
+                state["inventory_snapshot"] = snapshot
+                state["inventory_specs"] = dict(specs)
             return snapshot
 
     def get_source_inventory(self, *, update=True, sensitive=False):
@@ -1548,10 +1613,16 @@ class WeChatDB:
 
     def _message_shard_specs(self):
         snapshot = self._source_inventory_snapshot(update=True, reuse_scoped=True)
+        state = self._source_snapshot_state()
+        specs = (
+            state["inventory_specs"]
+            if state["depth"] > 0 and state["inventory_specs"] is not None
+            else self._inventory_specs_by_generation
+        )
         return [
-            dict(self._inventory_specs_by_generation[generation_id])
+            dict(specs[generation_id])
             for generation_id in snapshot.present_generation_ids
-            if generation_id in self._inventory_specs_by_generation
+            if generation_id in specs
         ]
 
     def get_message_shards(self, _username):
@@ -1622,14 +1693,15 @@ class WeChatDB:
         since_ts=0,
         limit=500,
     ):
-        with self._source_heavy_section():
-            return self._get_cursor_page_for_shard_locked(
-                username,
-                source_shard_id,
-                cursor_token=cursor_token,
-                since_ts=since_ts,
-                limit=limit,
-            )
+        with self._page_source_snapshot():
+            with self._source_heavy_section():
+                return self._get_cursor_page_for_shard_locked(
+                    username,
+                    source_shard_id,
+                    cursor_token=cursor_token,
+                    since_ts=since_ts,
+                    limit=limit,
+                )
 
     def _get_cursor_page_for_shard_locked(
         self,
@@ -1661,9 +1733,7 @@ class WeChatDB:
             raise WeChatSourceDegraded("source_shard_unknown")
         if spec.get("cache_only"):
             raise WeChatSourceDegraded("source_cache_only")
-        path = spec["cache_path"] or self._get_decrypted_db(spec["rel_key"])
-        if not path:
-            raise WeChatSourceDegraded("source_shard_unavailable")
+        path = self._message_shard_read_path(spec)
         table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
         conn = None
         try:
@@ -1723,16 +1793,17 @@ class WeChatDB:
         since_inclusive=False,
         include_filtered=False,
     ):
-        with self._source_heavy_section():
-            return self._get_messages_for_shard_locked(
-                username,
-                source_shard_id,
-                since_ts=since_ts,
-                limit=limit,
-                page_forward=page_forward,
-                since_inclusive=since_inclusive,
-                include_filtered=include_filtered,
-            )
+        with self._page_source_snapshot():
+            with self._source_heavy_section():
+                return self._get_messages_for_shard_locked(
+                    username,
+                    source_shard_id,
+                    since_ts=since_ts,
+                    limit=limit,
+                    page_forward=page_forward,
+                    since_inclusive=since_inclusive,
+                    include_filtered=include_filtered,
+                )
 
     def _get_messages_for_shard_locked(
         self,
@@ -1757,9 +1828,7 @@ class WeChatDB:
             raise WeChatSourceDegraded("source_shard_unknown")
         if spec.get("cache_only"):
             raise WeChatSourceDegraded("source_cache_only")
-        path = spec["cache_path"] or self._get_decrypted_db(spec["rel_key"])
-        if not path:
-            raise WeChatSourceDegraded("source_shard_unavailable")
+        path = self._message_shard_read_path(spec)
         table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
         conn = None
         try:

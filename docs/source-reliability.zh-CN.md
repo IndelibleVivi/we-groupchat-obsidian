@@ -128,14 +128,24 @@ Online Backup 取得包含 committed WAL state 的 snapshot。Key 变化并发�
 verification boundary 重新观察 inventory，因此这种复用不会削弱 replacement、新 shard 或
 incomplete source 检测。
 
+某个 shard 第一次被 page pin 时，会在 snapshot publish 前后分别验证 live DB/key generation。
+如果 replacement 或 key rotation 落在这个窗口，reader 返回 `source_generation_changed`；它不会把
+新 generation 的 row 或 EOF 归到旧 inventory generation，resource/Drive consumer 也不会推进该
+shard cursor。
+
 Inventory observation、decrypt/rebuild、snapshot 与 page read 按 source namespace 共用一把 reentrant
 in-process gate。每个 public shard page 会持 gate 到 read-only SQLite query 与 decode 结束，避免
-invalidation 把消失的 published cache 静默重建为空库并产生 false EOF。进入 AI/provider、
-attachment-byte resolution、projection write 或 remote Drive work 前必须释放 gate。累计的 in-memory
-counters 只保存 stage/byte counts、timing、invalidation reason 与 worker concurrency；per-cycle delta
-按当前 worker 归属，不会把另一条重叠 cycle 的工作重复算进来。有实际 source 活动的
+invalidation 把消失的 published cache 静默重建为空库并产生 false EOF。Traversal snapshot 是
+thread-local：并发 traversal 只能在 public page 边界交错，同一来源的一页 pin/query/decode body 仍然
+串行。进入 AI/provider、attachment-byte resolution、projection write 或 remote Drive work 前必须释放
+gate。累计的 in-memory counters 只保存 stage/byte counts、timing、invalidation reason 与 worker
+concurrency；per-cycle delta 按当前 worker 归属，不会把另一条重叠 cycle 的工作重复算进来。有实际 source 活动的
 monitor/resource cycle 最多输出一条 path-free、content-free summary。Resource summary 还会报告本轮
 真正 atomic publish 的本地 projection file 数量与 encoded bytes；内容不变时两项都为零。
+
+macOS menu app 会在 daemon worker 上准备依赖来源的群聊列表与 update count，再把已经准备完整的
+menu/dialog 数据交回 AppKit main thread。重复的 chat-menu refresh trigger 会合并成一轮正在运行的
+pass 加至多一轮 pending pass，因此 UI 操作不会堆出无界 source-reader queue。
 
 ### Monitor raw-row cursor authority
 

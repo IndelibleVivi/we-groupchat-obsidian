@@ -160,18 +160,32 @@ removed from the private cache. Topic Monitor performs a fresh inventory
 observation at its existing final verification boundary, so this reuse does not
 weaken replacement, new-shard, or incomplete-source detection.
 
+The first page that pins a shard validates the live database/key generation both
+before and after snapshot publication. A replacement or key rotation in that
+window returns `source_generation_changed`; no row or EOF result is attributed
+to the older inventory generation, and resource/Drive consumers leave that
+shard cursor unchanged.
+
 Inventory observation, decrypt/rebuild, snapshot, and page reads share one
 reentrant in-process gate per source namespace. Each public shard page keeps the
 gate through its read-only SQLite query and decode, so invalidation cannot turn a
-missing published cache into an empty database or false EOF. The gate is released before
-AI/provider work, attachment-byte resolution, projection writes, and remote
-Drive work. Cumulative in-memory counters contain only stage counts, byte counts,
-timings, invalidation reasons, and worker concurrency; the per-cycle delta is
-attributed to the current worker rather than another overlapping cycle. An active
+missing published cache into an empty database or false EOF. Traversal snapshots
+are thread-local: concurrent traversals may interleave only between public pages,
+while each page's pin/query/decode body remains serialized for the same source.
+The gate is released before AI/provider work, attachment-byte resolution,
+projection writes, and remote Drive work. Cumulative in-memory counters contain
+only stage counts, byte counts, timings, invalidation reasons, and worker
+concurrency; the per-cycle delta is attributed to the current worker rather than
+another overlapping cycle. An active
 monitor or resource cycle emits at most one path-free, content-free summary. The
 resource summary also reports the count and encoded byte size of local
 projection files that were actually atomically published; unchanged output
 contributes zero.
+
+The macOS menu app prepares source-backed chat lists and update counts on daemon
+workers, then sends only prepared menu/dialog data to the AppKit main thread.
+Repeated chat-menu refresh triggers coalesce into one running pass plus at most
+one pending pass, so UI actions do not create an unbounded source-reader queue.
 
 ### Monitor raw-row cursor authority
 

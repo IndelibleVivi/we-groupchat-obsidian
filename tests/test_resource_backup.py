@@ -1433,6 +1433,91 @@ class ResourceBackupTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(shard_count, 0)
 
+    def test_generation_change_page_never_advances_resource_cursor(self):
+        class EmptyShardSource:
+            @staticmethod
+            def get_message_shards(_username):
+                return ["generation-a"]
+
+            @staticmethod
+            def get_cursor_page_for_shard(
+                _username,
+                _source_shard_id,
+                *,
+                cursor_token="",
+                since_ts=0,
+                limit=500,
+            ):
+                del since_ts, limit
+                return {
+                    "messages": [],
+                    "next_cursor": cursor_token,
+                    "exhausted": True,
+                }
+
+        class GenerationChangedSource(EmptyShardSource):
+            @staticmethod
+            def get_cursor_page_for_shard(
+                _username,
+                _source_shard_id,
+                *,
+                cursor_token="",
+                since_ts=0,
+                limit=500,
+            ):
+                del cursor_token, since_ts, limit
+                raise WeChatSourceDegraded("source_generation_changed")
+
+        capture = SelectedResourceCapture(
+            self.config,
+            source=EmptyShardSource(),
+            now_func=lambda: 1_787_500_000,
+            random_func=lambda: 0.5,
+            archive_id_factory=lambda: "00000000-0000-0000-0000-000000000001",
+        )
+        capture.initialize_selected_chat_cursors(start_timestamp=123)
+        capture.scan()
+        conn = sqlite3.connect(self.capture_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            before = dict(conn.execute(
+                "SELECT * FROM resource_shards WHERE chat_username = ?",
+                (self.selected,),
+            ).fetchone())
+        finally:
+            conn.close()
+
+        capture = SelectedResourceCapture(
+            self.config,
+            source=GenerationChangedSource(),
+            now_func=lambda: 1_787_500_000,
+            random_func=lambda: 0.5,
+            archive_id_factory=lambda: "00000000-0000-0000-0000-000000000001",
+        )
+        result = capture.scan()
+
+        conn = sqlite3.connect(self.capture_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            after = dict(conn.execute(
+                "SELECT * FROM resource_shards WHERE chat_username = ?",
+                (self.selected,),
+            ).fetchone())
+            occurrences = conn.execute(
+                "SELECT COUNT(*) FROM resource_occurrences"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(result["state"], "source_degraded")
+        self.assertEqual(result["error_code"], "source_generation_changed")
+        self.assertEqual(after["cursor_timestamp"], before["cursor_timestamp"])
+        self.assertEqual(
+            after["source_cursor_token"], before["source_cursor_token"]
+        )
+        self.assertEqual(after["source_state"], "source_degraded")
+        self.assertEqual(after["last_error_code"], "source_generation_changed")
+        self.assertEqual(occurrences, 0)
+
     def test_failed_shard_recovers_after_healthy_shard_advances_without_losing_file(self):
         class TwoShardSource:
             fail_a = True

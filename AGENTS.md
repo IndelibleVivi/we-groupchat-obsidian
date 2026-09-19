@@ -6,6 +6,9 @@
   long-lived process still owns background timers and process-lifetime macOS
   access; menu visibility is not a prerequisite for those jobs. Keep shared
   domain behavior in `core/` rather than making menu presentation its owner.
+  Protected WeChat source reads for menus and dialogs run on daemon workers;
+  only prepared, content-complete UI data may return to the AppKit/rumps main
+  thread. Repeated chat-menu refresh requests must remain coalesced.
 - `mcp_server.py` is the direct FastMCP entrypoint.
 - MCP is an optional legacy read-only compatibility surface. It may query and
   summarize, but must not mutate bookmarks/groups or touch WeChat UI. The old
@@ -186,12 +189,16 @@
   WeChat decrypted caches and source shard/message identities are namespaced by
   source root. Presentation-cache refresh must preserve validated decrypted-cache
   records; DB/WAL/key/published-payload identity changes still invalidate them.
-  One bounded traversal reuses its inventory/spec snapshot, while explicit final
-  inventory verification remains a fresh observation. Same-source inventory,
-  decrypt, snapshot and page work share one reentrant in-process gate that must
-  cover each public page's read-only query/decode body and be released before
-  provider/network, attachment resolution or projection work. A successful key
-  change keeps only the current regular canonical payload for its logical shard.
+  One bounded traversal reuses its thread-local inventory/spec snapshot, while
+  explicit final inventory verification remains a fresh observation. Traversals
+  may interleave only at public-page boundaries. Same-source inventory, decrypt,
+  snapshot and page work share one reentrant in-process gate that must cover each
+  public page's first-pin generation binding plus read-only query/decode body and
+  be released before provider/network, attachment resolution or projection work.
+  Validate the live DB/key generation before and after the first pin; a mismatch
+  returns `source_generation_changed` and commits no resource/Drive cursor. A
+  successful key change keeps only the current regular canonical payload for its
+  logical shard.
   Immutable published decrypted payloads may be pinned by private hard link;
   plaintext SQLite snapshots use Online Backup so WAL state is not lost.
 - Source-inventory evidence is path-free and content-free. A mounted snapshot's

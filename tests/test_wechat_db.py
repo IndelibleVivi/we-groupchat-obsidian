@@ -841,6 +841,127 @@ class WeChatSourceEnvelopeTests(unittest.TestCase):
         self.assertEqual(stats["inventory_scans"], 2)
         self.assertEqual(stats["inventory_reuses"], 3)
 
+    def test_replacement_before_first_pin_is_not_read_as_old_generation(self):
+        username = "replacement-before-pin@chatroom"
+        table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
+        root = os.path.join(self.tmp.name, "replacement-before-pin")
+        message_dir = os.path.join(root, "message")
+        os.makedirs(message_dir)
+        path = os.path.join(message_dir, "message_0.db")
+
+        def write_fixture(target, text, *, include_chat=True):
+            conn = sqlite3.connect(target)
+            try:
+                if include_chat:
+                    conn.execute(f"""
+                        CREATE TABLE [{table_name}] (
+                            local_type INTEGER, create_time INTEGER,
+                            message_content TEXT, WCDB_CT_message_content INTEGER,
+                            status INTEGER
+                        )
+                    """)
+                    conn.execute(
+                        f"INSERT INTO [{table_name}] VALUES (1, 1, ?, NULL, 0)",
+                        (f"sender:\n{text}",),
+                    )
+                else:
+                    conn.execute("CREATE TABLE unrelated(value TEXT)")
+                conn.commit()
+            finally:
+                conn.close()
+
+        write_fixture(path, "generation-a")
+        db = WeChatDB(root, {})
+        db._contacts = {"sender": "成员"}
+        db._contacts_full = []
+        db._nick_to_remark = {}
+        db._load_contacts = lambda: None
+
+        with db.source_snapshot():
+            inventory = db.get_source_inventory(update=True)
+            generation = inventory["present_generation_ids"][0]
+            replacement = os.path.join(root, "replacement.db")
+            write_fixture(replacement, "generation-b")
+            os.replace(replacement, path)
+
+            with self.assertRaisesRegex(
+                WeChatSourceDegraded,
+                "source_generation_changed",
+            ):
+                db.get_cursor_page_for_shard(username, generation, limit=10)
+
+    def test_replacement_without_chat_table_is_not_old_generation_eof(self):
+        username = "replacement-missing-table@chatroom"
+        table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
+        root = os.path.join(self.tmp.name, "replacement-missing-table")
+        message_dir = os.path.join(root, "message")
+        os.makedirs(message_dir)
+        path = os.path.join(message_dir, "message_0.db")
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(f"""
+                CREATE TABLE [{table_name}] (
+                    local_type INTEGER, create_time INTEGER,
+                    message_content TEXT, WCDB_CT_message_content INTEGER,
+                    status INTEGER
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        db = WeChatDB(root, {})
+        db._contacts = {}
+        db._contacts_full = []
+        db._nick_to_remark = {}
+        db._load_contacts = lambda: None
+
+        with db.source_snapshot():
+            inventory = db.get_source_inventory(update=True)
+            generation = inventory["present_generation_ids"][0]
+            replacement = os.path.join(root, "replacement.db")
+            conn = sqlite3.connect(replacement)
+            try:
+                conn.execute("CREATE TABLE unrelated(value TEXT)")
+                conn.commit()
+            finally:
+                conn.close()
+            os.replace(replacement, path)
+
+            with self.assertRaisesRegex(
+                WeChatSourceDegraded,
+                "source_generation_changed",
+            ):
+                db.get_cursor_page_for_shard(username, generation, limit=10)
+
+    def test_key_rotation_before_first_pin_rejects_old_generation(self):
+        rel_path = "message/message_8.db"
+        source_path = os.path.join(self.tmp.name, rel_path)
+        os.makedirs(os.path.dirname(source_path), exist_ok=True)
+        with open(source_path, "wb") as handle:
+            handle.write(b"encrypted generation fixture")
+        db = WeChatDB(self.tmp.name, {rel_path: {"enc_key": "11" * 32}})
+
+        with db.source_snapshot():
+            inventory = db.get_source_inventory(update=True)
+            generation = inventory["present_generation_ids"][0]
+            db.keys[rel_path] = {"enc_key": "22" * 32}
+
+            with (
+                patch(
+                    "core.wechat_db.decrypt_database",
+                    side_effect=AssertionError("stale generation reached decrypt"),
+                ),
+                self.assertRaisesRegex(
+                    WeChatSourceDegraded,
+                    "source_generation_changed",
+                ),
+            ):
+                db.get_cursor_page_for_shard(
+                    "key-rotation@chatroom",
+                    generation,
+                    limit=10,
+                )
+
 
 class WeChatDBSourceGateTests(unittest.TestCase):
     def test_direct_cursor_page_body_runs_inside_gate_and_missing_db_is_readonly(self):
@@ -874,52 +995,82 @@ class WeChatDBSourceGateTests(unittest.TestCase):
             self.assertEqual(observed_depths, [1])
             self.assertFalse(os.path.exists(missing))
 
-    def test_same_source_heavy_sections_are_serialized_without_global_lock(self):
+    def test_snapshot_contexts_overlap_but_same_source_page_bodies_serialize(self):
         with tempfile.TemporaryDirectory() as tmp:
             first = WeChatDB(tmp, {})
             second = WeChatDB(tmp, {})
             state = first._source_heavy_state()
-            real_lock = state.lock
-            contended_attempt = threading.Event()
+            first_snapshot_entered = threading.Event()
+            release_first_snapshot = threading.Event()
+            second_snapshot_entered = threading.Event()
 
-            class ObservableLock:
-                def acquire(self, blocking=True):
-                    acquired = real_lock.acquire(blocking)
-                    if not blocking and not acquired:
-                        contended_attempt.set()
-                    return acquired
-
-                def release(self):
-                    real_lock.release()
-
-            state.lock = ObservableLock()
-            first_entered = threading.Event()
-            release_first = threading.Event()
-            second_entered = threading.Event()
-
-            def hold_first():
+            def hold_snapshot():
                 with first.source_snapshot():
-                    first_entered.set()
-                    self.assertTrue(release_first.wait(2))
+                    first_snapshot_entered.set()
+                    release_first_snapshot.wait(2)
 
-            def enter_second():
-                self.assertTrue(first_entered.wait(2))
+            def overlap_snapshot():
+                first_snapshot_entered.wait(2)
                 with second.source_snapshot():
-                    second_entered.set()
+                    second_snapshot_entered.set()
 
-            thread_one = threading.Thread(target=hold_first)
-            thread_two = threading.Thread(target=enter_second)
-            thread_one.start()
-            self.assertTrue(first_entered.wait(2))
-            thread_two.start()
-            self.assertTrue(contended_attempt.wait(2))
-            self.assertFalse(second_entered.is_set())
-            release_first.set()
-            thread_one.join(2)
-            thread_two.join(2)
-            self.assertFalse(thread_one.is_alive())
-            self.assertFalse(thread_two.is_alive())
-            self.assertTrue(second_entered.is_set())
+            snapshot_one = threading.Thread(target=hold_snapshot)
+            snapshot_two = threading.Thread(target=overlap_snapshot)
+            snapshot_one.start()
+            self.assertTrue(first_snapshot_entered.wait(2))
+            snapshot_two.start()
+            snapshots_overlapped = second_snapshot_entered.wait(1)
+            release_first_snapshot.set()
+            snapshot_one.join(2)
+            snapshot_two.join(2)
+
+            self.assertTrue(snapshots_overlapped)
+            self.assertFalse(snapshot_one.is_alive())
+            self.assertFalse(snapshot_two.is_alive())
+
+            first_page_entered = threading.Event()
+            release_first_page = threading.Event()
+            second_page_entered = threading.Event()
+
+            def first_page(*_args, **_kwargs):
+                first_page_entered.set()
+                release_first_page.wait(2)
+                return {"messages": [], "next_cursor": "", "exhausted": True}
+
+            def second_page(*_args, **_kwargs):
+                second_page_entered.set()
+                return {"messages": [], "next_cursor": "", "exhausted": True}
+
+            def read_first():
+                with patch.object(
+                    first,
+                    "_get_cursor_page_for_shard_locked",
+                    side_effect=first_page,
+                ):
+                    first.get_cursor_page_for_shard("first", "generation")
+
+            def read_second():
+                first_page_entered.wait(2)
+                with patch.object(
+                    second,
+                    "_get_cursor_page_for_shard_locked",
+                    side_effect=second_page,
+                ):
+                    second.get_cursor_page_for_shard("second", "generation")
+
+            page_one = threading.Thread(target=read_first)
+            page_two = threading.Thread(target=read_second)
+            page_one.start()
+            self.assertTrue(first_page_entered.wait(2))
+            page_two.start()
+            self.assertFalse(second_page_entered.wait(0.2))
+            release_first_page.set()
+            page_one.join(2)
+            page_two.join(2)
+
+            self.assertFalse(page_one.is_alive())
+            self.assertFalse(page_two.is_alive())
+            self.assertTrue(second_page_entered.is_set())
 
             stats = first.source_stage_stats()
             self.assertEqual(stats["active_source_workers"], 0)

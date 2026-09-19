@@ -317,6 +317,13 @@ class WeGroupchatObsidianApp(rumps.App):
         self._source_guard_lock = threading.Lock()
         self._config_reconcile_timer = None
 
+        # Source-I/O worker coalescing: chat-menu refresh requests from menu
+        # timers/actions collapse into one pending daemon worker so repeated
+        # triggers cannot accumulate unbounded source readers.
+        self._chat_menu_source_lock = threading.Lock()
+        self._chat_menu_source_thread = None
+        self._chat_menu_source_pending = False
+
         # Build menu
         self.menu = [
             rumps.MenuItem("刷新群聊列表", callback=self.refresh_groups),
@@ -1352,19 +1359,40 @@ class WeGroupchatObsidianApp(rumps.App):
         self._delayed_run(self._show_drive_sync_chat_dialog)
 
     def _show_drive_sync_chat_dialog(self):
-        self._bring_to_front()
-        try:
-            if not self.db:
+        """Prepare source data off the main thread, then show the dialog."""
+        if not self.db:
+            self._bring_to_front()
+            try:
                 _notify(
                     "Google Drive 群文件备份",
                     "还没初始化",
                     "请等微信数据加载完成后再选择群聊。",
                 )
-                return
-            groups = self.db.get_recent_sessions(limit=200)
-            groups = [group for group in groups if group.get("is_group")]
-            if not groups:
-                groups = self.db.get_groups(include_unnamed=True)
+            finally:
+                self._release_front()
+            return
+        self._run_source_worker(
+            self._collect_drive_sync_chat_groups,
+            self._show_drive_sync_chat_dialog_with_groups,
+            lambda: _notify(
+                "Google Drive 群文件备份",
+                "读取失败",
+                "暂时无法读取群聊列表，请稍后重试。",
+            ),
+        )
+
+    def _collect_drive_sync_chat_groups(self):
+        """Source read for the Drive sync chat picker (worker thread)."""
+        groups = self.db.get_recent_sessions(limit=200)
+        groups = [group for group in groups if group.get("is_group")]
+        if not groups:
+            groups = self.db.get_groups(include_unnamed=True)
+        return groups[:80] if groups else []
+
+    def _show_drive_sync_chat_dialog_with_groups(self, groups):
+        """Show the Drive sync chat picker (main thread) from prepared groups."""
+        self._bring_to_front()
+        try:
             if not groups:
                 _notify(
                     "Google Drive 群文件备份",
@@ -1372,7 +1400,6 @@ class WeGroupchatObsidianApp(rumps.App):
                     "请确认微信已登录并有群聊记录。",
                 )
                 return
-            groups = groups[:80]
             current = {
                 chat["username"]: chat.get("alias") or ""
                 for chat in selected_drive_sync_chats(self.config)
@@ -1706,16 +1733,36 @@ class WeGroupchatObsidianApp(rumps.App):
         return selected
 
     def _show_monitor_chat_dialog(self):
+        """Prepare source data off the main thread, then show the dialog."""
+        if not self.db:
+            self._bring_to_front()
+            try:
+                _notify("关注推送", "还没初始化", "请等微信数据加载完成后再选择群聊")
+            finally:
+                self._release_front()
+            return
+        self._run_source_worker(
+            self._collect_monitor_chat_groups,
+            self._show_monitor_chat_dialog_with_groups,
+            lambda: _notify(
+                "关注推送",
+                "读取失败",
+                "暂时无法读取群聊列表，请稍后重试。",
+            ),
+        )
+
+    def _collect_monitor_chat_groups(self):
+        """Source read for the monitor chat picker (worker thread)."""
+        groups = self.db.get_recent_sessions(limit=200)
+        groups = [g for g in groups if g.get("is_group")]
+        if not groups:
+            groups = self.db.get_groups(include_unnamed=True)
+        return groups
+
+    def _show_monitor_chat_dialog_with_groups(self, groups):
+        """Show the monitor chat picker (main thread) from prepared groups."""
         self._bring_to_front()
         try:
-            if not self.db:
-                _notify("关注推送", "还没初始化", "请等微信数据加载完成后再选择群聊")
-                return
-
-            groups = self.db.get_recent_sessions(limit=200)
-            groups = [g for g in groups if g.get("is_group")]
-            if not groups:
-                groups = self.db.get_groups(include_unnamed=True)
             if not groups:
                 _notify("关注推送", "没有找到群聊", "请确认微信已登录并有群聊记录")
                 return
@@ -2525,6 +2572,62 @@ class WeGroupchatObsidianApp(rumps.App):
         """Execute on main thread (required for menu modifications from background threads)."""
         self._main_queue.put((func, args))
 
+    def _run_source_worker(self, work, on_main, on_error=None):
+        """Run a source read on a daemon worker thread, then continue on main.
+
+        ``work`` performs protected WeChat source reads off the main thread.
+        ``on_main`` receives its result on the AppKit/rumps thread through the
+        existing main-thread dispatch queue. UI mutation must only happen in
+        ``on_main``/``on_error``. No app-side source lock is held while
+        provider/network/projection work runs, because ``work`` finishes before
+        ``on_main`` is queued.
+        """
+        def runner():
+            try:
+                result = work()
+            except Exception:
+                print("[source-ui] source read failed", file=sys.stderr)
+                if on_error is not None:
+                    self._run_on_main(on_error)
+                return
+            self._run_on_main(on_main, result)
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        return thread
+
+    def _request_chat_menu_refresh(self):
+        """Coalesce chat-menu rebuilds into a single source-reading worker.
+
+        Repeated menu-open timers/actions collapse into one pending request.
+        Each request prepares source data off the main thread and rebuilds the
+        menu on the main thread; a follow-up request that arrives while a
+        worker is running is honored by exactly one more pass, so no unbounded
+        workers accumulate.
+        """
+        def runner():
+            while True:
+                with self._chat_menu_source_lock:
+                    if not self._chat_menu_source_pending:
+                        self._chat_menu_source_thread = None
+                        return
+                    self._chat_menu_source_pending = False
+                try:
+                    prepared = self._collect_chat_menu_data()
+                except Exception:
+                    print("[source-ui] chat menu source read failed", file=sys.stderr)
+                    continue
+                self._run_on_main(self._apply_chat_menu_data, prepared)
+
+        with self._chat_menu_source_lock:
+            if self._chat_menu_source_thread is not None:
+                self._chat_menu_source_pending = True
+                return
+            self._chat_menu_source_pending = True
+            thread = threading.Thread(target=runner, daemon=True)
+            self._chat_menu_source_thread = thread
+        thread.start()
+
     def _process_main_queue(self, _):
         """Main thread timer callback: process UI updates submitted by background threads."""
         while not self._main_queue.empty():
@@ -2729,8 +2832,12 @@ class WeGroupchatObsidianApp(rumps.App):
 
     # ── Chat list + groups (unified dynamic menu management) ────────────────
 
-    def _build_chat_title(self, session):
-        """Build menu title for a single group chat."""
+    def _build_chat_title(self, session, new_count=None):
+        """Build menu title for a single group chat.
+
+        ``new_count`` is the already-resolved count of messages newer than the
+        bookmark; it may be ``None`` when the caller had no source reader.
+        """
         name = session["name"]
         username = session["username"]
         unread = session["unread"]
@@ -2744,7 +2851,8 @@ class WeGroupchatObsidianApp(rumps.App):
         if has_summarized:
             display_time = last_summary or datetime.fromtimestamp(bookmark_ts).strftime("%Y-%m-%d %H:%M")
             title += f"  ⏱{display_time}"
-            new_count = self.db.count_messages_since(username, bookmark_ts)
+            if new_count is None:
+                new_count = 0
             if new_count > 0:
                 title += f" · 有{new_count}条更新"
             print(f"[refresh]   {name}: 已总结 ({display_time}), 更新={new_count}")
@@ -2757,16 +2865,14 @@ class WeGroupchatObsidianApp(rumps.App):
 
         return title
 
-    def _rebuild_chat_menu(self):
-        """Rebuild dynamic menu: ungrouped chats + group submenus."""
-        # Clear old dynamic items (📎 ungrouped chats + 📂 groups)
-        keys_to_remove = [k for k in self.menu.keys()
-                          if isinstance(k, str) and (k.startswith("📎") or k.startswith("📂"))]
-        for key in keys_to_remove:
-            del self.menu[key]
+    def _collect_chat_menu_data(self):
+        """Read source data needed for the chat menu (off the main thread).
 
+        Returns a content-complete snapshot so the main thread only performs
+        menu mutation in ``_apply_chat_menu_data``.
+        """
         if not self.db:
-            return
+            return None
 
         sessions = self.db.get_recent_sessions(limit=200)
         group_sessions = [s for s in sessions if s["is_group"]]
@@ -2774,8 +2880,7 @@ class WeGroupchatObsidianApp(rumps.App):
         # ── Filter inactive chats ──
         hide_months = self.config.get("hide_inactive_months", 1)
         if hide_months > 0:
-            import time as _time
-            cutoff_ts = _time.time() - hide_months * 30 * 86400
+            cutoff_ts = time.time() - hide_months * 30 * 86400
             group_sessions = [s for s in group_sessions if s["timestamp"] >= cutoff_ts]
 
         # Find chats that are already in groups
@@ -2787,27 +2892,93 @@ class WeGroupchatObsidianApp(rumps.App):
         # ── Ungrouped chats (reverse insert_after refresh button) ──
         ungrouped = [s for s in group_sessions if s["username"] not in grouped_usernames]
 
-        if ungrouped:
-            for session in reversed(ungrouped[:20]):
-                title = self._build_chat_title(session)
+        prepared_ungrouped = []
+        for session in reversed(ungrouped[:20]):
+            bookmark_ts = get_bookmark(session["username"])
+            last_summary = get_summary_time(session["username"])
+            new_count = None
+            if last_summary or bookmark_ts > 0:
+                # Preserve the original title rule: an update count is only
+                # meaningful once a chat has been summarized.
+                new_count = self.db.count_messages_since(session["username"], bookmark_ts)
+            prepared_ungrouped.append({
+                "session": session,
+                "new_count": new_count,
+            })
+
+        prepared_groups = []
+        if groups:
+            self._load_contacts_if_needed()
+            for grp in groups:
+                prepared_groups.append(self._collect_group_menu_data(grp))
+
+        return {
+            "has_groups": bool(groups),
+            "ungrouped": prepared_ungrouped,
+            "groups": prepared_groups,
+        }
+
+    def _collect_group_menu_data(self, grp):
+        """Read source counts for one group submenu (off the main thread)."""
+        entries = []
+        for chat_user in grp["chats"]:
+            display = self._get_chat_display_name(chat_user)
+            bookmark_ts = get_bookmark(chat_user)
+            new_count = None
+            if bookmark_ts > 0:
+                new_count = self.db.count_messages_since(chat_user, bookmark_ts)
+            entries.append({
+                "username": chat_user,
+                "display": display,
+                "bookmark_ts": bookmark_ts,
+                "new_count": new_count,
+            })
+        return {
+            "grp": grp,
+            "chat_count": len(grp["chats"]),
+            "entries": entries,
+        }
+
+    def _apply_chat_menu_data(self, prepared):
+        """Rebuild dynamic menu on the main thread from prepared source data."""
+        # Clear old dynamic items (📎 ungrouped chats + 📂 groups)
+        keys_to_remove = [k for k in self.menu.keys()
+                          if isinstance(k, str) and (k.startswith("📎") or k.startswith("📂"))]
+        for key in keys_to_remove:
+            del self.menu[key]
+
+        if prepared is None:
+            return
+
+        if prepared["ungrouped"]:
+            for entry in prepared["ungrouped"]:
+                session = entry["session"]
+                title = self._build_chat_title(session, new_count=entry["new_count"])
                 item = rumps.MenuItem(title)
                 item.add(rumps.MenuItem("📝 总结新消息", callback=self._make_summary_callback(session)))
                 item.add(rumps.MenuItem("🔧 自定义总结…", callback=self._make_custom_summary_callback(session)))
                 item.add(rumps.MenuItem("📅 按天总结…", callback=self._make_daily_summary_callback(session)))
                 self.menu.insert_after("🔍 关键词搜索", item)
-        elif not groups:
+        elif not prepared["has_groups"]:
             self.menu.insert_after("🔍 关键词搜索", rumps.MenuItem("📎 (暂无群聊)"))
 
         # ── Groups (insert_before in order before recent summaries) ──
-        if groups:
-            self._load_contacts_if_needed()
-            for grp in groups:
-                grp_menu = self._build_group_submenu(grp)
-                self.menu.insert_before("📋 最近总结", grp_menu)
+        for group_data in prepared["groups"]:
+            grp_menu = self._build_group_submenu(group_data)
+            self.menu.insert_before("📋 最近总结", grp_menu)
 
         # New group button (always at the bottom of group area)
         self.menu.insert_before("📋 最近总结",
                                 rumps.MenuItem("📂 ✨ 新建分组…", callback=self._create_group))
+
+    def _rebuild_chat_menu(self):
+        """Rebuild dynamic menu: ungrouped chats + group submenus.
+
+        Kept as the synchronous main-thread entrypoint; it prepares the source
+        snapshot on a daemon worker thread and applies the menu on the main
+        thread, coalescing duplicate refresh requests.
+        """
+        self._request_chat_menu_refresh()
 
     def _make_summary_callback(self, session):
         def callback(sender):
@@ -3436,10 +3607,15 @@ class WeGroupchatObsidianApp(rumps.App):
 
     # ── Group management ────────────────────────────────────────
 
-    def _build_group_submenu(self, grp):
-        """Build submenu for a single group."""
+    def _build_group_submenu(self, group_data):
+        """Build submenu for a single group from prepared source data.
+
+        ``group_data`` is the dict produced by ``_collect_group_menu_data`` so
+        this main-thread builder performs no protected source reads.
+        """
+        grp = group_data["grp"]
         grp_name = grp["name"]
-        chat_count = len(grp["chats"])
+        chat_count = group_data["chat_count"]
 
         grp_summary_time = get_group_summary_time(grp_name)
         if grp_summary_time:
@@ -3452,13 +3628,14 @@ class WeGroupchatObsidianApp(rumps.App):
         grp_menu = rumps.MenuItem(grp_title)
 
         if grp["chats"]:
-            for chat_user in grp["chats"]:
-                display = self._get_chat_display_name(chat_user)
-                bookmark_ts = get_bookmark(chat_user)
+            for entry in group_data["entries"]:
+                chat_user = entry["username"]
+                display = entry["display"]
+                bookmark_ts = entry["bookmark_ts"]
 
                 if bookmark_ts > 0:
-                    new_count = self.db.count_messages_since(chat_user, bookmark_ts)
-                    if new_count > 0:
+                    new_count = entry["new_count"]
+                    if new_count and new_count > 0:
                         chat_label = f"   {display}（{new_count}条未读）"
                     else:
                         chat_label = f"   {display}（无更新）"
@@ -3542,12 +3719,33 @@ class WeGroupchatObsidianApp(rumps.App):
         return callback
 
     def _show_add_to_group_dialog(self, group_name):
+        """Prepare source data off the main thread, then show the dialog."""
         if not self.db:
             _notify("微信总结", "未初始化", "请先确保微信已登录")
             return
+        self._run_source_worker(
+            self._collect_add_to_group_candidates,
+            lambda available: self._show_add_to_group_dialog_with_candidates(
+                group_name, available
+            ),
+            lambda: _notify(
+                "微信总结",
+                "读取失败",
+                "暂时无法读取群聊列表，请稍后重试。",
+            ),
+        )
 
+    def _collect_add_to_group_candidates(self):
+        """Source read for the add-to-group picker (worker thread)."""
         # Get all group chats from contact.db (not limited by session count)
         group_sessions = self.db.get_groups()
+        return [s["username"] for s in group_sessions], {
+            s["username"]: s["name"] for s in group_sessions
+        }
+
+    def _show_add_to_group_dialog_with_candidates(self, group_name, prepared):
+        """Show the add-to-group picker (main thread) from prepared data."""
+        group_sessions, names = prepared
 
         if not group_sessions:
             _notify("微信总结", "暂无群聊", "请先刷新群聊列表")
@@ -3557,7 +3755,11 @@ class WeGroupchatObsidianApp(rumps.App):
         existing = set(get_group_chats(group_name))
 
         # Build selection list (exclude already added)
-        available = [s for s in group_sessions if s["username"] not in existing]
+        available = [
+            {"username": username, "name": names.get(username, username)}
+            for username in group_sessions
+            if username not in existing
+        ]
         if not available:
             _notify("微信总结", "无可添加群聊", "所有群聊已在该分组中")
             return
@@ -3794,12 +3996,24 @@ class WeGroupchatObsidianApp(rumps.App):
         self._delayed_run(self._show_search_dialog)
 
     def _show_search_dialog(self):
-        """Show keyword search dialog."""
+        """Prepare source data off the main thread, then show the search dialog."""
         if not self.db:
             return
+        self._run_source_worker(
+            lambda: self.db.get_groups(),
+            self._show_search_dialog_with_groups,
+            lambda: _notify(
+                "微信总结",
+                "读取失败",
+                "暂时无法读取群聊列表，请稍后重试。",
+            ),
+        )
 
+    def _show_search_dialog_with_groups(self, group_sessions):
+        """Show keyword search dialog (main thread) from prepared groups."""
         # Get all group chats from contact.db (not limited by session count)
-        group_sessions = self.db.get_groups()
+        if not self.db:
+            return
 
         if not group_sessions:
             _notify("微信总结", "暂无群聊", "请先刷新群聊列表")

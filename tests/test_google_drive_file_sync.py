@@ -591,6 +591,61 @@ class GoogleDriveFileSyncTests(unittest.TestCase):
         self.assertEqual(status["source_state"], "source_degraded")
         self.assertNotIn(self.chat_a, json.dumps(degraded))
 
+    def test_generation_change_page_never_advances_drive_cursor(self):
+        class EmptyShardSource:
+            @staticmethod
+            def get_message_shards(_username):
+                return ["generation-a"]
+
+            @staticmethod
+            def get_cursor_page_for_shard(
+                _username,
+                _source_shard_id,
+                *,
+                cursor_token="",
+                since_ts=0,
+                limit=500,
+            ):
+                del since_ts, limit
+                return {
+                    "messages": [],
+                    "next_cursor": cursor_token,
+                    "exhausted": True,
+                }
+
+        class GenerationChangedSource(EmptyShardSource):
+            @staticmethod
+            def get_cursor_page_for_shard(
+                _username,
+                _source_shard_id,
+                *,
+                cursor_token="",
+                since_ts=0,
+                limit=500,
+            ):
+                del cursor_token, since_ts, limit
+                raise WeChatSourceDegraded("source_generation_changed")
+
+        service = self.service(EmptyShardSource())
+        self.initialize(service)
+        service.scan()
+        before = self.rows("drive_scan_shards")
+        self.assertEqual(len(before), 1)
+
+        degraded = self.service(GenerationChangedSource()).scan()
+
+        after = self.rows("drive_scan_shards")
+        self.assertEqual(degraded["state"], "source_degraded")
+        self.assertEqual(degraded["error_code"], "source_generation_changed")
+        self.assertEqual(degraded["queued"], 0)
+        self.assertEqual(self.rows("drive_sync_items"), [])
+        self.assertEqual(after[0]["cursor_timestamp"], before[0]["cursor_timestamp"])
+        self.assertEqual(
+            after[0]["source_cursor_token"], before[0]["source_cursor_token"]
+        )
+        self.assertEqual(after[0]["source_state"], "source_degraded")
+        self.assertEqual(after[0]["last_error_code"], "source_generation_changed")
+
     def test_old_ledger_gains_the_cursor_token_column_without_losing_state(self):
         class LegacyTimestampSource:
             """Pre-keyset reader: timestamp pages only, no opaque cursor."""
