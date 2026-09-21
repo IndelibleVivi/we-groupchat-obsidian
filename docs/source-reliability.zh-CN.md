@@ -1,18 +1,26 @@
 # 来源可靠性：source guard、本地 CAS、mounted backup、可选 Drive API 与 filesystem snapshot
 
-这一层故意拆成五项互不冒充的责任：
+这一层故意拆成六项互不冒充的责任：
 
 1. 可选 WeChat source guard：只负责在安全状态下请求 macOS 正常打开微信；
 2. Attachment catalog 与本机私有 content-addressed archive；
 3. 默认 no-OAuth selected-resource mounted handoff；
 4. 可选 advanced selected-chat Drive API sync；
 5. 面向更广 attachment archive 的 provider-neutral filesystem snapshot target。
+6. 默认关闭的 [Quiet Archive 本机私有交接](quiet-archive-handoff.md)：复用 selected-resource scanner，
+   明确开启后保存全部可见消息正文，独立输出 resources、contexts 与 coverage，不调用 AI 或 Markdown/Drive projection。
 
 它们仍是彼此独立的 domain responsibility，只是需要 protected-data access 的 timer 共享一个长驻菜单 app
 进程。`TopicMonitor` 负责读消息与 checkpoint，不 import、也不调用 source guard。Knowledge transaction 负责登记 attachment mention；
 commit 之后的 worker 才负责找 bytes 和复制。Mounted backup 只读本机 immutable archive object，
 并且只写自己的 configured filesystem target。两条 selected-chat scanner 各有独立 cursor/selection；
 即使消息没有 Knowledge hit，也可以复用同一个本地 CAS。
+
+Quiet Archive 不另建 source scanner。context、resource occurrence、cursor 与逐页 receipt 同事务提交；
+inventory complete 只表示来源 shard 集齐，raw EOF 还要求读完每个选中 shard 并在结尾重新确认 inventory。
+旧版本或关闭 context capture 期间丢失的正文有独立历史缺口；context-only backfill 复用 staged plan/apply，
+不会推进 live cursor，也不授予附件 byte 权限。新 source CLI 必须带 `--allow-transient-wechat-source-read`，
+export/status 只读本机 ledger/CAS。命令与机器契约见交接 runbook。
 
 ## 1. 可选 WeChat source guard
 

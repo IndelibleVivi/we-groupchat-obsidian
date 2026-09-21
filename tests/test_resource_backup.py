@@ -37,6 +37,7 @@ from core.resource_backup import (
     summarize_file_coverage,
 )
 from core.resource_capture import (
+    SCHEMA_VERSION,
     ResourceCaptureError,
     SelectedResourceCapture,
     _exact_links,
@@ -2275,7 +2276,7 @@ class ResourceBackupTests(unittest.TestCase):
         try:
             conn.execute("CREATE TABLE future_owner(value TEXT)")
             conn.execute("INSERT INTO future_owner VALUES ('preserve')")
-            conn.execute("PRAGMA user_version = 4")
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
             conn.commit()
         finally:
             conn.close()
@@ -2289,7 +2290,7 @@ class ResourceBackupTests(unittest.TestCase):
 
         conn = sqlite3.connect(self.capture_db)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION + 1)
             self.assertEqual(
                 conn.execute("SELECT value FROM future_owner").fetchone()[0],
                 "preserve",
@@ -2322,7 +2323,7 @@ class ResourceBackupTests(unittest.TestCase):
                 row[1]
                 for row in conn.execute("PRAGMA table_info(resource_backfill_runs)")
             }
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         finally:
             conn.close()
         self.assertIn("inventory_digest", columns)

@@ -107,6 +107,20 @@
   path. The plan binds `inventory_digest`; apply must reopen the source,
   re-read the exact inventory digest, and fail closed before consuming staged
   rows if the inventory is unavailable, incomplete, or changed.
+- `core/resource_capture.py` also owns opt-in private visible-message contexts
+  for Quiet Archive. Default-off resource scans do not retain full text; consuming
+  text while disabled marks the context history gap. Enabled capture commits
+  contexts, occurrences, cursor and page receipt together. Inventory completeness,
+  raw EOF, historical context coverage and attachment delivery remain separate.
+  Context-only history uses the existing staged backfill and does not move live
+  cursors. `core/quiet_archive_handoff.py` consumes this ledger and the shared v3
+  copy/snapshot transport without Markdown, AI or Drive projections; its separate
+  local destination purpose must not reuse a mounted-backup destination.
+  `scripts/quiet_archive_handoff.py` owns the thin configure/export/status and
+  explicit bounded capture/drain/refresh/backfill CLI. Protected source commands
+  require `--allow-transient-wechat-source-read` before config/key/source access.
+  Export/status never read WeChat. The machine contract and operator commands
+  live in `docs/quiet-archive-handoff.md`; maintain it with the producer schema.
 - `launchers/` owns the canonical Finder-friendly `.command` entrypoints. The
   root `启动.command` is a compatibility stub for deployed source-mode
   LaunchAgents and must not grow a second implementation.

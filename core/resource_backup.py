@@ -596,16 +596,20 @@ class MountedResourceBackup:
         id_factory=None,
         link_export_mode=None,
         settings_path=SETTINGS_FILE,
+        target=None,
+        purpose="mounted",
     ):
         self.config = dict(config or {})
         self.capture = capture or SelectedResourceCapture.from_config(self.config)
         self.now_func = now_func
         self.id_factory = id_factory or (lambda: os.urandom(4).hex())
         self.settings_path = settings_path
-        settings = load_resource_backup_settings(settings_path)
+        settings = load_resource_backup_settings(settings_path) if target is None else {}
         configured_target = str(
-            self.config.get("resource_backup_target") or settings.get("target") or ""
+            (self.config.get("resource_backup_target") or settings.get("target") or "")
+            if target is None else target
         ).strip()
+        self.purpose = purpose
         self.target = (
             os.path.abspath(os.path.expanduser(configured_target))
             if configured_target else ""
@@ -882,6 +886,8 @@ class MountedResourceBackup:
             raise ResourceBackupError("destination_identity_invalid")
         if str(payload.get("archive_id") or "") != self.capture.archive_id:
             raise ResourceBackupError("destination_archive_mismatch")
+        if str(payload.get("purpose") or "mounted") != self.purpose:
+            raise ResourceBackupError("destination_purpose_mismatch")
         return {**payload, "destination_uuid": destination_uuid}
 
     def _ensure_destination_identity_owned(self):
@@ -896,6 +902,7 @@ class MountedResourceBackup:
             "schema": DESTINATION_MARKER_SCHEMA,
             "archive_id": self.capture.archive_id,
             "destination_uuid": destination_uuid,
+            "purpose": self.purpose,
         })
         self._target_atomic_bytes(self._destination_marker_path, payload)
         confirmed = self._read_destination_marker(required=True)
@@ -1679,7 +1686,7 @@ class MountedResourceBackup:
         stamp = datetime.fromtimestamp(self.now_func(), tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return f"{stamp}-{self.id_factory()}"
 
-    def _write_snapshot(self, records, object_rows, delivery_map):
+    def _write_snapshot(self, records, object_rows, delivery_map, *, machine_files=None, machine_handoff=None):
         resources_bytes = _canonical_jsonl_bytes(records)
         resources_sha256 = hashlib.sha256(resources_bytes).hexdigest()
         source_evidence_reader = getattr(
@@ -1716,6 +1723,8 @@ class MountedResourceBackup:
                 and manifest.get("link_export_mode") == self.link_export_mode
                 and manifest.get("handoff_semantics") == handoff_semantics
                 and manifest.get("source_observation") == source_observation
+                and manifest.get("machine_handoff") == machine_handoff
+                and self._machine_files_match(existing, machine_files)
             ):
                 return {
                     "state": "unchanged",
@@ -1731,6 +1740,8 @@ class MountedResourceBackup:
         self._ensure_target_dir(snapshot_dir)
         resources_path = os.path.join(snapshot_dir, "resources.jsonl")
         self._target_atomic_bytes(resources_path, resources_bytes)
+        for name, payload in (machine_files or {}).items():
+            self._target_atomic_bytes(os.path.join(snapshot_dir, name), payload)
         manifest = {
             "schema": BACKUP_SCHEMA,
             "archive_id": self.capture.archive_id,
@@ -1763,6 +1774,8 @@ class MountedResourceBackup:
             "resources_file": "resources.jsonl",
             "resources_sha256": resources_sha256,
         }
+        if machine_handoff is not None:
+            manifest["machine_handoff"] = machine_handoff
         manifest_bytes = _canonical_json_bytes(manifest)
         self._target_atomic_bytes(
             os.path.join(snapshot_dir, "manifest.json"), manifest_bytes
@@ -1786,6 +1799,34 @@ class MountedResourceBackup:
             "unresolved_files": unresolved_files,
             "source_complete": bool(source_observation.get("complete")),
         }
+
+    def _machine_files_match(self, snapshot, machine_files):
+        if not machine_files:
+            return True
+        directory = self._snapshot_dir(snapshot["manifest"]["snapshot_id"])
+        try:
+            return all(self._read_regular_bytes(os.path.join(directory, name)) == payload
+                       for name, payload in machine_files.items())
+        except ResourceBackupError:
+            return False
+
+    def _copy_snapshot_objects(self, object_rows):
+        """One copy/readback path for mounted backup and private local handoff."""
+        self._ensure_target_dir(self.backup_root)
+        copied = reused = failed = 0
+        error_codes = []
+        for row in object_rows:
+            try:
+                state, _relpath = self._copy_object(row)
+                if state == "copied":
+                    copied += 1
+                else:
+                    reused += 1
+            except (ResourceBackupError, ArchiveError, OSError) as exc:
+                failed += 1
+                error_codes.append(str(getattr(exc, "code", "") or type(exc).__name__))
+        return {"copied": copied, "reused": reused, "failed": failed,
+                "error_codes": sorted(set(error_codes))}
 
     def _render_month(
         self, chat_alias, month, rows, delivery_map, *, target_view=False
@@ -2757,30 +2798,10 @@ class MountedResourceBackup:
             )
 
     def _run_locked(self, *, obsidian, occurrences, object_rows):
-        self._ensure_target_dir(self.backup_root)
-        copied = 0
-        reused = 0
-        failed = 0
-        error_codes = []
-        for row in object_rows:
-            try:
-                state, _relpath = self._copy_object(row)
-                if state == "copied":
-                    copied += 1
-                else:
-                    reused += 1
-            except (ResourceBackupError, ArchiveError, OSError) as exc:
-                failed += 1
-                error_codes.append(str(getattr(exc, "code", "") or type(exc).__name__))
-        if failed:
-            return {
-                "state": "target_failed",
-                "copied": copied,
-                "reused": reused,
-                "failed": failed,
-                "error_codes": sorted(set(error_codes)),
-                "obsidian": obsidian,
-            }
+        copy_result = self._copy_snapshot_objects(object_rows)
+        copied, reused = copy_result["copied"], copy_result["reused"]
+        if copy_result["failed"]:
+            return {"state": "target_failed", **copy_result, "obsidian": obsidian}
 
         delivery_map = self._delivery_map()
         records = self._catalog_records(occurrences, delivery_map)

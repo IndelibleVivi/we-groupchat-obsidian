@@ -196,6 +196,7 @@ class HealthCheckTests(unittest.TestCase):
             self.assertFalse(absent_path.exists())
             self.assertFalse(Path(str(absent_path) + ".lock").exists())
 
+    @patch("core.resource_backup._read_resource_backup_settings_unlocked", new=lambda _path: {})
     def test_health_check_reports_v1_singleton_as_one_active_chat(self):
         config = {
             "monitor_chat_username": "room@chatroom",
@@ -844,6 +845,7 @@ gui/501/com.example.wechat-summary = {
             self.assertIn("com.private.label", text)
             self.assertIn("message/message_0.db", text)
 
+    @patch("core.resource_backup._read_resource_backup_settings_unlocked", new=lambda _path: {})
     def test_delete_sensitive_key_log_requires_explicit_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
             key_log = Path(tmp) / "extract_keys.log"

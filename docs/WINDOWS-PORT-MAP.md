@@ -186,6 +186,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/platform/windows_private_storage.py` | `windows-import-safe` | Handle-based protected NTFS DACL enforcement/verification and atomic publication; path admission remains in windows_paths. |
 | `core/platform/windows_paths.py` | `windows-import-safe` | Local-NTFS identity via handle-relative NT traversal, retained ancestry handles, volume/file IDs, extended operational paths, and fail-closed reparse/case-sensitive/unsupported-filesystem checks. |
 | `core/project_identity.py` | `windows-import-safe` | Shared public project identifiers. |
+| `core/quiet_archive_handoff.py` | `deferred-w0.2` | Private local v3 context handoff using existing capture/backup POSIX storage and locks; not a Windows feature. |
 | `core/relation_audit.py` | `windows-import-safe` | Imports without platform services; filesystem behavior remains unclaimed. |
 | `core/relation_markdown_cleanup.py` | `deferred-w0.2` | Transitively imports knowledge/config storage. |
 | `core/resource_backup_launch_agent.py` | `macos-only` | Retired/current LaunchAgent compatibility surface. |
@@ -218,6 +219,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `scripts/health_check.py` | `macos-only` | Privacy-safe reliability matrix plus LaunchAgent/notification/macOS source diagnostics; its Windows line reports the shared storage/credential foundation without claiming product support. |
 | `scripts/migrate_taxonomy.py` | `operator-deferred` | Depends on W0.2 config/knowledge storage. |
 | `scripts/organize_obsidian.py` | `operator-deferred` | Depends on W0.2 path/storage and W3 projection activation. |
+| `scripts/quiet_archive_handoff.py` | `macos-only` | Explicit protected-source capture/drain/backfill and local JSON handoff; reuses current Mac capture/backup owners. |
 | `scripts/refresh_data_source.py` | `macos-only` | Invokes the current macOS key/process adapter. |
 | `scripts/resign_wechat.py` | `macos-only` | Explicit-consent thin CLI for the exact-target macOS re-sign operation. |
 | `scripts/repair_relation_markdown.py` | `operator-deferred` | Depends on knowledge/config storage. |

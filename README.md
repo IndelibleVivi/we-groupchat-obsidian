@@ -31,6 +31,14 @@ Project lineage: this standalone derivative builds on [Qizhan7/mac-wechat-summar
 
 [完整中文版 README](README.zh-CN.md)
 
+An optional [private Quiet Archive handoff](docs/quiet-archive-handoff.md) exports
+selected resources plus complete visible message context as local JSON/CAS
+snapshots, independently of AI notes, Obsidian and Drive. It defaults off; enabling
+it explicitly permits selected-message text retention. Existing backups remain.
+Raw EOF, historical context gaps and missing attachments are reported separately.
+The dedicated CLI supports configure, export/status without WeChat reads, and
+explicit bounded refresh/backfill with the protected-source permission flag.
+
 ## Obsidian output preview
 
 These screens use temporary redacted copies of real exporter Markdown, laid

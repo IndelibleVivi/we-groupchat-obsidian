@@ -121,6 +121,7 @@ from core.resource_capture import (
     resource_backup_chat_candidates,
     update_resource_backup_selection,
 )
+from core.quiet_archive_handoff import QuietArchiveHandoff
 from core.google_drive_auth import GoogleDriveAuthError, GoogleDriveOAuth
 from core.google_drive_client import GoogleDriveClient
 from core.google_drive_file_sync import GoogleDriveFileSync
@@ -424,7 +425,8 @@ class WeGroupchatObsidianApp(rumps.App):
                 self._configure_daily_digest_timer,
             ),
             (
-                ("resource_backup_enabled", "resource_backup_interval_seconds"),
+                ("resource_backup_enabled", "resource_backup_interval_seconds",
+                 "quiet_archive_handoff_enabled"),
                 self._configure_resource_backup_timer,
             ),
             (
@@ -653,6 +655,11 @@ class WeGroupchatObsidianApp(rumps.App):
         menu.add(rumps.MenuItem(
             f"状态: {'后台更新已开启' if enabled else '后台更新已关闭'}"
         ))
+        if self.config.get("quiet_archive_handoff_target"):
+            menu.add(rumps.MenuItem(
+                "档案馆交接: 后台已开启" if self.config.get("quiet_archive_handoff_enabled")
+                else "档案馆交接: 后台未开启"
+            ))
         menu.add(rumps.MenuItem(
             f"群聊: {selected} · 链接: {links} · 附件记录: {files}"
         ))
@@ -706,7 +713,8 @@ class WeGroupchatObsidianApp(rumps.App):
             except Exception:
                 pass
             self._resource_backup_timer = None
-        if not self.config.get("resource_backup_enabled", False):
+        if not (self.config.get("resource_backup_enabled", False)
+                or self.config.get("quiet_archive_handoff_enabled", False)):
             return
         interval = max(
             60,
@@ -805,7 +813,8 @@ class WeGroupchatObsidianApp(rumps.App):
         result = {}
         try:
             config = load_config()
-            if not manual and not config.get("resource_backup_enabled", False):
+            if not manual and not (config.get("resource_backup_enabled", False)
+                                   or config.get("quiet_archive_handoff_enabled", False)):
                 result = {
                     "capture": {
                         "state": "disabled",
@@ -838,18 +847,29 @@ class WeGroupchatObsidianApp(rumps.App):
                     )) == consent_epoch
                 )
             capture_result = capture.run(**capture_run_kwargs)
+            handoff_result = {"state": "disabled"}
             if capture_result.get("state") == "worker_busy":
                 backup_result = {"state": "not_run_worker_busy"}
+                handoff_result = {"state": "not_run_worker_busy"}
             else:
-                backup_result = MountedResourceBackup.from_config(
-                    config,
-                    capture=capture,
-                ).run()
-            result = {"capture": capture_result, "backup": backup_result}
+                if config.get("quiet_archive_handoff_enabled", False):
+                    try:
+                        handoff_result = QuietArchiveHandoff.from_config(config, capture=capture).run()
+                    except Exception as exc:
+                        handoff_result = {"state": "failed", "error_code": type(exc).__name__}
+                backup_result = {"state": "disabled"}
+                if manual or config.get("resource_backup_enabled", False):
+                    try:
+                        backup_result = MountedResourceBackup.from_config(config, capture=capture).run()
+                    except Exception as exc:
+                        backup_result = {"state": "failed", "error_code": type(exc).__name__}
+            result = {"capture": capture_result, "backup": backup_result,
+                      "quiet_archive": handoff_result}
             print(
                 "[resource-backup] "
                 f"capture={capture_result.get('state')} "
                 f"backup={backup_result.get('state')} "
+                f"quiet_archive={handoff_result.get('state')} "
                 f"resolve={capture_result.get('resolve', {}).get('state')}"
             )
         except Exception as exc:

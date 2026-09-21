@@ -24,6 +24,11 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 
 项目来源说明：本项目是基于 [Qizhan7/mac-wechat-summary](https://github.com/Qizhan7/mac-wechat-summary) 的 standalone derivative。原项目打下了 macOS 菜单栏总结、本地微信数据库读取和 MCP 访问的基础；这个仓库没有挂在 GitHub fork network 里，也不作为 upstream PR 分支维护，而是继续发展成一个独立的 local-first Obsidian workflow 项目。见 [NOTICE.md](NOTICE.md)。
 
+可选的 [Quiet Archive 本机私有交接](docs/quiet-archive-handoff.md) 把明确选中来源的资源与完整可见消息正文
+输出为 JSON/CAS snapshot，不依赖 AI 笔记、Obsidian 或 Drive，保留既有备份。功能默认关闭；开启才允许
+普通扫描保存全部选中消息正文。raw EOF、历史 context 缺口和待补附件分别报告。专用 CLI 支持 configure、
+不读微信的 export/status，以及带明确 protected-source 授权参数的有限预算 refresh 和 staged 历史回补。
+
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![macOS](https://img.shields.io/badge/macOS-only-lightgrey)
 ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
@@ -763,6 +768,7 @@ core/
   attachment_backup.py          # archive filesystem snapshot / verify / restore plan
   resource_capture.py           # selected-chat exact occurrence capture/backfill
   resource_backup.py            # mounted target projection、handoff 与 receipts
+  quiet_archive_handoff.py      # opt-in 本机私有 JSON/context handoff，无 AI/Markdown/Drive
   wechat_source_guard.py        # 长驻 app 内的 optional source guard
   google_drive_*.py             # 独立 advanced Drive API queue/OAuth/projection
 ui/                      # 可复用 macOS UI 组件

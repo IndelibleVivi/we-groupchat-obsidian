@@ -1,8 +1,9 @@
-"""Deterministic selected-chat capture for link and file resource occurrences.
+"""Deterministic selected-chat resources and opt-in private visible messages.
 
 This module deliberately separates source capture from every backup transport.
 A source cursor advances only in the same SQLite transaction that durably records
-all link/file occurrences found in that source page.  File bytes are resolved
+all link/file occurrences and opted-in contexts found in that source page.
+Page receipts distinguish raw EOF from inventory completeness. File bytes are resolved
 later through the shared AttachmentArchive CAS; link identity is the exact URL
 string observed in the WeChat message, not an AI-produced summary.
 """
@@ -20,7 +21,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .attachment_archive import AttachmentArchive
 from .config import (
@@ -41,7 +42,7 @@ from .source_adapter import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BACKFILL_PAGE_SIZE = 1_000
 BACKFILL_RUN_TTL_SECONDS = 24 * 60 * 60
 LINK_ID_DOMAIN = b"we-groupchat-resource-link-v1\0"
@@ -204,7 +205,7 @@ def resource_backup_chat_candidates(config):
 
 
 class SelectedResourceCapture:
-    """Capture selected-chat link/file occurrences into a provider-neutral ledger."""
+    """Capture resources and opted-in visible contexts into one private ledger."""
 
     def __init__(
         self,
@@ -216,6 +217,7 @@ class SelectedResourceCapture:
         archive_id_factory=None,
         backfill_run_id_factory=None,
         config_loader=None,
+        capture_contexts=None,
     ):
         self.config = dict(config or {})
         self.source = source
@@ -226,6 +228,7 @@ class SelectedResourceCapture:
             lambda: str(uuid.uuid4())
         )
         self.config_loader = config_loader
+        self.capture_contexts = capture_contexts
         self.db_path = _capture_db_path(self.config)
         self.archive_root = os.path.abspath(os.path.expanduser(
             self.config.get("attachment_archive_root")
@@ -402,6 +405,27 @@ class SelectedResourceCapture:
                 CREATE INDEX IF NOT EXISTS idx_resource_occurrences_object
                     ON resource_occurrences(object_sha256, occurrence_id);
 
+                CREATE TABLE IF NOT EXISTS resource_contexts (
+                    chat_username TEXT NOT NULL,
+                    chat_key TEXT NOT NULL,
+                    chat_alias TEXT NOT NULL,
+                    source_message_id TEXT NOT NULL,
+                    source_timestamp INTEGER NOT NULL,
+                    source_time TEXT NOT NULL,
+                    message_type INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    PRIMARY KEY(chat_username, source_message_id)
+                );
+                CREATE TABLE IF NOT EXISTS resource_context_history (
+                    chat_key TEXT NOT NULL,
+                    selection_id TEXT NOT NULL,
+                    from_timestamp INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    inventory_digest TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    PRIMARY KEY(chat_key, selection_id, from_timestamp, origin)
+                );
+
                 CREATE TABLE IF NOT EXISTS resource_backfill_runs (
                     run_id TEXT PRIMARY KEY,
                     mode TEXT NOT NULL,
@@ -454,6 +478,15 @@ class SelectedResourceCapture:
                     ON resource_backfill_staged_occurrences(
                         run_id, candidate_sha256
                     );
+                CREATE TABLE IF NOT EXISTS resource_backfill_staged_contexts (
+                    run_id TEXT NOT NULL,
+                    chat_username TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    source_message_id TEXT NOT NULL,
+                    PRIMARY KEY(run_id, chat_username, source_message_id),
+                    FOREIGN KEY(run_id) REFERENCES resource_backfill_runs(run_id)
+                        ON DELETE CASCADE
+                );
                 """
             )
             conn.execute("BEGIN IMMEDIATE")
@@ -475,6 +508,18 @@ class SelectedResourceCapture:
                     "ALTER TABLE resource_chats "
                     "ADD COLUMN selection_id TEXT NOT NULL DEFAULT ''"
                 )
+            if "context_history_gap" not in columns:
+                conn.execute(
+                    "ALTER TABLE resource_chats "
+                    "ADD COLUMN context_history_gap INTEGER NOT NULL DEFAULT 0"
+                )
+                # Old cursors consumed text that was never retained. Even zero
+                # resource rows cannot prove that those pages had no messages.
+                conn.execute("""
+                    UPDATE resource_chats SET context_history_gap = 1
+                    WHERE chat_username IN (SELECT chat_username FROM resource_shards)
+                       OR chat_username IN (SELECT chat_username FROM resource_occurrences)
+                """)
             shard_columns = {
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(resource_shards)")
@@ -493,6 +538,15 @@ class SelectedResourceCapture:
                     "ALTER TABLE resource_backfill_runs "
                     "ADD COLUMN inventory_digest TEXT NOT NULL DEFAULT ''"
                 )
+            for column in ("discovered_contexts", "inserted_contexts"):
+                if column not in backfill_columns:
+                    conn.execute(
+                        f"ALTER TABLE resource_backfill_runs ADD COLUMN {column} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
+            if "includes_contexts" not in backfill_columns:
+                conn.execute("ALTER TABLE resource_backfill_runs "
+                             "ADD COLUMN includes_contexts INTEGER NOT NULL DEFAULT 0")
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
         finally:
@@ -979,6 +1033,170 @@ class SelectedResourceCapture:
                 captured_files += inserted
         return captured_links, captured_files
 
+    @staticmethod
+    def _context_candidates(chat, messages):
+        for message in messages:
+            text = str(message.get("text") or message.get("content") or "")
+            identity = str(message.get("source_message_id") or "").strip()
+            timestamp = int(message.get("timestamp") or 0)
+            if not identity or not timestamp or not text.strip():
+                continue
+            yield {
+                "chat_username": chat["username"], "chat_key": chat["chat_key"],
+                "chat_alias": chat["alias"], "source_message_id": identity,
+                "source_timestamp": timestamp,
+                "source_time": str(message.get("time_str") or ""),
+                "message_type": int(message.get("type") or 0), "text": text,
+            }
+
+    def _captures_contexts(self):
+        return bool(self.config.get("quiet_archive_handoff_enabled", False)
+                    if self.capture_contexts is None else self.capture_contexts)
+
+    @staticmethod
+    def _insert_context(conn, candidate):
+        return conn.execute("""
+            INSERT INTO resource_contexts(
+                chat_username, chat_key, chat_alias, source_message_id,
+                source_timestamp, source_time, message_type, text
+            ) VALUES (:chat_username, :chat_key, :chat_alias, :source_message_id,
+                      :source_timestamp, :source_time, :message_type, :text)
+            ON CONFLICT(chat_username, source_message_id) DO UPDATE SET
+                chat_key=excluded.chat_key, chat_alias=excluded.chat_alias,
+                source_timestamp=excluded.source_timestamp,
+                source_time=excluded.source_time, message_type=excluded.message_type,
+                text=excluded.text
+            WHERE resource_contexts.text <> excluded.text
+               OR resource_contexts.chat_alias <> excluded.chat_alias
+               OR resource_contexts.source_timestamp <> excluded.source_timestamp
+               OR resource_contexts.source_time <> excluded.source_time
+               OR resource_contexts.message_type <> excluded.message_type
+        """, candidate)
+
+    def _observed_at(self):
+        return datetime.fromtimestamp(self.now_func(), tz=timezone.utc).isoformat()
+
+    @staticmethod
+    def _write_scan_receipt(conn, receipt):
+        conn.execute(
+            "INSERT INTO resource_meta(key, value) VALUES ('context_scan_receipt', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json.dumps(receipt, ensure_ascii=False, sort_keys=True),),
+        )
+
+    def _history_range(self, conn, chat, from_timestamp, digest, origin):
+        conn.execute("""
+            INSERT INTO resource_context_history(
+                chat_key, selection_id, from_timestamp, observed_at,
+                inventory_digest, origin
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_key, selection_id, from_timestamp, origin)
+            DO UPDATE SET observed_at=excluded.observed_at,
+                          inventory_digest=excluded.inventory_digest
+        """, (chat["chat_key"], chat["selection_id"], int(from_timestamp),
+              self._observed_at(), digest, origin))
+
+    def contexts(self):
+        """Selected private visible messages; projection owns URL redaction."""
+        with self._operation_lock():
+            chats = self._selected_chats_locked()
+            aliases = {chat["chat_key"]: chat["alias"] for chat in chats}
+            if not aliases:
+                return []
+            conn = self._connect()
+            try:
+                rows = [dict(row) for row in conn.execute(
+                    "SELECT * FROM resource_contexts WHERE chat_key IN ({}) "
+                    "ORDER BY chat_key, source_timestamp, source_message_id".format(
+                        ",".join("?" for _ in aliases)
+                    ), list(aliases),
+                )]
+                for row in rows:
+                    row["chat_alias"] = aliases[row["chat_key"]]
+                return rows
+            finally:
+                conn.close()
+
+    def context_coverage(self):
+        """Local durable evidence only; never opens or refreshes the source."""
+        with self._operation_lock():
+            chats = self._selected_chats_locked()
+            keys = [chat["chat_key"] for chat in chats]
+            selection = [{key: chat[key] for key in (
+                "chat_key", "selection_id", "selected_since"
+            )} for chat in chats]
+            raw = self._meta_get("context_scan_receipt", "")
+            receipt = json.loads(raw) if raw else {}
+            if receipt.get("selection") != selection:
+                receipt = {}
+            inventory = receipt.get("inventory") or {
+                "revision": 0, "digest": "", "complete": False,
+                "counts": {}, "error_codes": ["source_not_observed"],
+            }
+            scan = receipt.get("source_scan") or {
+                "state": "not_started", "raw_eof": False,
+                "raw_rows_scanned": 0, "visible_messages_captured": 0,
+                "pending_shards": 0, "failed_shards": 0, "shards": [],
+            }
+            total = gaps = missing = 0
+            ranges = []
+            conn = self._connect()
+            try:
+                if keys:
+                    placeholders = ",".join("?" for _ in keys)
+                    total = conn.execute(
+                        f"SELECT COUNT(*) FROM resource_contexts WHERE chat_key IN ({placeholders})",
+                        keys,
+                    ).fetchone()[0]
+                    gaps = conn.execute(
+                        f"SELECT COUNT(*) FROM resource_chats WHERE chat_key IN ({placeholders}) "
+                        "AND context_history_gap=1", keys,
+                    ).fetchone()[0]
+                    missing = conn.execute(f"""
+                        SELECT COUNT(*) FROM (
+                            SELECT DISTINCT r.chat_key, r.source_message_id
+                            FROM resource_occurrences r
+                            WHERE r.chat_key IN ({placeholders}) AND NOT EXISTS (
+                                SELECT 1 FROM resource_contexts c
+                                WHERE c.chat_key=r.chat_key AND c.source_message_id=r.source_message_id
+                            )
+                        )
+                    """, keys).fetchone()[0]
+                    ranges = [dict(row) for row in conn.execute(
+                        f"SELECT * FROM resource_context_history WHERE chat_key IN ({placeholders}) "
+                        "ORDER BY chat_key, from_timestamp, origin", keys,
+                    )]
+            finally:
+                conn.close()
+            return {
+                "schema": "we-groupchat-obsidian.quiet-archive.coverage.v1",
+                "capture_run_id": receipt.get("capture_run_id", ""),
+                "observed_at": receipt.get("observed_at", ""),
+                "selection": selection, "inventory": inventory, "source_scan": scan,
+                "contexts": {
+                    "total_messages": total, "history_gap_chat_count": gaps,
+                    "legacy_resource_messages_without_context": missing,
+                    "unmeasured_history_gap": bool(gaps), "history_ranges": ranges,
+                },
+                "errors": receipt.get("errors", []),
+            }
+
+    def drain(self, *, max_rounds=10, max_seconds=480):
+        """Explicit bounded catch-up, using the same scanner and operation lock."""
+        results = []
+        started = time.monotonic()
+        with self._operation_lock():
+            for _ in range(max(1, int(max_rounds))):
+                result = self.scan()
+                results.append(result)
+                if result.get("raw_eof") or result.get("state") != "healthy":
+                    break
+                if time.monotonic() - started >= max(0, float(max_seconds)):
+                    break
+        return {"state": "eof" if results[-1].get("raw_eof") else (
+            "pending" if results[-1].get("state") == "healthy" else results[-1]["state"]
+        ), "rounds": len(results), "scan": results[-1], "coverage": self.context_coverage()}
+
     def scan(self):
         try:
             with self._operation_lock():
@@ -999,131 +1217,178 @@ class SelectedResourceCapture:
     def _scan_locked(self):
         chats = self.selected_chats()
         if not chats:
-            return {
-                "state": "no_selected_chats",
-                "scanned": 0,
-                "captured_links": 0,
-                "captured_files": 0,
-            }
-        if self.source is None:
-            binding = bind_source_inventory(self.source, chats)
-            self._record_source_inventory_evidence(binding)
-            return {
-                "state": "source_unavailable",
-                "scanned": 0,
-                "captured_links": 0,
-                "captured_files": 0,
-                "error_code": "source_unavailable",
-                "source_complete": False,
-                "inventory_digest": "",
-                "inventory_revision": 0,
-                "source_counts": {},
-                "source_error_codes": ["source_unavailable"],
-            }
+            return {"state": "no_selected_chats", "scanned": 0,
+                    "captured_links": 0, "captured_files": 0, "raw_eof": False}
         binding = bind_source_inventory(self.source, chats)
+        receipt = {
+            "capture_run_id": str(uuid.uuid4()), "observed_at": self._observed_at(),
+            "selection": [{key: chat[key] for key in (
+                "chat_key", "selection_id", "selected_since"
+            )} for chat in chats],
+            "inventory": {
+                "revision": int(binding.get("inventory_revision") or 0),
+                "digest": str(binding.get("inventory_digest") or ""),
+                "complete": bool(binding.get("complete")),
+                "counts": dict(binding.get("counts") or {}),
+                "error_codes": list(binding.get("error_codes") or []),
+            },
+            "source_scan": {"state": "pending", "raw_eof": False,
+                            "raw_rows_scanned": 0, "visible_messages_captured": 0,
+                            "pending_shards": 0, "failed_shards": 0, "shards": []},
+            "errors": [],
+        }
+        scan = receipt["source_scan"]
+        def save_receipt():
+            conn = self._connect()
+            try:
+                self._write_scan_receipt(conn, receipt)
+                conn.commit()
+            finally:
+                conn.close()
+        if self.source is None:
+            scan["state"] = "failed"
+            receipt["errors"] = ["source_unavailable"]
+            save_receipt()
+            self._record_source_inventory_evidence(binding)
+            return {"state": "source_unavailable", "scanned": 0,
+                    "captured_links": 0, "captured_files": 0,
+                    "error_code": "source_unavailable", "source_complete": False,
+                    "inventory_digest": "", "inventory_revision": 0,
+                    "source_counts": {}, "source_error_codes": ["source_unavailable"],
+                    "raw_eof": False}
         initialized = self._initialize_selected_chat_cursors_locked()["new_chats"]
-        max_messages = max(1, int(
-            self.config.get("resource_backup_max_messages_per_scan", 500)
-        ))
-        scanned = 0
-        captured_links = 0
-        captured_files = 0
+        max_messages = max(1, int(self.config.get("resource_backup_max_messages_per_scan", 500)))
+        captured_links = captured_files = 0
         degraded_shards = int(binding.get("degraded_shards") or 0)
         source_error_code = str(binding.get("error_code") or "")
-
+        work = []
         for chat in chats:
             chat_row = self._chat_row(chat["username"])
             if chat_row is None:
                 raise ResourceCaptureError("chat_state_missing")
-            source_shards = list(
-                (binding.get("shards_by_username") or {}).get(chat["username"], [])
-            )
-            if not source_shards:
-                continue
-
-            for source_shard_id in source_shards:
-                shard = self._shard_state(chat_row, source_shard_id)
+            for shard_id in (binding.get("shards_by_username") or {}).get(chat["username"], []):
+                shard = self._shard_state(chat_row, shard_id)
+                evidence = {
+                    "chat_key": chat["chat_key"], "source_generation_id": shard_id,
+                    "cursor_before": str(shard["source_cursor_token"] or ""),
+                    "cursor_after": str(shard["source_cursor_token"] or ""),
+                    "raw_rows_scanned": 0, "raw_eof": False,
+                    "state": "pending", "error_code": "",
+                }
+                scan["shards"].append(evidence)
+                work.append((chat, shard, evidence))
+        scan["pending_shards"] = len(work)
+        save_receipt()
+        try:
+            for chat, shard, evidence in work:
+                shard_id = evidence["source_generation_id"]
                 cursor_timestamp = int(shard["cursor_timestamp"])
+                seen_ids = set(json.loads(shard["cursor_message_ids_json"] or "[]"))
                 try:
-                    seen_ids = set(json.loads(shard["cursor_message_ids_json"] or "[]"))
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    seen_ids = set()
-                try:
-                    messages, next_cursor_token, _exhausted = read_source_page(
-                        self.source,
-                        chat["username"],
-                        source_shard_id,
-                        cursor_token=str(shard["source_cursor_token"] or ""),
-                        cursor_timestamp=cursor_timestamp,
-                        seen_ids=seen_ids,
-                        limit=max_messages,
+                    messages, next_cursor_token, exhausted = read_source_page(
+                        self.source, chat["username"], shard_id,
+                        cursor_token=evidence["cursor_before"],
+                        cursor_timestamp=cursor_timestamp, seen_ids=seen_ids, limit=max_messages,
                     )
+                    if not messages and not exhausted:
+                        raise SourceUnavailableError("source_cursor_stalled")
+                    if messages and callable(getattr(self.source, "get_cursor_page_for_shard", None)) and next_cursor_token == evidence["cursor_before"]:
+                        raise SourceUnavailableError("source_cursor_stalled")
                 except SourceUnavailableError as exc:
                     code = normalize_source_error(exc)
-                    self._mark_shard_degraded(chat["username"], source_shard_id, code)
+                    self._mark_shard_degraded(chat["username"], shard_id, code)
                     degraded_shards += 1
                     source_error_code = code
+                    evidence.update(state="failed", error_code=code)
+                    scan["failed_shards"] += 1
+                    scan["pending_shards"] -= 1
+                    receipt["errors"].append(code)
+                    save_receipt()
                     continue
-
-                new_timestamp, new_ids = self._cursor_after(
-                    messages, cursor_timestamp, seen_ids
-                )
-                if callable(
-                    getattr(self.source, "get_cursor_page_for_shard", None)
-                ):
+                new_timestamp, new_ids = self._cursor_after(messages, cursor_timestamp, seen_ids)
+                if callable(getattr(self.source, "get_cursor_page_for_shard", None)):
                     new_ids = set()
-                now = self.now_func()
+                candidates = list(self._context_candidates(chat, messages)) if self._captures_contexts() else []
                 conn = self._connect()
                 try:
                     conn.execute("BEGIN IMMEDIATE")
-                    links, files = self._insert_occurrences(conn, chat, messages, now)
-                    updated = conn.execute(
-                        """
-                        UPDATE resource_shards
-                        SET cursor_timestamp = ?, cursor_message_ids_json = ?,
-                            source_cursor_token = ?, source_state = 'healthy',
-                            last_error_code = '', updated_at = ?
-                        WHERE chat_username = ? AND source_shard_id = ?
-                          AND cursor_timestamp = ?
-                          AND source_cursor_token = ?
-                        """,
-                        (
-                            new_timestamp, json.dumps(sorted(new_ids)),
-                            next_cursor_token, now, chat["username"],
-                            source_shard_id, cursor_timestamp,
-                            str(shard["source_cursor_token"] or ""),
-                        ),
-                    )
+                    links, files = self._insert_occurrences(conn, chat, messages, self.now_func())
+                    for candidate in candidates:
+                        self._insert_context(conn, candidate)
+                    if not self._captures_contexts() and any(
+                        str(message.get("text") or message.get("content") or "").strip()
+                        for message in messages
+                    ):
+                        conn.execute("UPDATE resource_chats SET context_history_gap=1 "
+                                     "WHERE chat_username=?", (chat["username"],))
+                    updated = conn.execute("""
+                        UPDATE resource_shards SET cursor_timestamp=?, cursor_message_ids_json=?,
+                            source_cursor_token=?, source_state='healthy', last_error_code='', updated_at=?
+                        WHERE chat_username=? AND source_shard_id=?
+                          AND cursor_timestamp=? AND source_cursor_token=?
+                    """, (new_timestamp, json.dumps(sorted(new_ids)), next_cursor_token,
+                          self.now_func(), chat["username"], shard_id, cursor_timestamp,
+                          evidence["cursor_before"]))
                     if int(updated.rowcount or 0) != 1:
                         raise ResourceCaptureError("source_cursor_changed")
+                    evidence.update(cursor_after=next_cursor_token, raw_rows_scanned=len(messages),
+                                    raw_eof=bool(exhausted), state="eof" if exhausted else "pending")
+                    scan["raw_rows_scanned"] += len(messages)
+                    scan["visible_messages_captured"] += len(candidates)
+                    if exhausted:
+                        scan["pending_shards"] -= 1
+                    self._write_scan_receipt(conn, receipt)
                     conn.commit()
                 except Exception:
                     conn.rollback()
+                    # Recover only committed page evidence before recording failure.
+                    receipt = json.loads(self._meta_get("context_scan_receipt"))
+                    scan = receipt["source_scan"]
                     raise
                 finally:
                     conn.close()
                 captured_links += links
                 captured_files += files
-                scanned += len(messages)
-
-        self._record_source_inventory_evidence(
-            binding,
-            degraded_shards=degraded_shards,
-            error_code=source_error_code,
-        )
+            final_binding = bind_source_inventory(self.source, chats)
+            if (not final_binding.get("complete") or
+                    final_binding.get("inventory_digest") != binding.get("inventory_digest")):
+                degraded_shards += 1
+                source_error_code = str(final_binding.get("error_code") or "source_generation_changed")
+                receipt["errors"].append(source_error_code)
+            scan["raw_eof"] = bool(binding.get("complete") and work and not degraded_shards
+                                    and not scan["pending_shards"] and not scan["failed_shards"])
+            scan["state"] = "degraded" if degraded_shards else ("eof" if scan["raw_eof"] else "pending")
+            conn = self._connect()
+            try:
+                self._write_scan_receipt(conn, receipt)
+                if scan["raw_eof"] and self._captures_contexts():
+                    for chat in chats:
+                        row = self._chat_row(chat["username"])
+                        if not row["context_history_gap"]:
+                            self._history_range(conn, chat, row["start_timestamp"],
+                                                binding["inventory_digest"], "incremental")
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            scan["state"] = "failed"
+            scan["raw_eof"] = False
+            receipt["errors"].append(str(getattr(exc, "code", "") or type(exc).__name__))
+            save_receipt()
+            raise
+        self._record_source_inventory_evidence(binding, degraded_shards=degraded_shards,
+                                               error_code=source_error_code)
         return {
             "state": "source_degraded" if degraded_shards else "healthy",
-            "scanned": scanned,
-            "captured_links": captured_links,
-            "captured_files": captured_files,
-            "initialized_chats": initialized,
-            "degraded_shards": degraded_shards,
-            "error_code": source_error_code,
-            "source_complete": bool(binding.get("complete")),
+            "scanned": scan["raw_rows_scanned"], "captured_links": captured_links,
+            "captured_files": captured_files, "captured_contexts": scan["visible_messages_captured"],
+            "initialized_chats": initialized, "degraded_shards": degraded_shards,
+            "error_code": source_error_code, "source_complete": bool(binding.get("complete")),
             "inventory_digest": str(binding.get("inventory_digest") or ""),
             "inventory_revision": int(binding.get("inventory_revision") or 0),
             "source_counts": dict(binding.get("counts") or {}),
             "source_error_codes": list(binding.get("error_codes") or []),
+            "raw_eof": scan["raw_eof"], "pending_shards": scan["pending_shards"],
         }
 
     def backfill(self, from_timestamp, *, apply=False, run_id=""):
@@ -1146,6 +1411,13 @@ class SelectedResourceCapture:
             include_links=True,
             include_files=False,
             mode="links_only",
+        )
+
+    def backfill_contexts(self, from_timestamp, *, apply=False, run_id=""):
+        """Stage/apply visible history without queueing resources or reading bytes."""
+        return self._run_backfill(
+            from_timestamp, apply=apply, run_id=run_id,
+            include_links=False, include_files=False, mode="contexts_only",
         )
 
     @staticmethod
@@ -1200,13 +1472,14 @@ class SelectedResourceCapture:
                 """
                 INSERT INTO resource_backfill_runs(
                     run_id, mode, from_timestamp, selected_chat_digest,
-                    state, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, 'staging', ?, ?)
+                    state, created_at, expires_at, includes_contexts
+                ) VALUES (?, ?, ?, ?, 'staging', ?, ?, ?)
                 """,
                 (
                     run_id, mode, max(0, int(from_timestamp)),
                     self._selected_chat_digest(chats), now,
                     now + BACKFILL_RUN_TTL_SECONDS,
+                    int(mode == "contexts_only" or self._captures_contexts()),
                 ),
             )
             conn.commit()
@@ -1222,12 +1495,20 @@ class SelectedResourceCapture:
         *,
         include_links,
         include_files,
+        include_contexts=False,
     ):
         inserted_links = 0
         inserted_files = 0
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            for candidate in (self._context_candidates(chat, page) if include_contexts else ()):
+                conn.execute("""
+                    INSERT OR REPLACE INTO resource_backfill_staged_contexts(
+                        run_id, chat_username, source_message_id, payload
+                    ) VALUES (?, ?, ?, ?)
+                """, (run_id, chat["username"], candidate["source_message_id"],
+                      json.dumps(candidate, ensure_ascii=False, sort_keys=True)))
             for candidate in self._normalized_occurrence_candidates(
                 chat,
                 page,
@@ -1297,6 +1578,13 @@ class SelectedResourceCapture:
                 digest.update(b"tampered:")
             digest.update(candidate_hash.encode("ascii"))
             digest.update(b"\n")
+        digest.update(b"visible-contexts-v1\n")
+        for row in conn.execute(
+            "SELECT payload FROM resource_backfill_staged_contexts WHERE run_id=? "
+            "ORDER BY chat_username, source_message_id", (run_id,),
+        ):
+            digest.update(self._candidate_sha256(json.loads(row["payload"])).encode("ascii"))
+            digest.update(b"\n")
         return digest.hexdigest()
 
     @staticmethod
@@ -1314,6 +1602,9 @@ class SelectedResourceCapture:
             "discovered_files": int(value.get("discovered_files") or 0),
             "inserted_links": int(value.get("inserted_links") or 0),
             "inserted_files": int(value.get("inserted_files") or 0),
+            "discovered_contexts": int(value.get("discovered_contexts") or 0),
+            "inserted_contexts": int(value.get("inserted_contexts") or 0),
+            "includes_contexts": bool(value.get("includes_contexts")),
             "error_code": str(value.get("error_code") or ""),
             "mode": str(value.get("mode") or ""),
             "from_timestamp": int(value.get("from_timestamp") or 0),
@@ -1338,6 +1629,11 @@ class SelectedResourceCapture:
         conn = self._connect()
         try:
             candidate_digest = self._staged_candidate_digest(conn, run_id)
+            conn.execute(
+                "UPDATE resource_backfill_runs SET discovered_contexts=("
+                "SELECT COUNT(*) FROM resource_backfill_staged_contexts WHERE run_id=?) "
+                "WHERE run_id=?", (run_id, run_id),
+            )
             conn.execute(
                 """
                 UPDATE resource_backfill_runs
@@ -1430,6 +1726,14 @@ class SelectedResourceCapture:
                         degraded_shards += 1
                         source_error_code = normalize_source_error(exc)
                         break
+                    if not page and not exhausted:
+                        degraded_shards += 1
+                        source_error_code = "source_cursor_stalled"
+                        break
+                    if page and callable(getattr(self.source, "get_cursor_page_for_shard", None)) and next_cursor_token == cursor_token:
+                        degraded_shards += 1
+                        source_error_code = "source_cursor_stalled"
+                        break
                     if not page:
                         break
                     scanned += len(page)
@@ -1439,15 +1743,23 @@ class SelectedResourceCapture:
                         page,
                         include_links=include_links,
                         include_files=include_files,
+                        include_contexts=mode == "contexts_only" or self._captures_contexts(),
                     )
                     discovered_links += links
                     discovered_files += files
                     cursor_timestamp, seen_ids = self._cursor_after(
                         page, cursor_timestamp, seen_ids
                     )
+                    if callable(getattr(self.source, "get_cursor_page_for_shard", None)):
+                        seen_ids = set()
                     cursor_token = next_cursor_token
                     if exhausted:
                         break
+        final_binding = bind_source_inventory(self.source, chats)
+        if (not final_binding.get("complete") or
+                final_binding.get("inventory_digest") != binding.get("inventory_digest")):
+            degraded_shards += 1
+            source_error_code = str(final_binding.get("error_code") or "source_generation_changed")
         self._record_source_inventory_evidence(
             binding,
             degraded_shards=degraded_shards,
@@ -1594,14 +1906,30 @@ class SelectedResourceCapture:
                 (now, now, run_id),
             )
             inserted_files = conn.total_changes - before
+            inserted_contexts = 0
+            for staged in conn.execute(
+                "SELECT payload FROM resource_backfill_staged_contexts WHERE run_id=? "
+                "ORDER BY chat_username, source_message_id", (run_id,),
+            ):
+                inserted_contexts += self._inserted(
+                    self._insert_context(conn, json.loads(staged["payload"]))
+                )
+            for chat in (self._selected_chats_locked() if row["includes_contexts"] else []):
+                self._history_range(conn, chat, from_timestamp,
+                                    row["inventory_digest"], "explicit_backfill")
+                if int(from_timestamp) == 0:
+                    conn.execute(
+                        "UPDATE resource_chats SET context_history_gap=0 WHERE chat_username=?",
+                        (chat["username"],),
+                    )
             conn.execute(
                 """
                 UPDATE resource_backfill_runs
                 SET state = 'applied', applied_at = ?, inserted_links = ?,
-                    inserted_files = ?
+                    inserted_files = ?, inserted_contexts = ?
                 WHERE run_id = ? AND state = 'planned'
                 """,
-                (now, inserted_links, inserted_files, run_id),
+                (now, inserted_links, inserted_files, inserted_contexts, run_id),
             )
             applied = conn.execute(
                 "SELECT * FROM resource_backfill_runs WHERE run_id = ?",

@@ -507,6 +507,14 @@ even when local SQLite still holds the old catalog hash.
 
 ## 13. Link privacy modes
 
+The optional [Quiet Archive local handoff](quiet-archive-handoff.md) reuses this
+v3 resource/object structure and the canonical capture ledger. It adds hashed
+`contexts.jsonl` and `coverage.json` through the explicit
+`we-groupchat-obsidian.quiet-archive.v1` manifest extension, uses a distinct local
+destination purpose, and runs no Markdown/Drive projection. Full visible-message
+retention defaults off. Its raw EOF, selected source scope, legacy context gaps
+and attachment coverage do not change the existing mounted snapshot semantics.
+
 The mounted export supports:
 
 ```text
