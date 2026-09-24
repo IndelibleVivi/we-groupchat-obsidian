@@ -422,6 +422,32 @@ class ResourceBackupTests(unittest.TestCase):
         self.assertFalse(os.path.exists(settings_path))
         self.assertFalse(os.path.exists(settings_path + ".lock"))
 
+    def test_read_only_mounted_health_inspector_reports_marker_read_timeout(self):
+        marker_dir = Path(self.target) / "wgo-resource-backup"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / DESTINATION_MARKER_NAME).write_text(
+            "marker bytes are present",
+            encoding="utf-8",
+        )
+
+        with patch.object(
+            MountedResourceBackup,
+            "_read_regular_bytes",
+            side_effect=TimeoutError(60, "Operation timed out"),
+        ):
+            report = inspect_mounted_resource_backup(
+                {
+                    **self.config,
+                    "resource_backup_enabled": True,
+                },
+                settings_path=os.path.join(self.root, "missing-settings.json"),
+            )
+
+        self.assertEqual(report["state"], "destination_unavailable")
+        self.assertEqual(report["handoff_semantics"], "destination_unavailable")
+        self.assertEqual(report["last_error_code"], "destination_unavailable")
+        self.assertFalse(report["remote_verified"])
+
     def _write_candidate_files(self):
         first = b"first file bytes"
         second = b"second file bytes"

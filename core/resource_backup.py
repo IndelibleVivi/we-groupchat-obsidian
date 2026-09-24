@@ -3076,6 +3076,13 @@ def inspect_mounted_resource_backup(config, *, settings_path=SETTINGS_FILE):
         destination_id = str(uuid.UUID(str(marker.get("destination_uuid") or "")))
         if marker.get("schema") != DESTINATION_MARKER_SCHEMA:
             raise ValueError("destination identity schema")
+    except OSError:
+        result.update({
+            "state": "destination_unavailable",
+            "handoff_semantics": "destination_unavailable",
+            "last_error_code": "destination_unavailable",
+        })
+        return result
     except (
         ResourceBackupError,
         UnicodeDecodeError,
