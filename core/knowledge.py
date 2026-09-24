@@ -457,6 +457,26 @@ def _file_url(path):
     return "file://" + quote(text)
 
 
+def _resource_mention_line(label, details, *, status="", month_segment="", object_path=""):
+    """Render one compact Markdown bullet for a file/attachment mention.
+
+    Preservation contract from the former nested-bullet form:
+    - the mention name (with its time/sender hint) stays in the leading segment;
+    - archive ``status`` becomes a trailing inline segment in the same bullet;
+    - a resolved private object becomes an inline ``file://`` link;
+    - the WeChat month hint (link or bare month) stays as the final segment.
+    """
+    label = redact_urls_in_text(label)
+    segments = [f"{label}（{details}）" if details else label]
+    if status:
+        segments.append(f"归档状态 {status}")
+    if object_path:
+        segments.append(f"[本地归档]({_file_url(object_path)})")
+    if month_segment:
+        segments.append(month_segment)
+    return "- " + " · ".join(segment for segment in segments if segment)
+
+
 def _month_from_time(value):
     match = re.search(r"\d{4}-\d{2}", str(value or ""))
     return match.group(0) if match else ""
@@ -1968,21 +1988,26 @@ class KnowledgeStore:
                         for value in (item.get("time"), item.get("sender"))
                         if value
                     )
-                    line = f"- {redact_urls_in_text(item['name'])}"
-                    if details:
-                        line += f"（{details}）"
-                    lines.append(line)
                     archived = archive_by_name.get(str(item["name"]).strip().lower())
+                    object_path = ""
                     if archived is not None:
-                        lines.append(f"  - 归档状态：{archived['status']}")
                         if archived["object_relpath"]:
                             object_path = os.path.join(
                                 self.attachment_archive_root,
                                 str(archived["object_relpath"]),
                             )
-                            lines.append(f"  - 本地归档：{_file_url(object_path)}")
-                    if item.get("month_dir"):
-                        lines.append(f"  - 月份目录：{_file_url(item['month_dir'])}")
+                    lines.append(
+                        _resource_mention_line(
+                            item["name"],
+                            details,
+                            status=str(archived["status"]) if archived is not None else "",
+                            month_segment=self._month_segment(
+                                item.get("month_dir"),
+                                archived["source_month"] if archived is not None else "",
+                            ),
+                            object_path=object_path,
+                        )
+                    )
             listed_names = {
                 str(item.get("name") or "").strip().lower()
                 for item in files
@@ -2010,15 +2035,22 @@ class KnowledgeStore:
                         )
                         if value
                     )
-                    lines.append(f"- {label}" + (f"（{details}）" if details else ""))
-                    lines.append(f"  - 归档状态：{_row_get(mention, 'status', 'unknown')}")
                     object_relpath = str(_row_get(mention, "object_relpath", "") or "")
-                    if object_relpath:
-                        object_path = os.path.join(self.attachment_archive_root, object_relpath)
-                        lines.append(f"  - 本地归档：{_file_url(object_path)}")
-                    source_month = str(_row_get(mention, "source_month", "") or "")
-                    if source_month:
-                        lines.append(f"  - 来源月份：{source_month}")
+                    lines.append(
+                        _resource_mention_line(
+                            label,
+                            details,
+                            status=str(_row_get(mention, "status", "unknown") or "unknown"),
+                            month_segment=self._month_segment(
+                                "", str(_row_get(mention, "source_month", "") or "")
+                            ),
+                            object_path=(
+                                os.path.join(self.attachment_archive_root, object_relpath)
+                                if object_relpath
+                                else ""
+                            ),
+                        )
+                    )
 
         relation_lines = []
         for rel in relations:
@@ -2120,6 +2152,21 @@ class KnowledgeStore:
             remainder = parts[len(subdir_parts):]
             if remainder:
                 return remainder[0]
+        return ""
+
+    def _month_segment(self, month_dir, source_month):
+        """Compact trailing segment for the former 月份目录 / 来源月份 bullets.
+
+        Prefer the archived WeChat month directory as an inline ``file://``
+        link (as the old bullet did); otherwise fall back to the bare source
+        month string so no month information is lost.
+        """
+        month_dir = str(month_dir or "").strip()
+        if month_dir:
+            return f"月份目录： [file://…]({_file_url(month_dir)})"
+        source_month = str(source_month or "").strip()
+        if source_month:
+            return f"来源月份 {source_month}"
         return ""
 
     def _topic_dict(self, row, score=None):

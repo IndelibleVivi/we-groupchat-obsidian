@@ -68,7 +68,8 @@ Digest 直接放在 `Daily Digest/`，更早月份归档到 `Daily Digest/YYYY-M
 
 **`[文件]` 笔记**：记录文件名、消息时间、发送者线索和 archive resolution state。
 显式开启的本地 archive 成功定位唯一 bytes 后，笔记会链接到私有 content-addressed object；
-否则仍可提供对应微信月份目录的 hint。附件 bytes 不会复制进 vault 本身。
+否则仍可提供对应微信月份目录的 hint。附件 bytes 不会复制进 vault 本身。每个文件或
+附件提及（含时间/发送者、归档状态、object 链接与月份 hint）都渲染为单条紧凑 bullet。
 
 ## 一次实际 DeepSeek API 用量参考
 

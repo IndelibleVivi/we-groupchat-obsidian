@@ -82,7 +82,8 @@ original material.
 resolution state. When the opt-in local archive resolves unique bytes, the note
 links to that private content-addressed object; otherwise it can still provide
 the matching WeChat month-folder hint. Attachment bytes are not copied into the
-vault itself.
+vault itself. Each file or attachment mention (and its time/sender, archive
+state, object link, and month hint) renders as a single compact bullet.
 
 ## One real DeepSeek API usage sample
 

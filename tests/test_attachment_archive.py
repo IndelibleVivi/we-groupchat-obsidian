@@ -226,6 +226,9 @@ class AttachmentArchiveTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def resource_body(self, markdown):
+        return markdown.split("## 资源", 1)[-1]
+
     def test_exact_file_archives_private_object_and_updates_markdown(self):
         data = b"canonical attachment bytes"
         digest = hashlib.sha256(data).hexdigest()
@@ -249,8 +252,22 @@ class AttachmentArchiveTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(object_path).st_mode), 0o600)
         with open(result["knowledge_path"], encoding="utf-8") as note:
             markdown = note.read()
-        self.assertIn("归档状态：original_archived", markdown)
-        self.assertIn("本地归档：file://", markdown)
+        archived_line = next(
+            line
+            for line in markdown.splitlines()
+            if line.startswith("- ") and "source reliability.txt" in line
+        )
+        self.assertTrue(archived_line.startswith("- "))
+        self.assertIn("归档状态 original_archived", archived_line)
+        self.assertIn("[本地归档](file://", archived_line)
+        self.assertFalse(
+            any(
+                line.startswith("  - ")
+                for line in self.resource_body(markdown).splitlines()
+            )
+        )
+        self.assertNotIn("  - 归档状态", markdown)
+        self.assertNotIn("  - 本地归档", markdown)
 
     def test_cjk_object_name_stays_within_filesystem_byte_limit(self):
         name = "猫" * 80 + ".pdf"
@@ -360,8 +377,23 @@ class AttachmentArchiveTests(unittest.TestCase):
             markdown = note.read()
         self.assertIn("### 附件归档", markdown)
         self.assertIn("图片附件", markdown)
-        self.assertIn("归档状态：original_archived", markdown)
-        self.assertIn("来源月份：2026-05", markdown)
+        image_line = next(
+            line
+            for line in markdown.splitlines()
+            if line.startswith("- ") and "图片附件" in line
+        )
+        self.assertTrue(image_line.startswith("- "))
+        self.assertIn("归档状态 original_archived", image_line)
+        self.assertIn("[本地归档](file://", image_line)
+        self.assertIn("来源月份 2026-05", image_line)
+        self.assertFalse(
+            any(
+                line.startswith("  - ")
+                for line in self.resource_body(markdown).splitlines()
+            )
+        )
+        self.assertNotIn("  - 归档状态", markdown)
+        self.assertNotIn("  - 来源月份", markdown)
 
         thumb_hash = "b" * 32
         self.add_image_mention(thumb_hash, topic_key="image-thumb")

@@ -2474,6 +2474,24 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.assertIn("### 文件", md)
         self.assertIn("test workflow.zip", md)
         self.assertIn("file://" + file_dir.replace(" ", "%20"), md)
+        # Compact contract: one bullet carries every mention detail, and the
+        # month-directory hint stays reachable as an inline link on that bullet.
+        file_line = next(line for line in md.splitlines() if "test workflow.zip" in line)
+        self.assertTrue(file_line.startswith("- "))
+        self.assertIn("test workflow.zip", file_line)
+        self.assertIn("2026-05-29 03:16", file_line)
+        self.assertIn("示例成员甲", file_line)
+        self.assertIn(
+            "(file://" + file_dir.replace(" ", "%20") + ")", file_line
+        )
+        resource_body = md.split("## 资源", 1)[-1]
+        self.assertFalse(
+            any(line.startswith("  - ") for line in resource_body.splitlines())
+        )
+        self.assertNotIn("  - 归档状态", md)
+        self.assertNotIn("  - 本地归档", md)
+        self.assertNotIn("  - 月份目录", md)
+        self.assertNotIn("  - 来源月份", md)
 
     def test_attachment_mention_is_registered_with_event_transaction(self):
         messages = [
@@ -2513,7 +2531,10 @@ class KnowledgeStoreTests(unittest.TestCase):
 
         with open(result["knowledge_path"], encoding="utf-8") as f:
             md = f.read()
-        self.assertIn("归档状态：pending", md)
+        pending_line = next(line for line in md.splitlines() if "source reliability.pdf" in line)
+        self.assertTrue(pending_line.startswith("- "))
+        self.assertIn("归档状态 pending", pending_line)
+        self.assertNotIn("  - 归档状态", md)
 
     def test_attachment_registration_failure_rolls_back_event_and_topic(self):
         messages = [
@@ -2568,8 +2589,17 @@ class KnowledgeStoreTests(unittest.TestCase):
 
         with open(result["knowledge_path"], encoding="utf-8") as file:
             markdown = file.read()
-        self.assertIn("图片附件（2026-05-29 03:18 · 蛋）", markdown)
-        self.assertIn("归档状态：pending", markdown)
+        image_line = next(
+            line
+            for line in markdown.splitlines()
+            if line.startswith("- ") and "图片附件" in line
+        )
+        self.assertTrue(image_line.startswith("- "))
+        self.assertIn("图片附件（2026-05-29 03:18 · 蛋）", image_line)
+        self.assertIn("归档状态 pending", image_line)
+        self.assertIn("来源月份 2026-05", image_line)
+        self.assertNotIn("  - 归档状态", markdown)
+        self.assertNotIn("  - 来源月份", markdown)
 
     def test_clean_filename_collision_uses_compact_month_day(self):
         first = self.store.apply_event(
