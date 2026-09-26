@@ -323,7 +323,7 @@ def _ledger_review(path, profile):
         conn.close()
 
 
-def adoption_plan(profile, *, ledger, objects, inventory=None, output):
+def adoption_plan(profile, *, ledger, objects, inventory=None, output, wait_seconds=0):
     """Freeze only explicitly named local inputs, never app config or source DBs."""
     ledger, objects, output = _absolute(ledger), _absolute(objects), _absolute(output)
     if os.path.lexists(profile.state_dir):
@@ -337,10 +337,11 @@ def adoption_plan(profile, *, ledger, objects, inventory=None, output):
         original = os.path.realpath(original)
         if os.path.commonpath((destination, original)) in {destination, original}:
             raise ProducerError("adoption_paths_overlap")
-    os.makedirs(os.path.dirname(output), mode=0o700, exist_ok=True)
-    stage = tempfile.mkdtemp(prefix=".adoption-", dir=os.path.dirname(output))
+    stage = ""
     try:
-        with resource_capture_operation_lock({"resource_capture_db": ledger}):
+        with resource_capture_operation_lock({"resource_capture_db": ledger}, timeout=wait_seconds):
+            os.makedirs(os.path.dirname(output), mode=0o700, exist_ok=True)
+            stage = tempfile.mkdtemp(prefix=".adoption-", dir=os.path.dirname(output))
             source = sqlite3.connect(f"file:{quote(ledger)}?mode=ro", uri=True)
             destination = sqlite3.connect(os.path.join(stage, "capture.db"))
             try:

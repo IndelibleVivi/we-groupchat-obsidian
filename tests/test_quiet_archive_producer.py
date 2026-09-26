@@ -7,13 +7,16 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing, redirect_stdout
 from unittest.mock import patch
 
 from core.quiet_archive_producer import PROFILE_SCHEMA, ProducerProfile, ProducerError
 from core.quiet_archive_handoff import QuietArchiveHandoff
-from core.resource_capture import resource_capture_operation_lock
+from core.resource_capture import ResourceCaptureError, resource_capture_operation_lock
 from core.source_adapter import SourceUnavailableError
 from scripts import quiet_archive_handoff as cli
 from tests.test_quiet_archive_handoff import message
@@ -313,13 +316,81 @@ class StandaloneProducerTests(unittest.TestCase):
     def test_adoption_respects_existing_capture_owner(self):
         old = self.adoption_fixture()
         plan = self.root / "adoption.json"
-        with resource_capture_operation_lock(old.config()):
+        with (resource_capture_operation_lock(old.config()),
+              patch("core.resource_capture.time.sleep", side_effect=AssertionError("default must not wait"))):
             code, result = self.run_cli("adopt-plan", "--from-ledger", old.paths()["ledger"],
                                         "--from-objects", old.paths()["objects"],
                                         "--from-inventory", old.paths()["inventory"], "--output", str(plan))
         self.assertEqual((code, result["error_code"]), (2, "capture_worker_busy"))
         self.assertFalse(plan.exists())
         self.assertFalse(Path(str(plan) + ".payload").exists())
+
+    def test_adoption_waits_and_freezes_under_the_same_capture_lock(self):
+        from core import quiet_archive_producer as producer
+        old = self.adoption_fixture()
+        plan = self.root / "adoption.json"
+        owned, release = threading.Event(), threading.Event()
+        def hold_lock():
+            with resource_capture_operation_lock(old.config()):
+                owned.set()
+                self.assertTrue(release.wait(5))
+        sleep = time.sleep
+        review = producer._ledger_review
+        def release_while_waiting(seconds):
+            release.set()
+            sleep(seconds)
+        def review_while_owned(*args):
+            with self.assertRaisesRegex(ResourceCaptureError, "capture_worker_busy"):
+                with resource_capture_operation_lock(old.config()):
+                    self.fail("freeze released capture ownership")
+            return review(*args)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            holder = pool.submit(hold_lock)
+            try:
+                self.assertTrue(owned.wait(5))
+                with (patch("core.resource_capture.time.sleep", side_effect=release_while_waiting) as waiting,
+                      patch.object(producer, "_ledger_review", side_effect=review_while_owned),
+                      patch.object(ProducerProfile, "source", side_effect=AssertionError("source read"))):
+                    code, result = self.run_cli("adopt-plan", "--from-ledger", old.paths()["ledger"],
+                                               "--from-objects", old.paths()["objects"],
+                                               "--from-inventory", old.paths()["inventory"],
+                                               "--output", str(plan), "--wait-seconds", "2")
+                self.assertGreater(waiting.call_count, 0)
+            finally:
+                release.set()
+            holder.result(timeout=5)
+        self.assertEqual((code, result["state"]), (0, "planned"))
+        self.assertTrue(plan.is_file())
+        self.assertTrue(Path(str(plan) + ".payload/capture.db").is_file())
+        self.assertFalse(Path(self.profile.state_dir).exists())
+        with resource_capture_operation_lock(old.config()):
+            pass
+
+    def test_adoption_wait_timeout_creates_no_candidate_or_state(self):
+        old = self.adoption_fixture()
+        plan = self.root / "timeout/adoption.json"
+        with resource_capture_operation_lock(old.config()):
+            started = time.monotonic()
+            code, result = self.run_cli("adopt-plan", "--from-ledger", old.paths()["ledger"],
+                                       "--from-objects", old.paths()["objects"],
+                                       "--from-inventory", old.paths()["inventory"],
+                                       "--output", str(plan), "--wait-seconds", "0.08")
+            self.assertGreaterEqual(time.monotonic() - started, 0.08)
+        self.assertEqual((code, result["error_code"]), (2, "capture_worker_busy"))
+        self.assertFalse(plan.parent.exists())
+        self.assertFalse(Path(self.profile.state_dir).exists())
+
+    def test_adoption_wait_budget_is_finite_nonnegative_and_bounded(self):
+        old = self.adoption_fixture()
+        plan = self.root / "invalid/adoption.json"
+        for budget in ("-1", "nan", "inf", "301"):
+            with self.subTest(budget=budget):
+                code, result = self.run_cli("adopt-plan", "--from-ledger", old.paths()["ledger"],
+                                           "--from-objects", old.paths()["objects"],
+                                           "--output", str(plan), "--wait-seconds", budget)
+                self.assertEqual((code, result["error_code"]), (2, "invalid_capture_lock_timeout"))
+                self.assertFalse(plan.parent.exists())
+                self.assertFalse(Path(self.profile.state_dir).exists())
 
     def test_adoption_requires_exact_selection_and_durable_inventory(self):
         old = self.adoption_fixture()

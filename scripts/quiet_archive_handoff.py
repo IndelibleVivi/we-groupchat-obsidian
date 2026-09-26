@@ -51,6 +51,8 @@ def build_parser():
     adopt.add_argument("--from-objects", required=True)
     adopt.add_argument("--from-inventory")
     adopt.add_argument("--output", required=True)
+    adopt.add_argument("--wait-seconds", type=float, default=0,
+                       help="Wait up to 0–300 seconds for capture ownership before freezing the plan.")
     apply = sub.add_parser("adopt-apply")
     apply.add_argument("--plan", required=True)
     resolve = sub.add_parser("resolve-files")
@@ -160,7 +162,8 @@ def _standalone(args):
         return profile.initialize(), 0
     if args.command == "adopt-plan":
         return adoption_plan(profile, ledger=args.from_ledger, objects=args.from_objects,
-                             inventory=args.from_inventory, output=args.output), 0
+                             inventory=args.from_inventory, output=args.output,
+                             wait_seconds=args.wait_seconds), 0
     if args.command == "adopt-apply":
         return adoption_apply(profile, args.plan), 0
     if args.command == "status" and not profile.marker():

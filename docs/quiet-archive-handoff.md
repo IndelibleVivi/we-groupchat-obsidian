@@ -306,6 +306,7 @@ the live WeChat source, key file or WGO app config:
   --from-ledger "<absolute-capture-ledger>" \
   --from-objects "<absolute-attachment-archive-root>" \
   --from-inventory "<absolute-source-inventory.json>" \
+  --wait-seconds 120 \
   --output "<absolute-new-adoption-plan.json>"
 # Review the private plan, counts, archive_id and exact selection first.
 .venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" adopt-apply \
@@ -321,6 +322,18 @@ backup receipts. Only referenced object bytes are carried; unrelated objects in
 the shared source CAS and derived decrypted caches stay at the source. The source
 ledger rows and original bytes are never modified. A lock file beside the source
 ledger may be opened/created for serialization.
+
+`--wait-seconds` accepts a finite number from 0 through 300; its default is 0
+(immediate busy). When another capture operation owns the ledger, a positive
+budget waits inside the same canonical lock acquisition. Once acquired, the
+process keeps that descriptor and ownership through the SQLite/CAS freeze;
+there is no separate wait-release-restart step. This budget covers acquiring
+the lock, not copying the archive. Expiry returns `capture_worker_busy` with
+no plan, payload candidate or initialized state. Retry the same command later,
+or choose another explicit budget within the limit. Do not remove the lock file
+or force another owner to release it. Invalid budgets return
+`invalid_capture_lock_timeout`. Other capture callers retain immediate-busy
+behavior; this option neither reads WeChat nor changes its running app.
 
 Profile usernames, `selection_id` and `selected_since` must match the last scan's
 selection; if there is no recorded selection, they must match the ledger's chat

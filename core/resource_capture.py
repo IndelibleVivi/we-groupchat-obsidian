@@ -45,6 +45,7 @@ from .source_adapter import (
 SCHEMA_VERSION = 4
 BACKFILL_PAGE_SIZE = 1_000
 BACKFILL_RUN_TTL_SECONDS = 24 * 60 * 60
+MAX_CAPTURE_LOCK_WAIT_SECONDS = 300
 LINK_ID_DOMAIN = b"we-groupchat-resource-link-v1\0"
 CHAT_ID_DOMAIN = "we-groupchat-resource-chat-v1\0"
 RETRYABLE_FILE_STATES = (
@@ -75,13 +76,18 @@ def resource_capture_db_path(config):
 
 
 @contextmanager
-def resource_capture_operation_lock(config):
+def resource_capture_operation_lock(config, *, timeout=0):
     """Serialize capture operations and selected-chat config mutations.
 
     The lock order is always capture operation lock -> config store lock.  UI
     and CLI selection writers use this surface before patching config, while a
     capture worker reloads canonical config only after acquiring the same lock.
+    Default callers fail immediately when busy. An explicit bounded timeout
+    keeps this same descriptor open while waiting and throughout the operation.
     """
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not 0 <= timeout <= MAX_CAPTURE_LOCK_WAIT_SECONDS):
+        raise ResourceCaptureError("invalid_capture_lock_timeout")
     db_path = _capture_db_path(config)
     os.makedirs(os.path.dirname(db_path), mode=0o700, exist_ok=True)
     lock_path = db_path + ".capture.lock"
@@ -91,12 +97,20 @@ def resource_capture_operation_lock(config):
             os.fchmod(fd, 0o600)
         except OSError:
             pass
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
-                raise ResourceCaptureError("capture_worker_busy") from exc
-            raise
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ResourceCaptureError("capture_worker_busy") from exc
+                time.sleep(min(0.05, remaining))
+                if time.monotonic() >= deadline:
+                    raise ResourceCaptureError("capture_worker_busy") from exc
         yield
     finally:
         try:
