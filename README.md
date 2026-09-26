@@ -29,7 +29,7 @@ This is not official WeChat/Tencent software, not a WeChat bot, not employee-mon
 
 Project lineage: this standalone derivative builds on [Qizhan7/mac-wechat-summary](https://github.com/Qizhan7/mac-wechat-summary), which established the local macOS menu-bar summary and MCP foundation. This repository is not connected through GitHub's fork network and is not maintained as an upstream pull-request branch; it continues as a separate local-first Obsidian workflow project. See [NOTICE.md](NOTICE.md).
 
-[完整中文版 README](README.zh-CN.md)
+[完整中文版 README](README.zh-CN.md) · [Documentation and history](docs/README.md)
 
 An optional [private Quiet Archive handoff](docs/quiet-archive-handoff.md) exports
 selected resources plus complete visible message context as local JSON/CAS
@@ -382,23 +382,23 @@ your API key.
 
 ### Documentation map
 
-- `README.md` / `README.zh-CN.md`: current user, operator, privacy, and project
-  overview authority.
-- `CONTRIBUTING.md`: repository contribution, exact-head review, verification,
-  and public evidence entrypoint. Windows sequencing stays in
-  `docs/WINDOWS-DEVELOPMENT.md`; module status stays in
-  `docs/WINDOWS-PORT-MAP.md`.
-- `docs/share-package-guide.zh-CN.md`: the sole tracked offline-guide template.
-  The exact-commit source-package builder emits it as `群友使用说明.md`; there
-  are no competing root-level quick-start manuals.
-- `docs/source-reliability*.md`: detailed source guard, archive, mounted backup,
-  Drive, backup, and rollout contract.
-- `docs/reliability-closure.md`: shared signature/outcome interpretation,
-  credential redaction, sticky receipt failures, and source acceptance limits.
-- `docs/recovery-acceptance.md`: recovery hardening, migration boundaries, and
-  source/installed/live acceptance status.
-- `docs/resource-capture-and-mounted-backup-spec.md`: formal resource occurrence,
-  selection, projection, handoff, status, and failure semantics.
+Use the [documentation and history index](docs/README.md) to distinguish current
+contracts, retained compatibility paths and dated acceptance evidence.
+
+- [Source reliability](docs/source-reliability.md) / [中文版](docs/source-reliability.zh-CN.md):
+  detailed source, archive, mounted backup, Direct Drive and rollout procedures.
+- [Resource specification](docs/resource-capture-and-mounted-backup-spec.md):
+  occurrence, selection, projection, handoff, coverage and failure semantics.
+- [Recovery acceptance](docs/recovery-acceptance.md) and
+  [reliability closure](docs/reliability-closure.md): maintained recovery/failure
+  contracts, with historical canaries and authoring limits explicitly scoped.
+- [Quiet Archive handoff](docs/quiet-archive-handoff.md): private local machine
+  export, optional visible-message retention and its separate coverage contract.
+- [CONTRIBUTING](CONTRIBUTING.md) and [AGENTS](AGENTS.md): contribution and source
+  ownership; [Windows development](docs/WINDOWS-DEVELOPMENT.md) owns sequencing,
+  while the [port map](docs/WINDOWS-PORT-MAP.md) owns module status.
+- [Offline-guide template](docs/share-package-guide.zh-CN.md): the exact-commit
+  builder's sole source for `群友使用说明.md`.
 
 ### Monitor decision acceptance and pending work
 
@@ -587,8 +587,8 @@ Each run also maintains a discoverable Obsidian entrypoint at
 `<monitor_obsidian_subdir>/00-资源索引.md`. It links to each selected chat's own
 `00-资源索引.md` and monthly pages. Monthly pages are deliberately light: day,
 time, and a clickable link/file only. An observed WeChat link title is used when
-available; otherwise the full exact URL is the visible label. Sender, hashes,
-source-message identity, and handoff details remain in private catalogs instead
+available; otherwise the canonical credential-redacted URL is the visible label.
+Sender, hashes, source-message identity, and handoff details remain in private catalogs instead
 of the reading surface. These are generated, app-owned Markdown files
 even when their names do not contain `.generated`; that suffix is used only when
 the preferred filename already belongs to the user and must not be overwritten.
@@ -621,49 +621,13 @@ only; explicit `verify` remains the full target-byte audit.
 
 ### Guarded exact relation Markdown cleanup
 
-This one-time repair is manifest-bound and has no implicit config lookup. Use
-only a stopped, explicitly reviewed current database and vault root. The
-verified pre-repair provenance backup is shown below; every other path must be
-supplied explicitly:
+This retained repair is bound to one historical incident's verified backup and
+exact provenance profile. It is not an ordinary maintenance step and does not
+accept an arbitrary backup. Its applicability, preview/apply/rollback commands
+and recovery boundaries are preserved in the
+[historical relation repair guide](docs/legacy-relation-repair.md).
 
-```bash
-.venv/bin/python scripts/repair_relation_markdown.py preview \
-  --backup "/private/tmp/we-groupchat-monitor_knowledge-before-exact-relation-repair-2026-07-10.db" \
-  --db "<stopped-current-monitor_knowledge.db>" \
-  --vault-root "<monitored-vault-root>" \
-  --obsidian-subdir "关注推送" \
-  --run-dir "<new-private-run-directory>" \
-  --generator-commit "<reviewed-generator-commit>" \
-  --json
-
-.venv/bin/python scripts/repair_relation_markdown.py status \
-  --run-dir "<private-run-directory>" \
-  --json
-
-.venv/bin/python scripts/repair_relation_markdown.py apply \
-  --run-dir "<private-run-directory>" \
-  --manifest-sha256 "<full-manifest-sha256>" \
-  --confirm "APPLY_EXACT_RELATION_MARKDOWN:<full-manifest-sha256>" \
-  --json
-
-.venv/bin/python scripts/repair_relation_markdown.py rollback \
-  --run-dir "<private-run-directory>" \
-  --manifest-sha256 "<full-manifest-sha256>" \
-  --confirm "ROLLBACK_EXACT_RELATION_MARKDOWN:<full-manifest-sha256>" \
-  --json
-```
-
-`preview` writes only a private sealed run artifact; treat that artifact as
-sensitive because its manifest contains local paths and titles. Default CLI
-output is redacted. `--sensitive` exposes only bounded path/title examples
-(five by default, hard maximum 20), never note bodies, reasons, or rendered
-relation lines.
-
-`apply` is Markdown-only and exact-line-only. It does not re-export notes,
-repair SQLite, or invoke any external vault writer. A live apply window requires
-the we-groupchat LaunchAgent to be stopped and every external vault writer to
-remain idle for the entire operation. Do not broaden this workflow into a general
-`updates::` search-and-delete.
+### Notifications and autostart
 
 Use `关注推送 -> 后台通知：开/关` to mute or enable automatic banners. Turning
 them off does not stop monitoring, knowledge writes, or Daily Digest generation;
@@ -733,7 +697,7 @@ Catch-up uses a page-level partial-commit contract. Every `--apply` invocation w
 
 - `complete / drained`: every selected chat reached `no_messages` with `source_eof=true` under an unchanged complete inventory, projections and canonical validation passed, and the final receipt proves that a previously loaded LaunchAgent was restored after lock release (or that none was loaded).
 - `partial / drain_complete_restore_pending`: canonical drain and validation completed, but the durable receipt is still provisional and does not yet prove LaunchAgent restoration. This can remain after interruption between lock release and finalization; it is never terminal success.
-- `partial / launch_agent_restore_failed`: canonical work may already be committed, but restoration was attempted and failed. The final receipt records that failure and the command exits nonzero; inspect or repair the runtime before treating catch-up as closed.
+- `partial / launch_agent_restore_failed` or `failed / launch_agent_restore_failed`: restoration was attempted and failed; the state depends on the canonical work completed. The final receipt records that failure and the command exits nonzero; inspect or repair the runtime before treating catch-up as closed.
 - `partial / resume_required`: at least one page or managed projection committed, but a chat was blocked or a later operation failed. When `resume_supported` is `true`, rerun the same command with both `--allow-transient-wechat-source-read` and `--apply`; each chat continues from its committed checkpoint.
 - `failed / no_progress`: no monitor page committed. Inspect the receipt's error type/status and runtime state before retrying.
 - `failed / menu_app_active`: another menu app still owns the singleton lock. No backup, monitor, database, or projection write occurred; close that instance deliberately before retrying maintenance.
@@ -881,6 +845,12 @@ future `src/we_groupchat_obsidian/` migration becomes worthwhile when these
 surfaces target installed executables and a standalone bundle instead.
 
 ## Development
+
+The complete regression suite needs both `requirements.txt` and the optional
+`requirements-mcp.txt`. A base-only run can skip MCP protocol tests and is not
+complete compatibility verification. See [AGENTS](AGENTS.md#verification-and-deployment)
+for the platform-specific gates; installing the optional test dependency does
+not enable or start the MCP server.
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -t . -p 'test_*.py'

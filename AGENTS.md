@@ -298,6 +298,14 @@ closed on a verified active branch, label both facts explicitly.
 
 ## Documentation triggers
 
+`docs/README.md` routes readers to current contracts, intentional compatibility
+and historical evidence; it does not own a second implementation or live-state
+register. Keep its links and lifecycle descriptions aligned when those roles
+change. `docs/legacy-relation-repair.md` owns the retained incident-specific
+Markdown repair procedure; do not present its fixed provenance profile as a
+general maintenance command. Dated acceptance records must retain their exact
+source/evidence scope rather than becoming current deployment or backlog claims.
+
 Update README EN/ZH when entrypoints, supported behavior, privacy boundaries,
 installation, repository layout or ordinary commands change. Update operator
 guides for changed procedures and this file when source ownership, required

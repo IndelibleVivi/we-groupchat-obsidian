@@ -1,8 +1,14 @@
 # Resource Capture & Mounted Backup Specification
 
-- Status: draft 0.4
-- Target release: resource backup v3
+- Status: maintained source contract; originated as draft 0.4
+- Format: resource backup v3 (mounted snapshot format, not the application release version)
 - Applies to: selected-chat links, selected-chat file occurrences, shared local CAS objects, Obsidian resource indexes, and mounted-filesystem handoff
+
+The selected-resource lane is implemented. This document preserves its design
+rationale and specifies the current contract; explicitly future integrations
+remain proposals. The rollout and acceptance sections describe procedures and
+criteria, not evidence that a particular installation passed them. Operator
+commands are also covered by [source reliability](source-reliability.md).
 
 ## 1. Decision summary
 
@@ -23,14 +29,14 @@ A local CAS object may be shared by eligible and ineligible occurrences. The obj
 
 ## 2. Problem
 
-The repository already has four useful but separate capabilities:
+Before resource backup v3, the repository had four useful but separate capabilities:
 
 - monitor-selected knowledge notes with specialized link/file rendering;
 - stable WeChat source message identities and structured file metadata;
 - a shared local content-addressed attachment archive;
 - filesystem snapshots and a direct Google Drive API adapter.
 
-The missing contract is a deterministic selected-chat resource lane. Existing topic `links_json` is curated, AI-dependent, and limited to monitor hits. It cannot serve as the complete source of link backup. Existing generic attachment snapshots can see more local CAS objects than the user intends to disclose. Existing direct Drive sync mixes source capture with one transport.
+The missing contract was a deterministic selected-chat resource lane. Topic `links_json` is curated, AI-dependent, and limited to monitor hits; it cannot serve as the complete source of link backup. Generic attachment snapshots can see more local CAS objects than the user intends to disclose. Direct Drive sync has its own source scanner and transport. The v3 lane below addresses that selection and capture boundary without replacing those capabilities.
 
 Resource backup v3 separates these responsibilities:
 
@@ -64,7 +70,7 @@ The implementation must:
 
 ## 4. Non-goals
 
-The first release does not:
+This lane does not:
 
 - infer semantic relationships between a link and a file merely because they appeared together;
 - crawl, download, summarize, or validate every link target;
@@ -160,8 +166,8 @@ If a shard is unavailable, unknown, incomplete, or raises a source-degraded erro
 The first initialization and every unselected-to-selected transition use `from now` semantics. Historical capture is an identity-bound staged plan/apply action:
 
 ```bash
-python scripts/resource_backup.py backfill --from YYYY-MM-DD
-python scripts/resource_backup.py backfill --from YYYY-MM-DD --apply --run-id <run-id-from-plan>
+.venv/bin/python scripts/resource_backup.py backfill --from YYYY-MM-DD
+.venv/bin/python scripts/resource_backup.py backfill --from YYYY-MM-DD --apply --run-id <run-id-from-plan>
 ```
 
 Planning freezes the selection/source manifest and writes 500-2,000-row keyset
@@ -505,7 +511,7 @@ and its `link_export_mode`, handoff semantics, and `source_observation` match th
 current run. A missing/invalid snapshot or changed source evidence is rebuilt
 even when local SQLite still holds the old catalog hash.
 
-## 13. Link privacy modes
+### 12.1 Quiet Archive extension
 
 The optional [Quiet Archive local handoff](quiet-archive-handoff.md) reuses this
 v3 resource/object structure and the canonical capture ledger. It adds hashed
@@ -514,6 +520,8 @@ v3 resource/object structure and the canonical capture ledger. It adds hashed
 destination purpose, and runs no Markdown/Drive projection. Full visible-message
 retention defaults off. Its raw EOF, selected source scope, legacy context gaps
 and attachment coverage do not change the existing mounted snapshot semantics.
+
+## 13. Link privacy modes
 
 The mounted export supports:
 
@@ -566,14 +574,16 @@ must report `link_preview_disabled` with `network_requests=0`; a legacy
 ## 15. Compatibility
 
 The direct Google Drive API implementation remains intact and optional. It owns
-its existing OAuth-specific selection and may later consume the same
-provider-neutral occurrence ledger instead of maintaining its own source scanner.
+its existing OAuth-specific selection and source scanner. Sharing the
+provider-neutral occurrence ledger with that scanner is a possible future
+integration, not current behavior.
 
 Attachment backup v2 snapshots retain their existing interpretation. Resource backup v3 uses a new schema and subtree and does not mutate v2 artifacts in place.
 
 ## 16. Rollout
 
-The first live rollout is bounded:
+For a new installation, use a separately authorized bounded canary. This is an
+acceptance procedure, not a record of a completed deployment:
 
 1. create the resource capture DB;
 2. initialize selected chats from now;
@@ -593,21 +603,21 @@ The first live rollout is bounded:
 The intended operator sequence is:
 
 ```bash
-python scripts/resource_backup.py list-chats
-python scripts/resource_backup.py set-selected-chats 1
-python scripts/resource_backup.py set-target "/path/chosen/in/Finder"
-python scripts/resource_backup.py set-link-export-mode redacted
-python scripts/resource_backup.py init
-python scripts/resource_backup.py backfill-links --all
-python scripts/resource_backup.py backfill-links --all --apply --run-id <run-id-from-plan>
-python scripts/resource_backup.py backfill --all
-python scripts/resource_backup.py backfill --all --apply --run-id <run-id-from-plan>
-python scripts/resource_backup.py backfill --from YYYY-MM-DD
-python scripts/resource_backup.py backfill --from YYYY-MM-DD --apply --run-id <run-id-from-plan>
-python scripts/resource_backup.py run
-python scripts/resource_backup.py run --resolve-files --resolve-limit 10
-python scripts/resource_backup.py verify
-python scripts/resource_backup.py enable
+.venv/bin/python scripts/resource_backup.py list-chats
+.venv/bin/python scripts/resource_backup.py set-selected-chats 1
+.venv/bin/python scripts/resource_backup.py set-target "<existing-mounted-directory>"
+.venv/bin/python scripts/resource_backup.py set-link-export-mode redacted
+.venv/bin/python scripts/resource_backup.py init
+.venv/bin/python scripts/resource_backup.py backfill-links --all
+.venv/bin/python scripts/resource_backup.py backfill-links --all --apply --run-id <run-id-from-plan>
+.venv/bin/python scripts/resource_backup.py backfill --all
+.venv/bin/python scripts/resource_backup.py backfill --all --apply --run-id <run-id-from-plan>
+.venv/bin/python scripts/resource_backup.py backfill --from YYYY-MM-DD
+.venv/bin/python scripts/resource_backup.py backfill --from YYYY-MM-DD --apply --run-id <run-id-from-plan>
+.venv/bin/python scripts/resource_backup.py run
+.venv/bin/python scripts/resource_backup.py run --resolve-files --resolve-limit 10
+.venv/bin/python scripts/resource_backup.py verify
+.venv/bin/python scripts/resource_backup.py enable
 ```
 
 `init` is from-now only. Re-selection also starts a new from-now epoch. Explicit

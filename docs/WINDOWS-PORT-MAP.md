@@ -12,7 +12,7 @@ W0.2A supplied native shared/exclusive file locks. W0.2B.1 supplied concrete
 path identities. **W0.2B.2** adds private storage and atomic publication and
 migrates only `ConfigStore`, `MonitorStateStore`, and `SourceInventoryStore`.
 The storage tranche was integrated in `fc0f301`; the credential tranche in
-`7f0bd9c`. W1.1 starts from that public main. These are source baselines,
+`7f0bd9c`; the W1.1 source seam in `4dcf07d`. These are source baselines,
 not installed/live or Windows feature-support claims.
 
 Windows identity remains local-NTFS-only. UNC is a syntax fixture; reparse
@@ -117,6 +117,11 @@ with the exact-build evidence in the [development guide](WINDOWS-DEVELOPMENT.md)
 
 ## Classification
 
+Phase labels below retain their original names. `deferred-w0.2` means that
+module's storage callers have not migrated; it does not mean the completed
+shared foundation is still waiting to be implemented. Classification changes
+require the owning phase's evidence, not a new label for an old import.
+
 - `windows-import-safe`: imports in a fresh Windows Python 3.11 process. This
   is an import claim only, not a Windows behavior or release-tier claim.
 - `deferred-w0.2`: blocked by direct or transitive POSIX lock, path migration,
@@ -153,8 +158,8 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/attachment_archive.py` | `deferred-w0.2` | Direct `fcntl` plus path/private-storage semantics; Windows bytes remain W5. |
 | `core/attachment_backup.py` | `deferred-w0.2` | Transitively imports attachment/config storage. |
 | `core/background_jobs.py` | `windows-import-safe` | Shared process-lifetime job coordination; behavior activation remains gated. |
-| `core/bookmark.py` | `deferred-w0.2` | Transitively imports ConfigStore/private storage. |
-| `core/chat_groups.py` | `deferred-w0.2` | Transitively imports ConfigStore/private storage. |
+| `core/bookmark.py` | `deferred-w0.2` | Bookmark JSON writes retain the existing config permission helpers; this storage caller has not migrated. |
+| `core/chat_groups.py` | `deferred-w0.2` | Group JSON writes retain the existing config permission helpers; this storage caller has not migrated. |
 | `core/config.py` | `windows-import-safe` | W0.2B.2 uses native private storage, path admission and atomic publication; config revision/sole-writer rules are unchanged. |
 | `core/daily_digest.py` | `deferred-w0.2` | Transitively imports config/knowledge storage; Windows activation is W3. |
 | `core/decryptor.py` | `windows-import-safe` | Shared crypto/WAL implementation; synthetic behavior fixtures expand in W1. |
@@ -189,7 +194,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/quiet_archive_handoff.py` | `deferred-w0.2` | Private local v3 context handoff using existing capture/backup POSIX storage and locks; not a Windows feature. |
 | `core/relation_audit.py` | `windows-import-safe` | Imports without platform services; filesystem behavior remains unclaimed. |
 | `core/relation_markdown_cleanup.py` | `deferred-w0.2` | Transitively imports knowledge/config storage. |
-| `core/resource_backup_launch_agent.py` | `macos-only` | Retired/current LaunchAgent compatibility surface. |
+| `core/resource_backup_launch_agent.py` | `macos-only` | Retired short-lived job inspection/removal; installation returns `long_lived_app_required`. |
 | `core/resource_backup.py` | `deferred-w0.2` | Direct `fcntl`, path identity, target lock, and atomic semantics; Windows is W5. |
 | `core/resource_capture.py` | `deferred-w0.2` | Direct `fcntl` and source/config dependencies; Windows is W4. |
 | `core/review_queue.py` | `deferred-w0.2` | Transitively imports ConfigStore/private storage; Windows activation is W3. |
@@ -230,24 +235,30 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 
 ## Staged cutover
 
-1. **W0.2A:** implement macOS/Windows file-lock backends and migrate only
+The completed source tranches are retained here to explain the ownership cut;
+they are not instructions to repeat that implementation:
+
+1. **W0.2A — integrated:** macOS/Windows file-lock backends migrated only
    `core/config.py`, `core/app_runtime.py`, `core/monitor_state.py`, and
    `core/source_inventory.py`. This phase is source portability, not product
    activation.
-2. **W0.2B.1:** provide concrete macOS/Windows path identities and prove path
+2. **W0.2B.1 — integrated:** concrete macOS/Windows path identities cover path
    alias, Unicode, long-path, missing-final, UNC-syntax, reserved-name, and
    reparse and held-ancestor boundaries without migrating existing callers.
-3. **W0.2B.2:** implement private storage and atomic publication; migrate only
+3. **W0.2B.2 — integrated:** private storage and atomic publication migrated only
    config, monitor checkpoints, and source inventory. Remaining storage owners
    retain their deferred classification and separate caller migrations.
-4. **W0.3:** native API/OAuth credential adapters and current consumers are wired.
+4. **W0.3 — integrated:** native API/OAuth credential adapters and current consumers are wired.
    Imported source-key records follow exact-build validation in W1.3. Notifications, target opening,
    tray behavior, packaging, and logon startup remain W6.
-5. **W1.1:** current Mac reader and consumers use the shared source seam.
-   **E1 / W1.2–W1.3:** collect real Windows evidence, implement one exact-build
-   probe/schema profile and a protected verified key provider/private cache.
-6. **W2–W6:** enable read-only source, knowledge, resources, backup, then tray,
-   packaging, and logon startup only after their separate live gates.
+5. **W1.1 — integrated:** current Mac reader and consumers use the shared source seam.
+
+The next Windows source phases are **E1 / W1.2–W1.3**: collect real Windows
+evidence, then implement an admitted exact-build probe/schema profile and a
+protected verified key provider/private cache. **W2–W6** enable read-only source,
+knowledge, resources, backup, then tray, packaging and logon startup only after
+their separate gates. Follow [Windows development](WINDOWS-DEVELOPMENT.md) for
+that sequence; the map does not authorize live source access.
 
 Direct `fcntl` ownership removed in W0.2A: `core/config.py`,
 `core/app_runtime.py`, `core/monitor_state.py`, and `core/source_inventory.py`.

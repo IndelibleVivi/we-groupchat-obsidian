@@ -24,6 +24,8 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 
 项目来源说明：本项目是基于 [Qizhan7/mac-wechat-summary](https://github.com/Qizhan7/mac-wechat-summary) 的 standalone derivative。原项目打下了 macOS 菜单栏总结、本地微信数据库读取和 MCP 访问的基础；这个仓库没有挂在 GitHub fork network 里，也不作为 upstream PR 分支维护，而是继续发展成一个独立的 local-first Obsidian workflow 项目。见 [NOTICE.md](NOTICE.md)。
 
+[文档与开发历史入口](docs/README.md) · [English README](README.md)
+
 可选的 [Quiet Archive 本机私有交接](docs/quiet-archive-handoff.md) 把明确选中来源的资源与完整可见消息正文
 输出为 JSON/CAS snapshot，不依赖 AI 笔记、Obsidian 或 Drive，保留既有备份。功能默认关闭；开启才允许
 普通扫描保存全部选中消息正文。raw EOF、历史 context 缺口和待补附件分别报告。专用 CLI 支持 configure、
@@ -314,20 +316,22 @@ Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 comm
 
 ### 文档地图
 
-- `README.md` / `README.zh-CN.md`：当前用户、operator、隐私和项目概览 authority。
-- `CONTRIBUTING.md`：仓库贡献、exact-head review、验证与 public evidence 入口；
-  Windows 阶段顺序仍由 `docs/WINDOWS-DEVELOPMENT.md` 负责，模块状态仍由
-  `docs/WINDOWS-PORT-MAP.md` 负责。
-- `docs/share-package-guide.zh-CN.md`：唯一 tracked offline-guide template；
-  exact-commit source-package builder 会把它生成为 `群友使用说明.md`，根目录不再保留
-  相互竞争的快速手册。
-- `docs/source-reliability*.md`：source guard、archive、mounted backup、Drive、
-  filesystem snapshot 和 safe rollout 的详细 contract。
-- `docs/reliability-closure.md`：签名与运行结果的共同判断、凭据脱敏、回执失败保留及验收边界。
-- `docs/recovery-acceptance.md`：恢复 hardening、migration boundary，以及
-  source / installed / live 验收状态。
-- `docs/resource-capture-and-mounted-backup-spec.md`：resource occurrence、selection、
-  projection、handoff、status 与 failure semantics 的 formal spec。
+[文档与开发历史入口](docs/README.md) 区分现行 contract、保留的 compatibility
+路径与有明确日期的验收证据，适合重新接手时从这里读起。
+
+- [Source reliability](docs/source-reliability.zh-CN.md) / [English](docs/source-reliability.md)：
+  source、archive、mounted backup、Direct Drive 与 rollout 的详细操作说明。
+- [Resource specification](docs/resource-capture-and-mounted-backup-spec.md)：
+  occurrence、selection、projection、handoff、coverage 与 failure semantics。
+- [恢复验收](docs/recovery-acceptance.md)与[可靠性收口](docs/reliability-closure.md)：
+  持续维护的恢复/失败 contract；历史 canary 与最初 authoring 限制单独标明范围。
+- [Quiet Archive handoff](docs/quiet-archive-handoff.md)：本机私有 machine export、
+  可选可见消息正文留存，以及独立的 coverage contract。
+- [CONTRIBUTING](CONTRIBUTING.md) 与 [AGENTS](AGENTS.md)：贡献与 source ownership；
+  [Windows 开发说明](docs/WINDOWS-DEVELOPMENT.md)负责阶段顺序，
+  [port map](docs/WINDOWS-PORT-MAP.md)负责模块状态。
+- [离线说明模板](docs/share-package-guide.zh-CN.md)：exact-commit builder 生成
+  `群友使用说明.md` 的唯一来源。
 
 ### 监控响应接受与待处理批次
 
@@ -499,10 +503,10 @@ mounted handoff、可选 Drive API、完整状态、resolver 规则、存储结�
 每轮 resource backup 还会维护一个容易发现的 Obsidian 总入口：
 `<monitor_obsidian_subdir>/00-资源索引.md`。它链接到每个显式选中群聊自己的
 `00-资源索引.md` 与月度页面。月度页面刻意保持轻量，只显示日期、时间和可点击的链接/文件：
-WeChat 有 observed title 时使用 title；没有 title 时直接把完整 exact URL 作为可见 label。
+WeChat 有 observed title 时使用 title；没有 title 时使用经过 canonical credential redaction 的 URL 作为可见 label。
 sender、hash、source-message identity 和 handoff 详情继续留在私有 catalog，不挤进阅读层。
 这些文件即使名字里没有 `.generated`，也仍然是
-app-owned generated Markdown；只有首选文件名已被猫手写内容占用、程序必须避免覆盖时，
+app-owned generated Markdown；只有首选文件名已被用户手写内容占用、程序必须避免覆盖时，
 才会退到 `00-资源索引.generated.md` 或月份 `.generated.md`。Projection writer 会在整个
 render/handoff 期间持有 canonical selected-chat authority，再按 output root 的 real path 取得私有
 root-identity lock；因此不同 capture DB 或不同 path alias 指向同一 root 时也会串行化。若 managed
@@ -523,6 +527,14 @@ App 与 CLI 共用这套 coverage classifier。为兼容现有 automation，`com
 严格；新增的 `operational_success`、`coverage_complete` 与 `coverage` 会把“本轮健康更新了索引，但仍有
 正常附件 backlog”和真实 source/projection/target failure 分开。普通 receipt-backed status 只读 metadata，
 显式 `verify` 才做完整 target-byte audit。
+
+### 历史 relation Markdown 精确修复
+
+这个保留的工具绑定一次历史事故的 verified backup 与固定 provenance profile，
+不是日常维护步骤，也不接受任意备份。适用条件、preview/apply/rollback 命令及恢复
+边界见[历史 relation 修复说明](docs/legacy-relation-repair.md)。
+
+### 通知与自启动
 
 菜单栏的 `关注推送 -> 后台通知：开/关` 是自动 banner 总开关。关闭后，
 后台监控、知识库写入和 Daily Digest 仍会继续运行，只是不再显示自动命中、
@@ -636,7 +648,7 @@ LaunchAgent，再获取 menu app 使用的同一把 singleton lock。若手动�
 durable provisional reconciliation receipt 写入；随后先 release lock，再恢复原本 loaded 的
 LaunchAgent，并以同一个 `run_id` atomic finalize receipt。只有恢复成功（或原本未 loaded）才可写成
 `complete / drained`；中断留下 `partial / drain_complete_restore_pending`，恢复失败则写成
-`partial / launch_agent_restore_failed` 并让命令以 nonzero 退出。Catch-up backup 仍只是 SQLite + per-chat checkpoint 的
+`partial` 或 `failed`（取决于 canonical work 完成情况），原因是 `launch_agent_restore_failed`，并让命令以 nonzero 退出。Catch-up backup 仍只是 SQLite + per-chat checkpoint 的
 partial-recovery evidence，不是完整 rollback bundle。
 
 ## Obsidian 输出
@@ -834,6 +846,11 @@ runtime 都使用绝对 checkout path。只有当这些表面改为 installed ex
 不依赖 source tree 的 standalone bundle 时，全面迁移到 `src/we_groupchat_obsidian/` 才真正值得。
 
 ## 开发与测试
+
+完整 regression suite 需要同时安装 `requirements.txt` 和可选的
+`requirements-mcp.txt`。仅 base dependencies 的运行可能跳过 MCP protocol tests，
+不能称为完整兼容验证。平台 gate 见 [AGENTS](AGENTS.md#verification-and-deployment)；
+安装可选测试依赖不会启用或启动 MCP server。
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -t . -p 'test_*.py'

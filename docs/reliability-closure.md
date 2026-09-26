@@ -1,8 +1,14 @@
-# Reliability closure: bounded source candidate
+# Reliability closure: contract and historical evidence
 
-Base: `9ab1eeab25d1e7450e7c1fc9eef8b5fb55e60f3b` (merged recovery PR #18).
-This change preserves the existing process topology, persisted schema versions,
-source-cursor identities and Windows staging. It does not authorize deployment.
+This document maintains the shared signature, redaction, catch-up outcome and
+receipt-failure contracts below. It began as a bounded candidate on
+`9ab1eeab25d1e7450e7c1fc9eef8b5fb55e60f3b` (recovery PR #18) and was integrated
+through `2353931a22e58ff1d1496d0224bfcc00c38924bf` (PR #19).
+The original authoring limits and excluded work are historical evidence, not a
+current repository-wide backlog. Current source access and operator procedures
+are in [source reliability](source-reliability.md); later monitor recovery is in
+[recovery acceptance](recovery-acceptance.md). No section attests a current
+installation or authorizes deployment.
 
 ## Changed behavior
 
@@ -63,7 +69,7 @@ refresh. Other health subsystems are unchanged by this patch.
 
 ## Regression and acceptance
 
-New repository-native tests:
+Repository-native regression coverage:
 
 - `tests.test_reliability_closure_modules`: redaction, shared signature predicate,
   positive outcome allowlist, malformed/unknown payloads and verified EOF.
@@ -88,21 +94,32 @@ unset WE_GROUPCHAT_OBSIDIAN_ALLOW_RESIGN WECHAT_SUMMARY_ALLOW_RESIGN
 for launcher in 启动.command launchers/*.command; do bash -n "$launcher" || exit; done
 ```
 
-The authoring environment could read pinned GitHub source but could not obtain
-a complete checkout. Its evidence is limited to isolated unit checks on captured
-production functions and the new modules. Full repository imports/tests, actual
-patch applicability to the complete tree, existing regression fixtures, and the
-hosted Windows/macOS matrix require native acceptance. Record that result
-separately; do not copy isolated test counts into full-suite claims.
+The complete suite requires the optional MCP test dependency as documented in
+[AGENTS](../AGENTS.md#verification-and-deployment). These commands describe how
+to obtain fresh evidence; their presence is not a record that they passed.
 
-## Deliberately unclosed
+### Original candidate authoring limits
+
+The original authoring environment could read pinned GitHub source but could
+not obtain a complete checkout. Its evidence covered isolated unit checks on
+captured production functions and the new modules, not complete-tree imports,
+regression fixtures or the hosted Windows/macOS matrix. Subsequent source
+integration does not turn those isolated results into full-suite or live
+acceptance. Keep later results bound to their own tested commits and environments;
+the dated native canary is recorded in [recovery acceptance](recovery-acceptance.md#v010-alpha1-bounded-native-canary).
+
+## Original candidate exclusions
+
+The following list preserves what the original bounded change did not settle.
+It is not a current task list; consult the owning source/guide before deciding
+whether a later change resolved a boundary:
 
 Generation-admission execution and stable-prefix/bounded replay migration;
 same-second cross-shard ordering; optional resource-backup completeness and
 symlink inspection; Digest concurrent-publication behavior; scanner build and
 re-sign race boundaries; durable custom-target autostart; installed bundle and
 live AppKit/task-memory/sleep-wake acceptance; release artifacts, tags, and
-upgrade/downgrade guarantees. None is implicitly approved by this patch.
+upgrade/downgrade guarantees. None was implicitly approved by that patch.
 
 No real chats, keys, config, checkpoints, source databases, mounted targets,
 provider requests, permissions, app signatures or LaunchAgents are changed by

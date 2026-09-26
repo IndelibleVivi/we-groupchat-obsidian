@@ -1,10 +1,20 @@
 # WGO recovery hardening acceptance
 
-This document records the source contract added on top of public baseline
-`c9e5fdaf342674661ce40a5eea3a3ded1321e6d7`. It is not an installed-app or live
-WeChat attestation. The exact protected profile remains macOS WeChat
+This document maintains the recovery source contract and separately preserves
+dated acceptance evidence. Initial recovery hardening followed public baseline
+`c9e5fdaf342674661ce40a5eea3a3ded1321e6d7` and was integrated in `9ab1eea`
+(PR #18). [Frozen batches](#monitor-acceptance-and-frozen-batches) arrived later
+in `72a5d7b` (PR #24); the earlier native canary does not cover them.
+It is not an attestation of today's installed app or live WeChat state.
+The exact protected profile remains macOS WeChat
 `4.1.11 (269136)` arm64; a version string from another distribution channel is
 not interchangeable evidence.
+
+Read the [source behavior](#source-behavior) and [frozen-batch contract](#monitor-acceptance-and-frozen-batches)
+for current recovery rules, the [bounded canary](#v010-alpha1-bounded-native-canary)
+for historical evidence, and [source reliability](source-reliability.md) for
+operator commands. Verification requirements remain in
+[AGENTS](../AGENTS.md#verification-and-deployment).
 
 ## Source behavior
 
@@ -125,6 +135,9 @@ generation pre-admission, and event-commit→projection-repair without provider
 replay.
 
 ## `v0.1.0-alpha.1` bounded native canary
+
+**Historical evidence, scoped to the candidate below.** Later source changes,
+other installations and current runtime health need their own observations.
 
 On 2026-09-06, public candidate `2353931a22e58ff1d1496d0224bfcc00c38924bf`
 was exercised on macOS arm64 with explicit local authorization. The exact

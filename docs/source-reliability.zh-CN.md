@@ -1,5 +1,7 @@
 # 来源可靠性：source guard、本地 CAS、mounted backup、可选 Drive API 与 filesystem snapshot
 
+这是现行 operator guide；[文档与历史入口](README.md)区分持续维护的 contract 与有日期的开发证据。
+
 这一层故意拆成六项互不冒充的责任：
 
 1. 可选 WeChat source guard：只负责在安全状态下请求 macOS 正常打开微信；
@@ -11,7 +13,8 @@
    明确开启后保存全部可见消息正文，独立输出 resources、contexts 与 coverage，不调用 AI 或 Markdown/Drive projection。
 
 它们仍是彼此独立的 domain responsibility，只是需要 protected-data access 的 timer 共享一个长驻菜单 app
-进程。`TopicMonitor` 负责读消息与 checkpoint，不 import、也不调用 source guard。Knowledge transaction 负责登记 attachment mention；
+进程。`TopicMonitor` 负责读消息，通过唯一 checkpoint 写者 `MonitorStateStore` 提交进度，
+不 import、也不调用 source guard。Knowledge transaction 负责登记 attachment mention；
 commit 之后的 worker 才负责找 bytes 和复制。Mounted backup 只读本机 immutable archive object，
 并且只写自己的 configured filesystem target。两条 selected-chat scanner 各有独立 cursor/selection；
 即使消息没有 Knowledge hit，也可以复用同一个本地 CAS。
@@ -203,8 +206,8 @@ provisional receipt。Receipt publication 通过 atomic replace，并对 file �
 
 Provisional receipt 只能是 `partial / drain_complete_restore_pending`，绝不是 success。Canonical work
 通过且 LaunchAgent 恢复成功（或原本无需恢复）后，final receipt 才是 `complete / drained`；恢复失败会
-durably 写成 `partial / launch_agent_restore_failed`、关闭 `resume_supported` 并返回 nonzero。Receipt
-只保存 content-free error code，不保存 provider 或 chat content。
+durably 记录 `launch_agent_restore_failed`，按 canonical work 完成情况写成 `partial` 或 `failed`，
+关闭 `resume_supported` 并返回 nonzero。Receipt 只保存 content-free error code，不保存 provider 或 chat content。
 
 Encrypted WAL reconstruction 会验证 SQLite WAL header 与 cumulative frame checksum，只回放到最后一个
 valid commit marker，按 committed database-page count 截断，并丢弃 uncommitted tail。发布 decrypted
@@ -521,7 +524,8 @@ Scanner 会跨过缺失文件与非 file 消息继续推进，因此一个暂时
 剩余 rows。Receipt 和 health 只记录 content-free error code 与 degraded shard count，不记录 raw path、
 chat ID 或 database name。
 
-`missing_retryable` 只在 due 时按有上限的 exponential backoff 重试；`ambiguous` 不猜测、不上传。
+`missing_retryable` 只在 due 时按有上限的 exponential backoff 重试；`ambiguous` 保持 terminal，
+不猜测、不上传，也不会自动重试。人工改变本机证据后的显式解除/重试仍属于后续 workflow。
 
 第一次 enable 会把当前已选择群聊的 cursor 初始化到“现在”，不会静默上传全部历史。历史发现严格是另一条
 plan/apply action。把某个群聊从 selected set 移除时，其 cursor、queue 与 retry state 都保留，但该群 pending

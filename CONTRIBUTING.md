@@ -14,7 +14,8 @@ filesystem 行为，因此每项贡献都需要明确 scope、验证证据与隐
    may assist but do not replace that ownership.
 2. Record the full base commit with `git rev-parse HEAD`. Use a short-lived topic
    branch in a fork unless a maintainer has granted another workflow.
-3. Read `AGENTS.md` and the documentation that owns the affected behavior. For
+3. Use the [documentation and history index](docs/README.md) to locate the
+   current contract, then read `AGENTS.md` and the affected guide. For
    Windows work, begin with [`docs/WINDOWS-DEVELOPMENT.md`](docs/WINDOWS-DEVELOPMENT.md)
    and [`docs/WINDOWS-PORT-MAP.md`](docs/WINDOWS-PORT-MAP.md).
 4. Confirm the real caller, allowed paths, invariants, verification, and stop

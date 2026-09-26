@@ -1,21 +1,38 @@
 # Source reliability
 
-This guide covers five deliberately separate responsibilities:
+This is the current operator guide. [Documentation and history](README.md)
+separates its maintained contract from dated development evidence.
+
+This guide covers six deliberately separate responsibilities:
 
 1. the optional WeChat source guard, which may request a normal macOS
    application launch;
 2. the attachment catalog and private local content-addressed archive;
 3. the default no-OAuth selected-resource handoff to an existing mounted target;
-4. optional advanced direct selected-chat sync to the Drive API; and
-5. a provider-neutral filesystem snapshot target for the broader attachment archive.
+4. optional advanced direct selected-chat sync to the Drive API;
+5. a provider-neutral filesystem snapshot target for the broader attachment archive; and
+6. the default-off [Quiet Archive local handoff](quiet-archive-handoff.md), which
+   explicitly retains visible message context and exports resources, contexts
+   and coverage without AI, Markdown or Drive projections.
 
 They remain separate domain responsibilities even though protected-data timers
-share one long-lived menu-app process. `TopicMonitor` reads messages and owns
-checkpoints; it does not import or invoke the source guard. The Knowledge
+share one long-lived menu-app process. `TopicMonitor` reads messages and commits
+progress through `MonitorStateStore`, the sole checkpoint writer; it does not
+import or invoke the source guard. The Knowledge
 transaction owns attachment mentions; a post-commit worker owns byte copying.
 Each selected-chat scanner owns an independent cursor/selection and may reuse
 the same local CAS without a Knowledge hit. Mounted backup reads immutable local
 archive objects and writes only to its configured filesystem target.
+
+Quiet Archive reuses the selected-resource scanner. Contexts, occurrences,
+cursors and page receipts commit together. Complete inventory means the expected
+shards were present; raw EOF additionally requires exhausting every selected
+shard and rechecking the inventory. Missing historical context from older or
+disabled capture remains a separate gap. Context-only staged backfill neither
+advances live cursors nor grants attachment-byte access. Its protected-source
+CLI commands require `--allow-transient-wechat-source-read`; export/status read
+only the local ledger/CAS. Commands and the machine contract live in the
+[handoff guide](quiet-archive-handoff.md).
 
 ## 1. Optional WeChat source guard
 
@@ -251,10 +268,10 @@ sample is taken after the app can resume.
 
 The provisional state is `partial / drain_complete_restore_pending`, never
 success. The finalized receipt is `complete / drained` only when canonical work
-passed and restoration succeeded or was unnecessary. A failed restoration is
-durably `partial / launch_agent_restore_failed`, disables `resume_supported`,
-and returns nonzero. Receipts keep content-free error codes rather than provider
-or chat content.
+passed and restoration succeeded or was unnecessary. Failed restoration records
+`launch_agent_restore_failed` with state `partial` or `failed` according to the
+canonical work completed, disables `resume_supported`, and returns nonzero.
+Receipts keep content-free error codes rather than provider or chat content.
 
 Encrypted WAL reconstruction validates the SQLite WAL header and cumulative
 frame checksums, applies frames only through the last valid commit marker,
@@ -368,6 +385,7 @@ Important storage boundary: the archive does **not** delete or prune WeChat's
 own cache. It avoids creating multiple archive copies of identical bytes, but
 it does not reclaim source-cache disk space. Destructive cache retention or
 pruning is outside this tranche and would require a separately reviewed policy.
+A backup target also consumes its own storage for the copied objects.
 
 ### Archive CLI
 
