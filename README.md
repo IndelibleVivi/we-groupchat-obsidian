@@ -36,8 +36,12 @@ selected resources plus complete visible message context as local JSON/CAS
 snapshots, independently of AI notes, Obsidian and Drive. It defaults off; enabling
 it explicitly permits selected-message text retention. Existing backups remain.
 Raw EOF, historical context gaps and missing attachments are reported separately.
-The dedicated CLI supports configure, export/status without WeChat reads, and
-explicit bounded refresh/backfill with the protected-source permission flag.
+The dedicated CLI supports app-config operation and an explicit standalone
+`--profile` with independent source/key references, selection, ledger and cache.
+Standalone plan/status/export do not read WeChat or its keys; bounded
+refresh/backfill requires the protected-source permission flag. Identity-preserving
+adoption and separately authorized attachment resolution let it run without the
+menu app or a summary job. See the guide for profile and migration commands.
 
 ## Obsidian output preview
 

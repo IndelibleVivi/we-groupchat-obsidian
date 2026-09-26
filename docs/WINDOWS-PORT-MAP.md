@@ -192,6 +192,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/platform/windows_paths.py` | `windows-import-safe` | Local-NTFS identity via handle-relative NT traversal, retained ancestry handles, volume/file IDs, extended operational paths, and fail-closed reparse/case-sensitive/unsupported-filesystem checks. |
 | `core/project_identity.py` | `windows-import-safe` | Shared public project identifiers. |
 | `core/quiet_archive_handoff.py` | `deferred-w0.2` | Private local v3 context handoff using existing capture/backup POSIX storage and locks; not a Windows feature. |
+| `core/quiet_archive_producer.py` | `deferred-w0.2` | Explicit standalone profile and local ledger/CAS adoption; reuses POSIX capture locks and current Mac source reader. |
 | `core/relation_audit.py` | `windows-import-safe` | Imports without platform services; filesystem behavior remains unclaimed. |
 | `core/relation_markdown_cleanup.py` | `deferred-w0.2` | Transitively imports knowledge/config storage. |
 | `core/resource_backup_launch_agent.py` | `macos-only` | Retired short-lived job inspection/removal; installation returns `long_lived_app_required`. |

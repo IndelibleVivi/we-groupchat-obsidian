@@ -904,10 +904,15 @@ def _rematch_keys_from_log(db_dir):
         return {}
 
 
+def read_keys_file(path):
+    """Read one explicitly selected key file, without recovery or default lookup."""
+    return _read_keys_file(path)
+
+
 def get_cached_keys():
     """Read the existing cache; availability does not imply a fresh recovery."""
     try:
-        return _read_keys_file(KEYS_FILE) or None
+        return read_keys_file(KEYS_FILE) or None
     except (OSError, KeyCacheError):
         return None
 

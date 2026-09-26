@@ -21,6 +21,7 @@ from core.resource_capture import SelectedResourceCapture
 
 REFRESH_SCHEMA = "we-groupchat-obsidian.quiet-archive.refresh.v1"
 SOURCE_COMMANDS = {"capture", "drain", "refresh", "backfill"}
+PROFILE_COMMANDS = {"plan", "init", "adopt-plan", "adopt-apply", "resolve-files"}
 
 
 def _source(config):
@@ -34,6 +35,7 @@ def _source(config):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile", help="Explicit private standalone producer JSON; no app config.")
     sub = parser.add_subparsers(dest="command", required=True)
     configure = sub.add_parser("configure")
     configure.add_argument("--target", required=True,
@@ -42,13 +44,26 @@ def build_parser():
     sub.add_parser("disable")
     sub.add_parser("status")
     sub.add_parser("export")
+    sub.add_parser("plan")
+    sub.add_parser("init")
+    adopt = sub.add_parser("adopt-plan")
+    adopt.add_argument("--from-ledger", required=True)
+    adopt.add_argument("--from-objects", required=True)
+    adopt.add_argument("--from-inventory")
+    adopt.add_argument("--output", required=True)
+    apply = sub.add_parser("adopt-apply")
+    apply.add_argument("--plan", required=True)
+    resolve = sub.add_parser("resolve-files")
+    resolve.add_argument("--allow-transient-wechat-source-read", action="store_true")
+    resolve.add_argument("--allow-attachment-read", action="store_true")
+    resolve.add_argument("--limit", type=int)
     for name in ("capture", "drain", "refresh", "backfill"):
         command = sub.add_parser(name)
         command.add_argument("--allow-transient-wechat-source-read", action="store_true",
                              help="Authorize this process's protected source reads; macOS may prompt.")
         if name in {"drain", "refresh"}:
-            command.add_argument("--max-rounds", type=int, default=20)
-            command.add_argument("--max-seconds", type=float, default=480)
+            command.add_argument("--max-rounds", type=int)
+            command.add_argument("--max-seconds", type=float)
         if name == "backfill":
             scope = command.add_mutually_exclusive_group(required=True)
             scope.add_argument("--all", action="store_true")
@@ -79,9 +94,16 @@ def _refresh(capture, exporter, args):
 
 def _execute(args):
     # This check precedes config/key/source construction and all source stat/open.
-    if args.command in SOURCE_COMMANDS and not args.allow_transient_wechat_source_read:
+    if args.command in SOURCE_COMMANDS | {"resolve-files"} and not args.allow_transient_wechat_source_read:
         return {"state": "source_read_not_authorized",
                 "error_code": "allow_transient_wechat_source_read_required"}, 2
+    if args.profile:
+        return _standalone(args)
+    if args.command in PROFILE_COMMANDS:
+        return {"state": "standalone_profile_required"}, 2
+    if args.command in {"drain", "refresh"}:
+        args.max_rounds = 20 if args.max_rounds is None else args.max_rounds
+        args.max_seconds = 480 if args.max_seconds is None else args.max_seconds
     if args.command in {"drain", "refresh"} and (
         args.max_rounds < 1 or not math.isfinite(args.max_seconds) or args.max_seconds <= 0
     ):
@@ -104,6 +126,10 @@ def _execute(args):
         capture_contexts=True if args.command in SOURCE_COMMANDS else None,
     )
     exporter = QuietArchiveHandoff.from_config(config, capture=capture)
+    return _run_capture_command(args, capture, exporter)
+
+
+def _run_capture_command(args, capture, exporter):
     if args.command == "status":
         return exporter.status(), 0
     if args.command == "export":
@@ -123,6 +149,49 @@ def _execute(args):
     return result, 0 if result.get("state") in {"planned", "applied"} else 2
 
 
+def _standalone(args):
+    from core.quiet_archive_producer import ProducerProfile, adoption_plan, adoption_apply
+    if args.command in {"configure", "enable", "disable"}:
+        return {"state": "standalone_profile_is_explicit"}, 2
+    profile = ProducerProfile.read(args.profile)
+    if args.command == "plan":
+        return profile.plan(), 0
+    if args.command == "init":
+        return profile.initialize(), 0
+    if args.command == "adopt-plan":
+        return adoption_plan(profile, ledger=args.from_ledger, objects=args.from_objects,
+                             inventory=args.from_inventory, output=args.output), 0
+    if args.command == "adopt-apply":
+        return adoption_apply(profile, args.plan), 0
+    if args.command == "status" and not profile.marker():
+        return {"state": "not_initialized", "source_read": False, "keys_read": False}, 0
+    profile.marker(required=True)
+    if args.command in {"drain", "refresh"}:
+        budget = profile.value["budget"]
+        args.max_rounds = budget["max_rounds"] if args.max_rounds is None else args.max_rounds
+        args.max_seconds = budget["max_seconds"] if args.max_seconds is None else args.max_seconds
+        if args.max_rounds < 1 or not math.isfinite(args.max_seconds) or args.max_seconds <= 0:
+            return {"state": "invalid_budget"}, 2
+    if args.command == "resolve-files" and not args.allow_attachment_read:
+        return {"state": "attachment_read_not_authorized", "error_code": "allow_attachment_read_required"}, 2
+    capture = profile.capture(source=profile.source() if args.command in SOURCE_COMMANDS else None)
+    exporter = QuietArchiveHandoff(profile.config(), capture=capture)
+    if args.command == "resolve-files":
+        limit = profile.value["budget"]["resolve_limit"] if args.limit is None else args.limit
+        if limit < 1:
+            return {"state": "invalid_budget"}, 2
+        with capture.canonical_operation():
+            result = capture.resolve_pending_files(limit=limit, consent_check=lambda: True)
+            coverage = exporter.coverage()
+        return {"state": result["state"], "resolve": result, "coverage": coverage}, (
+            0 if result["state"] == "healthy" else 2)
+    if args.command == "refresh":
+        # Keep this exact capture receipt and export together across app/CLI writers.
+        with capture.canonical_operation():
+            return _run_capture_command(args, capture, exporter)
+    return _run_capture_command(args, capture, exporter)
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
@@ -131,6 +200,7 @@ def main(argv=None):
             result, code = _execute(args)
     except Exception as exc:
         result = {"state": "failed", "error_code": str(getattr(exc, "code", "") or type(exc).__name__)}
+        result.update(getattr(exc, "details", {}))
         if args.command == "refresh":
             result.update(schema=REFRESH_SCHEMA, completed=False, snapshot_id=None)
         code = 2

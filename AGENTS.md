@@ -119,8 +119,20 @@
   `scripts/quiet_archive_handoff.py` owns the thin configure/export/status and
   explicit bounded capture/drain/refresh/backfill CLI. Protected source commands
   require `--allow-transient-wechat-source-read` before config/key/source access.
-  Export/status never read WeChat. The machine contract and operator commands
+  Export/status never construct a message source; legacy app-config initialization
+  may still discover an unset source path. The machine contract and operator commands
   live in `docs/quiet-archive-handoff.md`; maintain it with the producer schema.
+- `core/quiet_archive_producer.py` owns the explicit standalone profile, isolated
+  state identity and frozen adoption plan/apply. `--profile` must not call the app
+  config loader, default cached-key lookup, monitor/AI state, or source discovery.
+  Reuse `WeChatDB` with explicit cache/inventory injection, `SelectedResourceCapture`
+  and `QuietArchiveHandoff`; do not add a second scanner or ledger protocol.
+  A new archive requires explicit `init`; adoption preserves the existing archive,
+  selection and cursor identities and reads only named ledger/CAS/inventory inputs.
+  Standalone plan/status/export do not read WeChat or keys. Attachment resolution
+  requires both per-invocation source and attachment grants; never persist consent
+  or enable it implicitly in refresh. Real adoption/source reads remain separate
+  operator actions from synthetic source verification.
 - `launchers/` owns the canonical Finder-friendly `.command` entrypoints. The
   root `启动.command` is a compatibility stub for deployed source-mode
   LaunchAgents and must not grow a second implementation.

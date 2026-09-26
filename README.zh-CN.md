@@ -28,8 +28,10 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 
 可选的 [Quiet Archive 本机私有交接](docs/quiet-archive-handoff.md) 把明确选中来源的资源与完整可见消息正文
 输出为 JSON/CAS snapshot，不依赖 AI 笔记、Obsidian 或 Drive，保留既有备份。功能默认关闭；开启才允许
-普通扫描保存全部选中消息正文。raw EOF、历史 context 缺口和待补附件分别报告。专用 CLI 支持 configure、
-不读微信的 export/status，以及带明确 protected-source 授权参数的有限预算 refresh 和 staged 历史回补。
+普通扫描保存全部选中消息正文。raw EOF、历史 context 缺口和待补附件分别报告。专用 CLI 支持既有 app 配置，
+也支持独立 `--profile`：明确指定 source/keys、选群和私有 ledger/cache，plan/status/export 不读取微信或 keys。
+有限预算 refresh 和 staged 历史回补须明确授予 source read；已有交接可保留 identity 承接，新附件也有单独授权的
+解析入口，因此不需要菜单栏 app 或笔记总结任务先运行。profile 与迁移命令见交接指南。
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![macOS](https://img.shields.io/badge/macOS-only-lightgrey)

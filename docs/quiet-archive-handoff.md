@@ -9,7 +9,7 @@ separate operator actions.
 
 ## Selection and retention
 
-Selection remains the intersection of `monitor_chats` and the explicit
+In app-config mode, selection remains the intersection of `monitor_chats` and the explicit
 `resource_backup_selected_chats`. The AI monitor may be disabled; its model and
 success state do not gate capture. New selection starts from now. Removing and
 reselecting a chat retains the existing selection-epoch behavior and does not
@@ -194,3 +194,148 @@ payload digest and expiry, but does not rescan staged messages. Failed/degraded
 plans cannot apply. Fix the reported source/selection condition and create a new
 explicit plan; never relabel incomplete history as complete. Export can be retried
 from the private ledger without reopening WeChat.
+
+## Standalone producer profile
+
+Use global `--profile <file>` **before** the command for a producer whose source,
+selection, storage and budgets are independent of the menu app. It uses the same
+`WeChatDB`, `SourceInventoryStore`, `SelectedResourceCapture` and v3 handoff
+exporter. No app configuration, default key cache, monitor checkpoint, summary
+database, AI, Drive or Markdown job is consulted. The original no-profile mode
+remains available to existing app/backup users.
+
+Create a private JSON file owned by the current user, mode `0600`. All paths are
+explicit absolute paths; no source discovery or environment-path fallback is
+performed. This example creates a new archive identity, so use adoption below
+instead when continuing an existing handoff.
+
+```json
+{
+  "schema": "we-groupchat-obsidian.quiet-archive.producer.v1",
+  "source": {
+    "db_dir": "/absolute/private/wechat/db_storage",
+    "keys_file": "/absolute/private/producer-keys.json"
+  },
+  "state_dir": "/absolute/private/producer-state",
+  "target": "/absolute/private/producer-handoff",
+  "chats": [{
+    "username": "selected-chat@chatroom",
+    "alias": "Selected chat",
+    "selection_id": "00000000-0000-0000-0000-000000000001",
+    "selected_since": 0
+  }],
+  "budget": {"max_rounds": 20, "max_seconds": 480, "page_size": 500}
+}
+```
+
+`keys_file` is an explicitly provisioned private file in the existing key-cache
+format (`{"message/message_0.db":{"enc_key":"<hex-key>"}}`); it is read only by
+message-source commands and is never recovered, copied or updated by the
+producer. `selected_since` is a Unix timestamp; zero initializes a new selection
+from the time of `init`. `selection_id` is a UUID, or the empty legacy value when
+adopting that exact selection. Profile edits may change the selected chats and
+their epochs; they use the existing removal/reselection rules. Changing only a
+display alias does not change identity. No later WGO app selection is adopted.
+
+The state root owns `capture.db`, `source_inventory.json`, `cache/`, `objects/`
+(the shared CAS layout below that archive root), `producer-state.json`, and local
+lock files. No default WGO state or decrypted-cache directory is used. The source
+root's namespace and existing shard/message identity formulas remain unchanged.
+The constructors retain unused knowledge/projection path fields inside this root;
+the standalone commands never create or read a summary database or render a
+projection. The export target must be a separate existing private directory.
+
+Optional budget fields are `resolve_limit` (default 50), `min_free_bytes` (default
+1073741824) and `max_object_bytes` (default 536870912). `max_rounds`/`max_seconds`
+CLI arguments override that invocation's profile budgets. The existing per-round
+time-budget and per-chat/shard page semantics still apply.
+
+```bash
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" plan
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" status
+
+# Only for a deliberately new archive; state_dir must not exist.
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" init
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" refresh \
+  --allow-transient-wechat-source-read
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" export
+```
+
+`plan` reads the profile and initialized local identity only, reports the exact
+paths and selection for review, and creates no archive. `status` reads local
+coverage. Neither reads source files or keys, even when the source is absent.
+`init` is explicit, does not read source/keys, and refuses existing state rather
+than replace it. Reading/exporting/refreshing uninitialized state fails with
+`producer_not_initialized`; it cannot silently create a new identity. In contrast,
+the legacy app-config loader retains its initial source discovery when its
+`db_dir` is unset; `--profile` never calls that loader.
+
+The standalone refresh response uses the unchanged refresh schema and exact
+snapshot/coverage fields above. It holds capture ownership across drain and
+export. Source failure, an invalid profile, or busy ownership cannot turn an old
+snapshot into completed EOF. Profile mode is an explicit invocation, with no
+scheduler or new background process.
+
+### Explicit standalone attachment resolution
+
+Refreshing messages does not grant attachment-byte access. A standalone producer
+can resolve newly queued files itself, using the existing resolver and CAS, with
+two explicit per-invocation grants:
+
+```bash
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" resolve-files \
+  --allow-transient-wechat-source-read --allow-attachment-read --limit 50
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" export
+```
+
+This reads only selected pending attachments under the configured source's file
+cache, follows existing size/free-space/hash/path/retry rules, and never needs
+keys or a summary DB. No consent is persisted. Its response separates `resolve`
+results and `coverage.files`; a raw message EOF does not mean attachments are
+ready or delivered. Missing WeChat attachment bytes remain pending. The legacy
+refresh path and ordinary standalone refresh do not automatically resolve files.
+
+### Adopt an existing handoff identity
+
+Do not use `init` when continuing an existing archive. Explicitly name its capture
+ledger, attachment archive root, and durable source inventory; this does not read
+the live WeChat source, key file or WGO app config:
+
+```bash
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" adopt-plan \
+  --from-ledger "<absolute-capture-ledger>" \
+  --from-objects "<absolute-attachment-archive-root>" \
+  --from-inventory "<absolute-source-inventory.json>" \
+  --output "<absolute-new-adoption-plan.json>"
+# Review the private plan, counts, archive_id and exact selection first.
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" adopt-apply \
+  --plan "<absolute-adoption-plan.json>"
+```
+
+The target `state_dir` must not exist. Planning takes the source ledger's existing
+capture lock, uses read-only SQLite Online Backup, and copies referenced CAS
+objects into `<plan-file>.payload/`. The plan binds this frozen candidate and the
+exact profile. It preserves **all** SQLite tables and row identities, archive ID,
+chat keys, selection epochs, cursors, contexts, history gaps, file states and
+backup receipts. Only referenced object bytes are carried; unrelated objects in
+the shared source CAS and derived decrypted caches stay at the source. The source
+ledger rows and original bytes are never modified. A lock file beside the source
+ledger may be opened/created for serialization.
+
+Profile usernames, `selection_id` and `selected_since` must match the last scan's
+selection; if there is no recorded selection, they must match the ledger's chat
+rows. A mismatch returns `adoption_selection_mismatch` with `required_chats`, so
+the operator can review and correct the profile instead of resetting cursors.
+`--from-inventory` is required whenever the ledger has a durable source namespace;
+it preserves expected missing shards as well as present ones. First authorized
+refresh verifies the actual source namespace against the adopted namespace.
+
+Apply verifies the candidate hashes, profile binding and selection, copies to a
+private temporary state root, then publishes that root atomically. It does not
+re-read the old ledger, use later app configuration, or create a new archive ID.
+An interrupted/failed apply leaves the target uninitialized and the frozen plan
+retryable. Reapplying the same installed plan returns `already_applied`; a
+different plan cannot replace installed state. A modified profile or payload
+requires a new reviewed plan. Plan/payload files contain private archive material
+and must stay outside Git and external synchronization. Real adoption is a
+separate authorized operator action; synthetic tests do not perform it.

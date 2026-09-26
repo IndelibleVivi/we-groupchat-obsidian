@@ -372,7 +372,7 @@ class WeChatDB:
         "source_wait_seconds": 0.0,
     }
 
-    def __init__(self, db_dir, keys, *, source_inventory_store=None):
+    def __init__(self, db_dir, keys, *, source_inventory_store=None, cache_root=None):
         """
         Args:
             db_dir: WeChat db_storage directory path.
@@ -398,10 +398,11 @@ class WeChatDB:
         self.cache_namespace, self.source_namespace = source_namespaces_for_root(
             self.db_dir
         )
-        self.cache_dir = os.path.join(self.CACHE_DIR, self.cache_namespace)
+        cache_root = os.path.abspath(os.path.expanduser(cache_root or self.CACHE_DIR))
+        self.cache_dir = os.path.join(cache_root, self.cache_namespace)
         os.makedirs(self.cache_dir, exist_ok=True)
         try:
-            os.chmod(self.CACHE_DIR, 0o700)
+            os.chmod(cache_root, 0o700)
             os.chmod(self.cache_dir, 0o700)
         except OSError:
             pass
