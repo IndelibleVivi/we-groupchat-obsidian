@@ -336,11 +336,14 @@ of relying on LaunchServices discovery:
 ./启动.command --allow-wechat-resign --wechat-app=/Applications/WeChat.app
 ```
 
-WGO has verified protected binary cipher-context key recovery for macOS WeChat
-`4.1.11 (269136)` on arm64. Protected-key profiles are bound to an exact WeChat
-build, and every candidate must pass page-one HMAC verification against its
-encrypted database before entering the private key cache. An unknown future
-build fails closed and preserves the previously verified cache.
+WGO has verified protected binary cipher-context key recovery for the exact
+macOS WeChat builds `4.1.11 (269136)` and `4.1.15 (270102)` on arm64.
+Protected-key profiles are bound to an exact WeChat build, and every candidate
+must pass page-one HMAC verification against its encrypted database before
+entering the private key cache. An unknown future build fails closed and
+preserves the previously verified cache. `docs/recovery-acceptance.md`
+distinguishes source-admitted profiles from dated maintainer native canaries
+and installed/live acceptance.
 
 The scanner executable is admitted only from an immutable build directory
 whose receipt binds the C source digest, compiler binary/version/target,
