@@ -83,8 +83,16 @@ def inspect_wechat_signature(
         requirement = "\n".join(
             (designated.stdout or "", designated.stderr or "")
         ).lower()
-        anchor = f'certificate root = h"{str(root).lower()}"'
-        if anchor not in requirement:
+        # The managed identity is self-signed, so its designated requirement
+        # anchors on the same certificate whether codesign expresses it as the
+        # chain root or the leaf. Accept either form, but only when it carries
+        # the managed hash -- a foreign certificate still fails closed below.
+        managed = str(root).lower()
+        anchors = (
+            f'certificate root = h"{managed}"',
+            f'certificate leaf = h"{managed}"',
+        )
+        if not any(anchor in requirement for anchor in anchors):
             return WeChatSignatureStatus("wechat_signature_not_stable_identity")
         return WeChatSignatureStatus("wechat_signature_valid")
     except (OSError, subprocess.SubprocessError, TypeError, ValueError, AttributeError):
