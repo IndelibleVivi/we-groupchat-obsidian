@@ -278,10 +278,13 @@ macOS 可能在每只长驻 menu-app process 第一次读取 WeChat App Data 时
 
 这一步可能会退出微信，并要求输入 Mac 登录密码。输入密码时终端不显示字符是正常的。
 
-WGO 已验证 macOS 微信 `4.1.11 (269136)` arm64 的 protected binary
-cipher-context key 读取。Protected-key profile 与精确微信 build 绑定，每个
-candidate 都必须通过相应 encrypted DB 的 page-one HMAC 验证才会写入私有
-key cache；未识别的后续 build 会 fail closed 并保留已验证 cache。
+WGO 已验证 macOS 微信 arm64 精确 build `4.1.11 (269136)` 与
+`4.1.15 (270102)` 的 protected binary cipher-context key 读取。
+Protected-key profile 与精确微信 build 绑定，每个 candidate 都必须通过相应
+encrypted DB 的 page-one HMAC 验证才会写入私有 key cache；未识别的后续
+build 会 fail closed 并保留已验证 cache。`docs/recovery-acceptance.md`
+另行区分 source-admitted profile、已有日期范围的 maintainer native canary，
+以及 installed/live acceptance。
 
 实际执行的 scanner 必须来自 immutable build directory；receipt 精确绑定 C source
 digest、compiler binary/version/target、显式 target architecture、flags 与产物 digest，

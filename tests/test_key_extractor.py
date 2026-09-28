@@ -76,6 +76,29 @@ class KeyExtractorTests(unittest.TestCase):
         self.assertIsNone(_protected_key_memory_mask(("4.1.12", "future", "arm64")))
         self.assertIsNone(_protected_key_memory_mask())
 
+    def test_protected_key_mask_hits_exact_4_1_15_270102_build(self):
+        # Requirement 1: the newly registered profile is selected on an exact
+        # (version, build, architecture) match and returns its registered mask.
+        identity = ("4.1.15", "270102", "arm64")
+        self.assertEqual(
+            _protected_key_memory_mask(identity),
+            PROTECTED_KEY_MEMORY_MASKS[identity],
+        )
+
+    def test_protected_key_mask_rejects_adjacent_build_270100(self):
+        # Requirement 2: the adjacent build of the same version is not admitted.
+        self.assertIsNone(_protected_key_memory_mask(("4.1.15", "270100", "arm64")))
+
+    def test_protected_key_mask_rejects_other_builds_of_same_version(self):
+        # Requirement 3: any other build of 4.1.15 is not admitted.
+        self.assertIsNone(_protected_key_memory_mask(("4.1.15", "270103", "arm64")))
+        self.assertIsNone(_protected_key_memory_mask(("4.1.15", "999999", "arm64")))
+
+    def test_protected_key_mask_rejects_wrong_architecture_for_270102(self):
+        # Requirement 4: the exact version+build under a foreign architecture
+        # (x86_64) is not admitted; the profile is arm64-only.
+        self.assertIsNone(_protected_key_memory_mask(("4.1.15", "270102", "x86_64")))
+
     def test_missing_extract_log_returns_empty_list(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = os.path.join(tmp, "missing.log")

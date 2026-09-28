@@ -2,9 +2,13 @@
 
 This document records the source contract added on top of public baseline
 `c9e5fdaf342674661ce40a5eea3a3ded1321e6d7`. It is not an installed-app or live
-WeChat attestation. The exact protected profile remains macOS WeChat
-`4.1.11 (269136)` arm64; a version string from another distribution channel is
-not interchangeable evidence.
+WeChat attestation. Source currently admits exact macOS WeChat protected
+profiles `4.1.11 (269136)` and `4.1.15 (270102)` on arm64. The content-free
+distribution and runtime provenance for `4.1.15 (270102)` is recorded in
+[#47](https://github.com/IndelibleVivi/we-groupchat-obsidian/issues/47); the
+dated maintainer native canary below remains limited to `4.1.11 (269136)`.
+A version string from another distribution channel is not interchangeable
+evidence.
 
 ## Source behavior
 
