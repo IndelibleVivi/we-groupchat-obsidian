@@ -16,12 +16,26 @@ import unittest
 from unittest.mock import patch
 
 from core import key_extractor as k
+# Force pycryptodome's AES C-extension to load now, with the real subprocess.
+# It lazily probes the interpreter architecture via ``file -b`` on first import;
+# left to load inside a recovery test, that probe hits a patched subprocess.run.
+from core import decryptor as _decryptor  # noqa: F401
 
 KEY_A='12'*32
 KEY_B='ab'*32
 BAD='ef'*32
 DB_A='message/message_0.db'
 DB_B='message/message_1.db'
+
+# Registered protected profiles (exact version, build, architecture).
+BUILD_4_1_11=('4.1.11','269136','arm64')
+BUILD_4_1_15=('4.1.15','270102','arm64')
+# An unregistered same-version build -> no profile / mask is None.
+BUILD_UNKNOWN=('4.1.15','270199','arm64')
+# Registered mask hex the scanner is invoked with for the 4.1.15 profile.
+MASK_4_1_15=k.PROTECTED_KEY_MEMORY_MASKS[BUILD_4_1_15].hex()
+# The genuine profile-selection function, captured before any test patches it.
+REAL_PROTECTED_MASK=k._protected_key_memory_mask
 
 
 def write_page(root, rel, key=KEY_A, salt=b'0123456789abcdef'):
@@ -34,9 +48,9 @@ def write_page(root, rel, key=KEY_A, salt=b'0123456789abcdef'):
     return path
 
 
-def target():
+def target(build_identity=('4.1.11','269136','arm64')):
     if hasattr(k,'ScanTarget'):
-        return k.ScanTarget(42,'/fixture/WeChat.app','/fixture/WeChat',1.,('4.1.11','269136','arm64'),(1,2,3,4))
+        return k.ScanTarget(42,'/fixture/WeChat.app','/fixture/WeChat',1.,build_identity,(1,2,3,4))
     return object()
 
 
@@ -506,3 +520,127 @@ class ScannerBinaryIdentityTests(unittest.TestCase):
         self.assertNotEqual(arm.input_identity, x86.input_identity)
         self.assertIn('arm64', arm_run.call_args.args[0])
         self.assertIn('x86_64', x86_run.call_args.args[0])
+
+
+@unittest.skipUnless(hasattr(k, 'KeyRecoveryResult'), 'candidate-only new contract')
+class ProtectedProfile41115Tests(RecoveryFixtures):
+    """Regression coverage for the newly registered 4.1.15/270102 protected
+    profile, plus the invariant that only exact-profile (or independently
+    HMAC-passing legacy-literal) recovery may publish, and that raw masked
+    candidates never enter the canonical cache.
+    """
+
+    def profile(self, build_identity):
+        """Bind the running scan target to a build and route mask selection
+        through the genuine registry (mirrors recover_keys' real lookup)."""
+        stack = contextlib.ExitStack()
+        scan_target = target(build_identity)
+        stack.enter_context(patch.object(k, 'select_wechat_scan_target', return_value=scan_target))
+        stack.enter_context(patch.object(k, 'get_wechat_scan_target', return_value=scan_target, create=True))
+        stack.enter_context(patch.object(k, '_protected_key_memory_mask', side_effect=REAL_PROTECTED_MASK))
+        return stack
+
+    def protected_scanner(self, recovered_key, required_mask=MASK_4_1_15):
+        """Synthetic protected cipher-context: the in-memory key is obfuscated
+        and only de-masks to a usable key when the scanner is invoked with the
+        exact registered mask. A wrong or absent mask yields an unusable
+        candidate that fails page-one HMAC, mirroring a cross-build or
+        no-profile extraction against protected memory."""
+        def run(args, **kwargs):
+            (Path(kwargs['cwd']) / 'all_keys.json').write_text('{}')
+            supplied = args[4] if len(args) >= 5 else None
+            emitted = recovered_key if supplied == required_mask else BAD
+            return subprocess.CompletedProcess(args, 0, f'WGO_KEY {emitted} -\n', '')
+        return patch.object(k.subprocess, 'run', side_effect=run)
+
+    def test_exact_270102_profile_reaches_page_one_verification(self):
+        # Requirement 5: a 4.1.15 protected fixture recovered under the exact
+        # 270102 profile de-masks to a candidate that passes page-one HMAC and
+        # is published as freshly verified.
+        write_page(self.db, DB_A, KEY_A)
+        with self.profile(BUILD_4_1_15):
+            with self.protected_scanner(KEY_A) as run:
+                result = k.recover_keys()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, 'fresh_verified')
+        self.assertEqual(result.keys, {DB_A: {'enc_key': KEY_A}})
+        # The exact registered mask was passed to the scanner (protected path).
+        self.assertEqual(len(run.call_args.args[0]), 5)
+        self.assertEqual(run.call_args.args[0][4], MASK_4_1_15)
+        self.assertEqual(json.loads(self.cache.read_text()), {DB_A: {'enc_key': KEY_A}})
+
+    def test_cross_build_profile_yields_no_fresh_verified_publication(self):
+        # Requirement 6: the same 4.1.15 fixture recovered under the wrong
+        # (4.1.11/269136) profile de-masks to an unusable candidate; no fresh
+        # verified publication occurs and the existing cache is untouched.
+        before = self.cached()
+        write_page(self.db, DB_A, KEY_A)
+        with self.profile(BUILD_4_1_11):
+            with self.protected_scanner(KEY_A) as run:
+                result = k.recover_keys()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 'cache_only')
+        # A (wrong) registered mask was still supplied, but it is not 270102's.
+        self.assertEqual(len(run.call_args.args[0]), 5)
+        self.assertNotEqual(run.call_args.args[0][4], MASK_4_1_15)
+        self.assertEqual(self.cache.read_bytes(), before)
+
+    def test_no_profile_fails_closed_and_preserves_verified_cache(self):
+        # Requirement 7: with no profile at all, the protected fixture fails
+        # closed (no mask supplied, candidate fails HMAC) and the pre-existing
+        # verified cache is preserved unchanged.
+        before = self.cached()
+        write_page(self.db, DB_A, KEY_A)
+        with self.profile(BUILD_UNKNOWN):
+            with self.protected_scanner(KEY_A) as run:
+                result = k.recover_keys()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 'unsupported_build')
+        # No mask is appended when no profile is registered.
+        self.assertEqual(len(run.call_args.args[0]), 4)
+        self.assertEqual(self.cache.read_bytes(), before)
+
+    def test_unsupported_protected_recovery_never_persists_raw_candidate(self):
+        # Requirement 8 (unsupported): the raw masked candidate emitted by an
+        # unsupported-build scan never crosses the canonical cache boundary.
+        self.cache.write_text('{}')
+        write_page(self.db, DB_A, KEY_A)
+        with self.profile(BUILD_UNKNOWN):
+            with self.protected_scanner(KEY_A):
+                result = k.recover_keys()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, 'unsupported_build')
+        self.assertEqual(json.loads(self.cache.read_text()), {})
+        self.assertNotIn(BAD, self.cache.read_text())
+
+    def test_partial_protected_recovery_persists_only_verified_entries(self):
+        # Requirement 8 (partial): under the exact profile, a partial scan
+        # publishes only the HMAC-verified database; an unreadable required
+        # source is reported missing and never persisted as a raw candidate.
+        self.cache.write_text('{}')
+        write_page(self.db, DB_A, KEY_A)
+        truncated = write_page(self.db, DB_B, KEY_A)
+        truncated.write_bytes(b'x' * 16)
+        with self.profile(BUILD_4_1_15):
+            with self.protected_scanner(KEY_A):
+                result = k.recover_keys()
+        self.assertEqual(result.status, 'partial')
+        self.assertFalse(result.ok)
+        self.assertIn(DB_B, result.missing_databases)
+        saved = json.loads(self.cache.read_text())
+        self.assertEqual(saved, {DB_A: {'enc_key': KEY_A}})
+        self.assertNotIn(DB_B, saved)
+
+    def test_legacy_literal_still_verifies_without_any_profile(self):
+        # Requirement 9: with no profile, a legacy-literal candidate that
+        # independently passes the target DB's page-one HMAC (cleartext key in
+        # memory, mask-independent) is still allowed to succeed and publish.
+        write_page(self.db, DB_A, KEY_A)
+        with self.profile(BUILD_UNKNOWN):
+            with self.scanner({}, f'WGO_KEY {KEY_A} -\n') as run:
+                result = k.recover_keys()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, 'fresh_verified')
+        # No mask appended: the success path did not depend on a profile.
+        self.assertEqual(len(run.call_args.args[0]), 4)
+        self.assertEqual(json.loads(self.cache.read_text()), {DB_A: {'enc_key': KEY_A}})

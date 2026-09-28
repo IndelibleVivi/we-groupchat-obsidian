@@ -44,6 +44,10 @@ PROTECTED_KEY_MEMORY_MASKS = {
         "e8ac38191bd59c963f4654d8f9d7437e"
         "1acc81a5cad6312c7bd0f5e73238d4af"
     ),
+    ("4.1.15", "270102", "arm64"): bytes.fromhex(
+        "b8ec38291bd59c963f4654d8f9d7437e"
+        "1acc81a6cad6313c7bd0f5e73238d4af"
+    ),
 }
 
 
