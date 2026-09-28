@@ -149,8 +149,7 @@ class AtomicPublicationTests(unittest.TestCase):
                 outside_directory = self.root / "outside"
                 outside_directory.mkdir()
                 link = self.root / "junction"
-                link.mkdir()
-                probe.create_reparse_point(str(link), str(outside_directory))
+                probe.create_directory_junction(str(link), str(outside_directory))
                 with self.assertRaises(PrivateStorageError) as raised:
                     self.publisher.write_bytes(link / "value.bin", b"payload")
                 self.assertEqual(raised.exception.reason, "reparse_point")
