@@ -66,6 +66,11 @@ def build_parser():
         if name in {"drain", "refresh"}:
             command.add_argument("--max-rounds", type=int)
             command.add_argument("--max-seconds", type=float)
+        if name == "refresh":
+            command.add_argument("--allow-attachment-read", action="store_true",
+                                 help="Explicitly resolve selected file mentions from the local cache before export.")
+            command.add_argument("--file-limit", type=int,
+                                 help="Maximum file occurrences to resolve in this invocation.")
         if name == "backfill":
             scope = command.add_mutually_exclusive_group(required=True)
             scope.add_argument("--all", action="store_true")
@@ -80,17 +85,25 @@ def _refresh(capture, exporter, args):
         result = capture.drain(max_rounds=args.max_rounds, max_seconds=args.max_seconds)
     except Exception as exc:
         result = {"state": "failed", "error_code": str(getattr(exc, "code", "") or type(exc).__name__)}
+    resolved = None
+    if args.allow_attachment_read and result.get("state") in {"eof", "pending"}:
+        try:
+            resolved = capture.resolve_pending_files(limit=args.file_limit, consent_check=lambda: True)
+        except Exception as exc:
+            resolved = {"state": "failed", "error_code": str(getattr(exc, "code", "") or type(exc).__name__)}
     handoff = exporter.run()
     coverage = handoff.get("coverage") or exporter.coverage()
     snapshot = handoff.get("snapshot") or {}
     published = handoff.get("state") in {"written", "unchanged"} and bool(snapshot.get("snapshot_id"))
-    eof = bool(published and result.get("state") == "eof"
+    resolution_ok = resolved is None or resolved.get("state") in {"healthy", "degraded", "no_selected_chats"}
+    eof = bool(published and resolution_ok and result.get("state") == "eof"
                and (coverage.get("source_scan") or {}).get("raw_eof"))
-    pending = bool(published and result.get("state") == "pending")
+    pending = bool(published and resolution_ok and result.get("state") == "pending")
     return {
         "schema": REFRESH_SCHEMA, "state": "eof" if eof else ("pending" if pending else "failed"),
         "completed": eof, "snapshot_id": snapshot.get("snapshot_id") if published else None,
         "capture": result, "handoff": handoff, "coverage": coverage,
+        **({"resolve": resolved} if resolved is not None else {}),
     }
 
 
@@ -110,6 +123,10 @@ def _execute(args):
         args.max_rounds < 1 or not math.isfinite(args.max_seconds) or args.max_seconds <= 0
     ):
         return {"state": "invalid_budget"}, 2
+    if args.command == "refresh":
+        args.file_limit = 50 if args.file_limit is None else args.file_limit
+        if args.file_limit < 1:
+            return {"state": "invalid_budget"}, 2
     config = load_config()
     if args.command == "configure":
         target = normalize_path_value(args.target)
@@ -174,6 +191,10 @@ def _standalone(args):
         args.max_rounds = budget["max_rounds"] if args.max_rounds is None else args.max_rounds
         args.max_seconds = budget["max_seconds"] if args.max_seconds is None else args.max_seconds
         if args.max_rounds < 1 or not math.isfinite(args.max_seconds) or args.max_seconds <= 0:
+            return {"state": "invalid_budget"}, 2
+    if args.command == "refresh":
+        args.file_limit = profile.value["budget"]["resolve_limit"] if args.file_limit is None else args.file_limit
+        if args.file_limit < 1:
             return {"state": "invalid_budget"}, 2
     if args.command == "resolve-files" and not args.allow_attachment_read:
         return {"state": "attachment_read_not_authorized", "error_code": "allow_attachment_read_required"}, 2

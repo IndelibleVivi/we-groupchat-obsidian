@@ -42,6 +42,9 @@ Standalone plan/status/export do not read WeChat or its keys; bounded
 refresh/backfill requires the protected-source permission flag. Identity-preserving
 adoption and separately authorized attachment resolution let it run without the
 menu app or a summary job. See the guide for profile and migration commands.
+Explicitly granting `refresh --allow-attachment-read` also resolves selected
+local cached files before export, within `--file-limit`; ordinary refresh keeps
+attachment reads off. Message EOF and missing-file coverage remain separate.
 
 ## Obsidian output preview
 

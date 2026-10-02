@@ -132,8 +132,9 @@ class StandaloneProducerTests(unittest.TestCase):
 
     def test_ungranted_refresh_does_not_even_read_profile(self):
         with patch.object(ProducerProfile, "read", side_effect=AssertionError("profile")):
-            code, result = self.run_cli("refresh")
-        self.assertEqual((code, result["error_code"]), (2, "allow_transient_wechat_source_read_required"))
+            for arguments in (("refresh",), ("refresh", "--allow-attachment-read")):
+                code, result = self.run_cli(*arguments)
+                self.assertEqual((code, result["error_code"]), (2, "allow_transient_wechat_source_read_required"))
 
     def test_separate_cli_process_never_initializes_the_default_wgo_runtime(self):
         fixture_profile = write_synthetic_producer_fixture(self.root / "cli-fixture")
@@ -256,6 +257,38 @@ class StandaloneProducerTests(unittest.TestCase):
         self.assertEqual((code, result["resolve"]["ready_local"]), (0, 1))
         self.assertEqual(self.run_cli("export")[1]["coverage"]["files"]["pending_occurrences"], 0)
         self.assertFalse((Path(self.profile.state_dir) / "unused-knowledge.db").exists())
+
+    def test_refresh_explicitly_resolves_new_files_before_export(self):
+        self.initialize()
+        content = b"synthetic daily attachment"
+        source = KeysetSource({"shard": [message(1, resources=[{
+            "kind": "file", "original_name": "daily.txt", "declared_size": len(content),
+            "declared_hash": hashlib.sha256(content).hexdigest()}])]})
+        cached = Path(self.value["source"]["db_dir"]).parent / "msg/file/1970-01/daily.txt"
+        cached.parent.mkdir(parents=True)
+        cached.write_bytes(content)
+        code, result = self.run_cli("refresh", "--allow-transient-wechat-source-read",
+                                    "--allow-attachment-read", "--file-limit", "2", source=source)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["resolve"]["ready_local"], 1)
+        self.assertEqual(result["coverage"]["files"]["pending_occurrences"], 0)
+        occurrence = self.profile.capture().occurrences()[0]
+        self.assertEqual(occurrence["status"], "ready_local")
+        self.assertEqual((Path(self.profile.capture().archive_root) / occurrence["object_relpath"]).read_bytes(), content)
+        with patch("core.resource_capture.SelectedResourceCapture.resolve_pending_files",
+                   side_effect=AssertionError("attachment grant must not persist")):
+            self.assertEqual(self.run_cli("refresh", "--allow-transient-wechat-source-read", source=source)[0], 0)
+
+    def test_refresh_missing_cached_file_keeps_pending_coverage(self):
+        self.initialize()
+        source = KeysetSource({"shard": [message(1, resources=[{
+            "kind": "file", "original_name": "missing.txt", "declared_size": 5}])]})
+        code, result = self.run_cli("refresh", "--allow-transient-wechat-source-read",
+                                    "--allow-attachment-read", source=source)
+        self.assertEqual(code, 0)  # Message EOF is independent of attachment gaps.
+        self.assertEqual((result["resolve"]["ready_local"], result["resolve"]["failed"]), (0, 1))
+        self.assertEqual(result["coverage"]["files"]["pending_occurrences"], 1)
+        self.assertEqual(self.profile.capture().occurrences()[0]["status"], "waiting_cache")
 
     def adoption_fixture(self):
         self.actual_source()

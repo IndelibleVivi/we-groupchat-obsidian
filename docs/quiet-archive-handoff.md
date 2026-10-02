@@ -261,6 +261,23 @@ time-budget and per-chat/shard page semantics still apply.
 .venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" export
 ```
 
+An explicitly granted `refresh` can perform capture, file resolution and export
+under the same capture ownership:
+
+```bash
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" refresh \
+  --allow-transient-wechat-source-read --allow-attachment-read --file-limit 50
+```
+
+Resolution runs after successful or budget-pending message capture and before
+the exact snapshot is exported. `--file-limit` defaults to the profile's existing
+`budget.resolve_limit` (50 if omitted in the profile), or 50 in app-config mode.
+The response includes `resolve` counts; missing cached files remain pending in
+`coverage.files` even when messages reach raw EOF. Resolver ownership/storage
+failure makes the refresh fail, so consumers cannot import it as a successful
+fresh run. Omitting `--allow-attachment-read` keeps refresh free of attachment
+reads; no profile or WGO app setting stores this consent.
+
 `plan` reads the profile and initialized local identity only, reports the exact
 paths and selection for review, and creates no archive. `status` reads local
 coverage. Neither reads source files or keys, even when the source is absent.

@@ -131,7 +131,9 @@
   selection and cursor identities and reads only named ledger/CAS/inventory inputs.
   Standalone plan/status/export do not read WeChat or keys. Attachment resolution
   requires both per-invocation source and attachment grants; never persist consent
-  or enable it implicitly in refresh. Real adoption/source reads remain separate
+  or enable it implicitly in refresh. Explicit `refresh --allow-attachment-read`
+  resolves selected pending files after capture and before export under the same
+  operation lock, within `--file-limit`; missing bytes remain pending. Real adoption/source reads remain separate
   operator actions from synthetic source verification.
 - `launchers/` owns the canonical Finder-friendly `.command` entrypoints. The
   root `启动.command` is a compatibility stub for deployed source-mode
