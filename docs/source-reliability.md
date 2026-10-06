@@ -327,8 +327,8 @@ receipts, backup manifest, or documentation.
 ### File resolution
 
 The resolver searches only the declared month in WeChat's `msg/file` cache. It
-accepts the exact name and conventional `name (N).ext` variants. Declared size
-and MD5/SHA-256, when available, filter candidates before selection.
+accepts the exact name and conventional `name(N).ext` or `name (N).ext` variants.
+Declared size and MD5/SHA-256, when available, filter candidates before selection.
 
 - one valid candidate is selected;
 - several candidates with identical bytes are equivalent duplicates and are

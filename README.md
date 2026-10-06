@@ -152,8 +152,10 @@ Its most important boundaries are:
   advancing, while selected-resource and Direct Drive scans may process present
   shards only with a `source_degraded` result.
 - File attachment bytes can be preserved in a private local SHA-256
-  content-addressed archive. An optional backup copies immutable objects to an
-  ordinary filesystem target; verification proves the target bytes only, not a
+  content-addressed archive. The declared month's cache supports exact names
+  and duplicate suffixes with or without a space before `(N)`; declared
+  metadata and differing-byte ambiguity checks still apply. An optional backup
+  copies immutable objects to an ordinary filesystem target; verification proves the target bytes only, not a
   sync provider's cloud-upload state.
 - The default selected-resource backup lane needs no OAuth: it intersects
   actively monitored chats with an independent explicit selection, captures

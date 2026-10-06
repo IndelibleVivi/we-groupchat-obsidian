@@ -322,6 +322,37 @@ class AttachmentArchiveTests(unittest.TestCase):
         self.assertEqual(mention["status"], "ambiguous")
         self.assertEqual(mention["object_sha256"], "")
 
+    def test_unspaced_duplicate_variants_archive_equivalent_bytes(self):
+        data = b"synthetic cached document"
+        self.add_file_mention(
+            "tutorial.pdf",
+            declared_size=len(data),
+            declared_hash=hashlib.sha256(data).hexdigest(),
+        )
+        self.write_cache_file("tutorial(1).pdf", data)
+        self.write_cache_file("tutorial(2).pdf", data)
+        self.write_cache_file("tutorial(3).pdf", b"x" * len(data))
+
+        outcome = self.archive().process_pending()
+
+        self.assertEqual(outcome["archived"], 1)
+        mention = self.rows("SELECT * FROM attachment_mentions")[0]
+        self.assertEqual(mention["resolution_method"], "equivalent_duplicates")
+        self.assertEqual(mention["object_sha256"], hashlib.sha256(data).hexdigest())
+
+    def test_mixed_duplicate_variant_styles_preserve_ambiguity(self):
+        self.add_file_mention("tutorial.pdf", declared_size=9)
+        self.write_cache_file("tutorial(1).pdf", b"version A")
+        self.write_cache_file("tutorial (2).pdf", b"version B")
+
+        outcome = self.archive().process_pending()
+
+        self.assertEqual(outcome["failed"], 1)
+        mention = self.rows("SELECT * FROM attachment_mentions")[0]
+        self.assertEqual(mention["status"], "ambiguous")
+        self.assertEqual(mention["object_sha256"], "")
+        self.assertEqual(self.rows("SELECT * FROM attachment_objects"), [])
+
     def test_metadata_filter_and_missing_are_retryable_without_guessing(self):
         self.add_file_mention(
             "wrong.txt",

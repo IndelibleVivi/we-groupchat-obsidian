@@ -122,6 +122,8 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
   “没有新消息”。Monitor/catch-up 会在推进前停止；selected-resource 与 Direct Drive scan 只能继续处理
   present shards，并保持 `source_degraded`。
 - 文件附件可以进入本机私有的 SHA-256 content-addressed archive，同一份 bytes 只保留一个 object。
+  声明月份的缓存支持原名，以及括号前带空格或不带空格的 `(N)` 重名后缀；declared metadata
+  与不同 bytes 的歧义检查仍适用。
   可选 backup 只把 immutable objects 复制到普通 filesystem target；验证的是目标目录 bytes，
   不是 sync provider 的云端上传状态。
 - 默认 selected-resource backup lane 不需要 OAuth：它取 active monitor chats 与独立显式 selection 的交集，

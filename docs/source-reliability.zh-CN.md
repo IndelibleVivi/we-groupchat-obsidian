@@ -254,7 +254,7 @@ catalog、archive receipt、backup manifest 或文档。
 ### 文件 resolver
 
 Resolver 只搜索消息声明月份下的 WeChat `msg/file` cache，候选仅限 exact name 和常见
-`name (N).ext` duplicate variant。有 declared size 或 MD5/SHA-256 时，先用 metadata 筛选。
+`name(N).ext`／`name (N).ext` duplicate variant。有 declared size 或 MD5/SHA-256 时，先用 metadata 筛选。
 
 - 只有一个有效候选：选中；
 - 多个候选 bytes 完全相同：视为 equivalent duplicates，可 deterministic 选中；
