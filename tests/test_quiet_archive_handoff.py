@@ -244,6 +244,67 @@ class QuietArchiveHandoffTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(last["state"], "eof")
 
+    def test_fresh_degraded_refresh_exports_committed_contexts_as_pending(self):
+        self.source = InventoryAwareSource(
+            {"present": [message(1, "https://example.test/partial")]},
+            complete=False, digest="partial", missing=1)
+        code, result = self.run_cli(["refresh", "--allow-transient-wechat-source-read",
+                                     "--allow-attachment-read"])
+        self.assertEqual((code, result["state"], result["completed"]), (2, "pending", False))
+        self.assertEqual(result["capture"]["state"], "source_degraded")
+        _, _, contexts, coverage = self.read_snapshot(result["handoff"])
+        self.assertEqual(len(contexts), 1)
+        self.assertFalse(coverage["source_scan"]["raw_eof"])
+        self.assertEqual(coverage["source_scan"]["state"], "degraded")
+        self.assertFalse(coverage["inventory"]["complete"])
+        self.assertEqual(result["capture"]["coverage"]["capture_run_id"], coverage["capture_run_id"])
+        self.assertIn("resolve", result)
+
+    def test_failed_capture_or_mismatched_export_receipt_stays_failed(self):
+        self.capture.drain()
+        exporter = self.exporter()
+        old = exporter.run()
+        args = cli.build_parser().parse_args(["refresh", "--allow-transient-wechat-source-read"])
+        with patch.object(self.capture, "drain", side_effect=RuntimeError("unknown")):
+            self.assertEqual(cli._refresh(self.capture, exporter, args)["state"], "failed")
+        with (patch.object(self.capture, "drain", return_value={
+                "state": "source_degraded", "coverage": {"capture_run_id": "different"}}),
+              patch.object(exporter, "run", return_value=old)):
+            self.assertEqual(cli._refresh(self.capture, exporter, args)["state"], "failed")
+
+    def test_coverage_missing_pairs_deduplicate_without_per_occurrence_context_scan(self):
+        self.source.messages_by_shard["fixture-shard"] = [message(1, "https://example.test/one")]
+        self.capture.scan()
+        chat = self.capture.selected_chats()[0]
+        with closing(self.capture._connect()) as conn, conn:
+            template = dict(conn.execute("SELECT * FROM resource_occurrences").fetchone())
+            columns = list(template)
+            inserts = []
+            for n in range(1000):
+                row = dict(template, occurrence_id=n + 2, source_message_id=f"missing-{n}")
+                inserts.append([row[c] for c in columns])
+            # Another resource in the same message must not increase missing-message count.
+            row = dict(template, occurrence_id=1002, source_message_id="missing-0", resource_index=1)
+            inserts.append([row[c] for c in columns])
+            conn.executemany("INSERT INTO resource_occurrences (" + ",".join(columns) +
+                             ") VALUES (" + ",".join("?" for _ in columns) + ")", inserts)
+            conn.executemany("INSERT INTO resource_contexts VALUES (?,?,?,?,?,?,?,?)", [
+                (chat["username"], chat["chat_key"], chat["alias"], f"filler-{n}", 1, "", 1, "text")
+                for n in range(4000)])
+        connect = self.capture._connect
+        steps = [0]
+        def bounded_connect():
+            conn = connect()
+            def progress():
+                steps[0] += 1000
+                return int(steps[0] > 2_000_000)
+            conn.set_progress_handler(progress, 1000)
+            return conn
+        with patch.object(self.capture, "_connect", side_effect=bounded_connect):
+            coverage = self.capture.context_coverage()
+        self.assertEqual(coverage["contexts"]["legacy_resource_messages_without_context"], 1000)
+        self.assertLess(steps[0], 2_000_000)
+
     def test_cli_without_source_grant_never_loads_config_keys_or_source(self):
         with (patch("scripts.quiet_archive_handoff.load_config", side_effect=AssertionError("config")),
               patch("scripts.quiet_archive_handoff._source", side_effect=AssertionError("source")),

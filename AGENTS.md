@@ -119,6 +119,11 @@
   `scripts/quiet_archive_handoff.py` owns the thin configure/export/status and
   explicit bounded capture/drain/refresh/backfill CLI. Protected source commands
   require `--allow-transient-wechat-source-read` before config/key/source access.
+  A fresh `source_degraded` scan may export committed data as `pending` only when
+  the export coverage matches that scan's exact capture_run_id; failed shards stay
+  explicit. Unknown/exception/busy capture cannot reuse old coverage as a fresh run.
+  Coverage gap counts use a single set difference, never a per-occurrence full
+  context-table scan.
   Export/status never construct a message source; legacy app-config initialization
   may still discover an unset source path. The machine contract and operator commands
   live in `docs/quiet-archive-handoff.md`; maintain it with the producer schema.

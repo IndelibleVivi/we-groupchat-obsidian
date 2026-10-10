@@ -28,7 +28,7 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 
 可选的 [Quiet Archive 本机私有交接](docs/quiet-archive-handoff.md) 把明确选中来源的资源与完整可见消息正文
 输出为 JSON/CAS snapshot，不依赖 AI 笔记、Obsidian 或 Drive，保留既有备份。功能默认关闭；开启才允许
-普通扫描保存全部选中消息正文。raw EOF、历史 context 缺口和待补附件分别报告。显式带 `--allow-attachment-read` 的 `refresh` 可按 `--file-limit` 在导出前补取已选来源的本机缓存文件；普通 refresh 不读取附件。专用 CLI 支持既有 app 配置，
+普通扫描保存全部选中消息正文。raw EOF、历史 context 缺口和待补附件分别报告。 本轮部分 shard 读取失败时，已提交内容仍导出为 fresh `pending`，consumer 可继续收录；failed shard 与未覆盖范围保留，不声称完整。显式带 `--allow-attachment-read` 的 `refresh` 可按 `--file-limit` 在导出前补取已选来源的本机缓存文件；普通 refresh 不读取附件。专用 CLI 支持既有 app 配置，
 也支持独立 `--profile`：明确指定 source/keys、选群和私有 ledger/cache，plan/status/export 不读取微信或 keys。
 有限预算 refresh 和 staged 历史回补须明确授予 source read；已有交接可保留 identity 承接，新附件也有单独授权的
 解析入口，因此不需要菜单栏 app 或笔记总结任务先运行。profile 与迁移命令见交接指南。

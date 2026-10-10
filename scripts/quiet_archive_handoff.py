@@ -93,7 +93,7 @@ def _refresh(capture, exporter, args):
     except Exception as exc:
         result = {"state": "failed", "error_code": str(getattr(exc, "code", "") or type(exc).__name__)}
     resolved = None
-    if args.allow_attachment_read and result.get("state") in {"eof", "pending"}:
+    if args.allow_attachment_read and result.get("state") in {"eof", "pending", "source_degraded"}:
         try:
             resolved = capture.resolve_pending_files(limit=args.file_limit, consent_check=lambda: True)
         except Exception as exc:
@@ -105,7 +105,12 @@ def _refresh(capture, exporter, args):
     resolution_ok = resolved is None or resolved.get("state") in {"healthy", "degraded", "no_selected_chats"}
     eof = bool(published and resolution_ok and result.get("state") == "eof"
                and (coverage.get("source_scan") or {}).get("raw_eof"))
-    pending = bool(published and resolution_ok and result.get("state") == "pending")
+    fresh_degraded = bool(result.get("state") == "source_degraded"
+                          and coverage.get("capture_run_id")
+                          and coverage.get("capture_run_id") == (result.get("coverage") or {}).get("capture_run_id")
+                          and (coverage.get("source_scan") or {}).get("state") == "degraded")
+    pending = bool(published and resolution_ok
+                   and (result.get("state") == "pending" or fresh_degraded))
     return {
         "schema": REFRESH_SCHEMA, "state": "eof" if eof else ("pending" if pending else "failed"),
         "completed": eof, "snapshot_id": snapshot.get("snapshot_id") if published else None,

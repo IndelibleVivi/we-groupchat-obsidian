@@ -1168,14 +1168,15 @@ class SelectedResourceCapture:
                     ).fetchone()[0]
                     missing = conn.execute(f"""
                         SELECT COUNT(*) FROM (
-                            SELECT DISTINCT r.chat_key, r.source_message_id
-                            FROM resource_occurrences r
-                            WHERE r.chat_key IN ({placeholders}) AND NOT EXISTS (
-                                SELECT 1 FROM resource_contexts c
-                                WHERE c.chat_key=r.chat_key AND c.source_message_id=r.source_message_id
-                            )
+                            SELECT chat_key, source_message_id
+                            FROM resource_occurrences
+                            WHERE chat_key IN ({placeholders})
+                            EXCEPT
+                            SELECT chat_key, source_message_id
+                            FROM resource_contexts
+                            WHERE chat_key IN ({placeholders})
                         )
-                    """, keys).fetchone()[0]
+                    """, keys + keys).fetchone()[0]
                     ranges = [dict(row) for row in conn.execute(
                         f"SELECT * FROM resource_context_history WHERE chat_key IN ({placeholders}) "
                         "ORDER BY chat_key, from_timestamp, origin", keys,

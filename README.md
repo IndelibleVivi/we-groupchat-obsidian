@@ -36,6 +36,8 @@ selected resources plus complete visible message context as local JSON/CAS
 snapshots, independently of AI notes, Obsidian and Drive. It defaults off; enabling
 it explicitly permits selected-message text retention. Existing backups remain.
 Raw EOF, historical context gaps and missing attachments are reported separately.
+A fresh degraded scan exports its committed portion as `pending`, keeping failed
+shards explicit so the consumer can continue without claiming complete coverage.
 The dedicated CLI supports app-config operation and an explicit standalone
 `--profile` with independent source/key references, selection, ledger and cache.
 Standalone plan/status/export do not read WeChat or its keys; bounded

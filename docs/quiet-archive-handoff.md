@@ -289,8 +289,12 @@ the legacy app-config loader retains its initial source discovery when its
 
 The standalone refresh response uses the unchanged refresh schema and exact
 snapshot/coverage fields above. It holds capture ownership across drain and
-export. Source failure, an invalid profile, or busy ownership cannot turn an old
-snapshot into completed EOF. Profile mode is an explicit invocation, with no
+export. A degraded source scan can export its already committed data as `pending` when
+its capture-run ID exactly matches the exported coverage. Failed shard counts and
+errors remain explicit, `completed` stays false, and only the owner-granted cached
+attachment resolver may run. The consumer can ingest that fresh partial snapshot.
+Unknown/exceptional capture failure, an invalid profile or busy ownership cannot
+relabel an old snapshot as a fresh pending run or completed EOF. Profile mode is an explicit invocation, with no
 scheduler or new background process.
 
 ### macOS filesystem device renumbering

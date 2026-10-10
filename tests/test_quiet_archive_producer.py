@@ -209,11 +209,17 @@ class StandaloneProducerTests(unittest.TestCase):
         self.initialize()
         source = KeysetSource({"shard": [message(1)]})
         flag = "--allow-transient-wechat-source-read"
-        self.assertEqual(self.run_cli("refresh", flag, source=source)[0], 0)
+        first_code, first = self.run_cli("refresh", flag, source=source)
+        self.assertEqual(first_code, 0)
+        before = self.profile.capture().contexts()
         with patch.object(source, "get_cursor_page_for_shard",
                           side_effect=SourceUnavailableError("source_snapshot_failed")):
             code, result = self.run_cli("refresh", flag, source=source)
-        self.assertEqual((code, result["state"], result["completed"]), (2, "failed", False))
+        self.assertEqual((code, result["state"], result["completed"]), (2, "pending", False))
+        self.assertNotEqual(result["snapshot_id"], first["snapshot_id"])
+        self.assertNotEqual(result["coverage"]["capture_run_id"], first["coverage"]["capture_run_id"])
+        self.assertEqual(self.profile.capture().contexts(), before)
+        self.assertEqual(result["coverage"]["source_scan"]["failed_shards"], 1)
         self.assertIn("source_snapshot_failed", result["coverage"]["errors"])
         with resource_capture_operation_lock(self.profile.config()):
             code, busy = self.run_cli("refresh", flag, source=source)
