@@ -129,7 +129,13 @@
   and `QuietArchiveHandoff`; do not add a second scanner or ledger protocol.
   A new archive requires explicit `init`; adoption preserves the existing archive,
   selection and cursor identities and reads only named ledger/CAS/inventory inputs.
-  Standalone plan/status/export do not read WeChat or keys. Attachment resolution
+  Standalone plan/status/export do not read WeChat or keys.
+  macOS device-renumber recovery extends only `producer-state.json` with
+  `source_identity`; `core/source_device_binding.py` reads the stable volume UUID
+  and checks root inode. Recovery requires the existing namespace and every
+  recorded non-retired generation to match under the capture/state locks. Keep
+  cache identity physical; normalize the device only for durable namespace and
+  generation. Never reset ledger/cursors or add a recovery sidecar. Attachment resolution
   requires both per-invocation source and attachment grants; never persist consent
   or enable it implicitly in refresh. Explicit `refresh --allow-attachment-read`
   resolves selected pending files after capture and before export under the same

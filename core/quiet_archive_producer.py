@@ -24,6 +24,10 @@ from urllib.parse import quote
 from .resource_capture import SelectedResourceCapture, resource_capture_operation_lock
 from .resource_backup import _fsync_dir_best_effort
 from .source_inventory import SOURCE_INVENTORY_SCHEMA, SourceInventoryStore
+from .source_device_binding import (
+    SourceDeviceBindingError, check_binding, resolve_root_identity,
+    source_namespace, validate_binding,
+)
 
 
 PROFILE_SCHEMA = "we-groupchat-obsidian.quiet-archive.producer.v1"
@@ -237,10 +241,12 @@ class ProducerProfile:
         keys_file = self.value["source"]["keys_file"]
         _regular(keys_file, private=True)
         keys = read_keys_file(keys_file)
+        marker = self.marker(required=True)
         source = WeChatDB(self.value["source"]["db_dir"], keys,
                           source_inventory_store=SourceInventoryStore(self.paths()["inventory"]),
-                          cache_root=self.paths()["cache"])
-        expected_namespace = (self.marker(required=True) or {}).get("source_namespace")
+                          cache_root=self.paths()["cache"],
+                          source_binding=marker.get("source_identity"))
+        expected_namespace = marker.get("source_namespace")
         if expected_namespace and source.source_namespace != expected_namespace:
             raise ProducerError("producer_source_namespace_mismatch")
         return source
@@ -255,6 +261,11 @@ class ProducerProfile:
         if (value.get("schema") != STATE_SCHEMA
                 or value.get("source_db_dir") != self.value["source"]["db_dir"]):
             raise ProducerError("producer_state_binding_mismatch")
+        if "source_identity" in value:
+            try:
+                validate_binding(value["source_identity"])
+            except SourceDeviceBindingError as exc:
+                raise ProducerError(exc.code) from exc
         _regular(self.paths()["ledger"], private=True)
         conn = sqlite3.connect(f"file:{quote(self.paths()['ledger'])}?mode=ro", uri=True)
         try:
@@ -264,6 +275,76 @@ class ProducerProfile:
         finally:
             conn.close()
         return value
+
+    def recover_source_device(self, *, previous_device, expected_namespace):
+        """Prove legacy shard continuity, then extend the existing marker only."""
+        from .key_extractor import read_keys_file
+        from .wechat_db import WeChatDB
+        if (isinstance(previous_device, bool) or not isinstance(previous_device, int)
+                or previous_device < 0):
+            raise ProducerError("producer_recovery_device_invalid")
+        with _state_lock(self.state_dir), resource_capture_operation_lock(self.config()):
+            if self.read(self.path).value != self.value:
+                raise ProducerError("producer_profile_changed")
+            marker = self.marker(required=True)
+            root = self.value["source"]["db_dir"]
+            try:
+                identity = resolve_root_identity(root)
+                binding = {"root_inode": identity["root_inode"],
+                           "volume_identity": identity["volume_identity"],
+                           "original_device": previous_device}
+                namespace = source_namespace(identity["source_db_dir"], previous_device,
+                                             identity["root_inode"])
+                if namespace != expected_namespace:
+                    raise ProducerError("producer_recovery_namespace_mismatch")
+                conn = sqlite3.connect(f"file:{quote(self.paths()['ledger'])}?mode=ro", uri=True)
+                try:
+                    row = conn.execute("SELECT value FROM resource_meta WHERE key="
+                                       "'source_inventory_evidence'").fetchone()
+                finally:
+                    conn.close()
+                if (marker.get("source_namespace", namespace) != namespace or not row
+                        or json.loads(row[0]).get("source_namespace") != namespace):
+                    raise ProducerError("producer_recovery_identity_mismatch")
+                installed = marker.get("source_identity")
+                if installed is not None and installed != binding:
+                    raise ProducerError("producer_device_binding_conflict")
+                inventory = SourceInventoryStore(self.paths()["inventory"]).inspect(namespace)
+                expected = [r for r in inventory.shards if r["state"] != "explicitly_retired"]
+                if not inventory.complete or inventory.error_codes or not expected:
+                    raise ProducerError("source_device_lineage_unproven")
+                keys_file = self.value["source"]["keys_file"]
+                _regular(keys_file, private=True)
+                source = WeChatDB(root, read_keys_file(keys_file),
+                                  source_inventory_store=SourceInventoryStore(self.paths()["inventory"]),
+                                  cache_root=self.paths()["cache"], source_binding=binding)
+                observations, _, codes = source._message_shard_observations(
+                    [r["relative_path"] for r in expected])
+                observed = {r["relative_path"]: r for r in observations}
+                if codes or any(not r.get("generation_id")
+                        or observed.get(r["relative_path"], {}).get("state") != "present"
+                        or observed[r["relative_path"]]["generation_id"] != r["generation_id"]
+                        for r in expected):
+                    raise ProducerError("source_device_lineage_mismatch")
+                if (check_binding(root, binding) != identity
+                        or self.read(self.path).value != self.value
+                        or self.marker(required=True) != marker):
+                    raise ProducerError("producer_profile_changed")
+                if installed is None:
+                    updated = dict(marker, source_namespace=namespace, source_identity=binding)
+                    temporary = self.paths()["marker"] + "." + uuid.uuid4().hex + ".tmp"
+                    try:
+                        _write_json(temporary, updated)
+                        os.replace(temporary, self.paths()["marker"])
+                        _fsync_dir_best_effort(self.state_dir)
+                    finally:
+                        if os.path.exists(temporary):
+                            os.unlink(temporary)
+                return {"state": "recovered" if installed is None else "already_recovered",
+                        "archive_id": marker["archive_id"], "source_namespace": namespace,
+                        "verified_shards": len(expected)}
+            except SourceDeviceBindingError as exc:
+                raise ProducerError(exc.code) from exc
 
     def plan(self):
         marker = self.marker()

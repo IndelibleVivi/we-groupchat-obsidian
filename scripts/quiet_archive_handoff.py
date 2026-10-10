@@ -21,7 +21,7 @@ from core.resource_capture import SelectedResourceCapture
 
 REFRESH_SCHEMA = "we-groupchat-obsidian.quiet-archive.refresh.v1"
 SOURCE_COMMANDS = {"capture", "drain", "refresh", "backfill"}
-PROFILE_COMMANDS = {"plan", "init", "adopt-plan", "adopt-apply", "resolve-files"}
+PROFILE_COMMANDS = {"plan", "init", "adopt-plan", "adopt-apply", "resolve-files", "recover-source-device"}
 
 
 def _source(config):
@@ -55,6 +55,13 @@ def build_parser():
                        help="Wait up to 0–300 seconds for capture ownership before freezing the plan.")
     apply = sub.add_parser("adopt-apply")
     apply.add_argument("--plan", required=True)
+    recover = sub.add_parser("recover-source-device")
+    recover.add_argument("--previous-device", type=int, required=True,
+                         help="The durable device number recorded before the device renumber.")
+    recover.add_argument("--expected-namespace", required=True,
+                         help="The exact durable source namespace to reconstruct and match.")
+    recover.add_argument("--allow-transient-wechat-source-read", action="store_true",
+                         help="Authorize this process's protected source reads; macOS may prompt.")
     resolve = sub.add_parser("resolve-files")
     resolve.add_argument("--allow-transient-wechat-source-read", action="store_true")
     resolve.add_argument("--allow-attachment-read", action="store_true")
@@ -109,7 +116,7 @@ def _refresh(capture, exporter, args):
 
 def _execute(args):
     # This check precedes config/key/source construction and all source stat/open.
-    if args.command in SOURCE_COMMANDS | {"resolve-files"} and not args.allow_transient_wechat_source_read:
+    if args.command in SOURCE_COMMANDS | {"resolve-files", "recover-source-device"} and not args.allow_transient_wechat_source_read:
         return {"state": "source_read_not_authorized",
                 "error_code": "allow_transient_wechat_source_read_required"}, 2
     if args.profile:
@@ -183,6 +190,9 @@ def _standalone(args):
                              wait_seconds=args.wait_seconds), 0
     if args.command == "adopt-apply":
         return adoption_apply(profile, args.plan), 0
+    if args.command == "recover-source-device":
+        return profile.recover_source_device(
+            previous_device=args.previous_device, expected_namespace=args.expected_namespace), 0
     if args.command == "status" and not profile.marker():
         return {"state": "not_initialized", "source_read": False, "keys_read": False}, 0
     profile.marker(required=True)

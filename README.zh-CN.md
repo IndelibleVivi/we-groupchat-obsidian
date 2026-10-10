@@ -32,6 +32,9 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 也支持独立 `--profile`：明确指定 source/keys、选群和私有 ledger/cache，plan/status/export 不读取微信或 keys。
 有限预算 refresh 和 staged 历史回补须明确授予 source read；已有交接可保留 identity 承接，新附件也有单独授权的
 解析入口，因此不需要菜单栏 app 或笔记总结任务先运行。profile 与迁移命令见交接指南。
+macOS 设备号变化时，可明确运行一次 `recover-source-device`：核对旧 shard 后在既有 producer marker
+保存卷 UUID／目录 inode，保留 archive、selection 与游标；后续设备号变化自动沿用该绑定。
+命令和恢复条件见上述 handoff 指南。
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![macOS](https://img.shields.io/badge/macOS-only-lightgrey)

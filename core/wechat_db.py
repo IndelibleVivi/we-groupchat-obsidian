@@ -31,6 +31,10 @@ from .source_inventory import (
     source_namespaces_for_root,
 )
 
+from .source_device_binding import (
+    SourceDeviceBindingError, check_binding, source_namespace,
+)
+
 _zstd_dctx = zstd.ZstdDecompressor()
 
 # Regex to extract <title> from XML messages
@@ -372,7 +376,8 @@ class WeChatDB:
         "source_wait_seconds": 0.0,
     }
 
-    def __init__(self, db_dir, keys, *, source_inventory_store=None, cache_root=None):
+    def __init__(self, db_dir, keys, *, source_inventory_store=None, cache_root=None,
+                 source_binding=None):
         """
         Args:
             db_dir: WeChat db_storage directory path.
@@ -398,6 +403,17 @@ class WeChatDB:
         self.cache_namespace, self.source_namespace = source_namespaces_for_root(
             self.db_dir
         )
+        self._source_device = None
+        self._original_device = None
+        if source_binding is not None:
+            try:
+                observed = check_binding(self.db_dir, source_binding)
+            except SourceDeviceBindingError as exc:
+                raise WeChatSourceDegraded(exc.code) from exc
+            self._source_device = observed["device"]
+            self._original_device = source_binding["original_device"]
+            self.source_namespace = source_namespace(
+                observed["source_db_dir"], self._original_device, observed["root_inode"])
         cache_root = os.path.abspath(os.path.expanduser(cache_root or self.CACHE_DIR))
         self.cache_dir = os.path.join(cache_root, self.cache_namespace)
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -1393,9 +1409,12 @@ class WeChatDB:
                 source_stat, prefix = self._opened_regular_prefix(path)
             except OSError:
                 return "missing"
+        device = source_stat.st_dev
+        if device == getattr(self, "_source_device", None):
+            device = self._original_device
         return hashlib.sha256(
             b"wechat-db-generation-v1\0"
-            + f"{source_stat.st_dev}:{source_stat.st_ino}\0".encode("ascii")
+            + f"{device}:{source_stat.st_ino}\0".encode("ascii")
             + prefix
             + b"\0"
             + self._key_fingerprint(rel_key).encode("ascii")

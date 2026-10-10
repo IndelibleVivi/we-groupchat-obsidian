@@ -45,6 +45,10 @@ menu app or a summary job. See the guide for profile and migration commands.
 Explicitly granting `refresh --allow-attachment-read` also resolves selected
 local cached files before export, within `--file-limit`; ordinary refresh keeps
 attachment reads off. Message EOF and missing-file coverage remain separate.
+On macOS, an explicit one-time `recover-source-device` can preserve an existing
+standalone archive after filesystem device renumbering. It verifies every recorded
+shard and extends the existing producer marker with the volume UUID/root inode;
+later renumbering needs no repeat recovery. See the handoff guide for the command.
 
 ## Obsidian output preview
 

@@ -293,6 +293,36 @@ export. Source failure, an invalid profile, or busy ownership cannot turn an old
 snapshot into completed EOF. Profile mode is an explicit invocation, with no
 scheduler or new background process.
 
+### macOS filesystem device renumbering
+
+A legacy standalone producer can reject the same source with
+`producer_source_namespace_mismatch` when macOS changes its filesystem device
+number. Preserve its ledger, selection and cursors. After backing up its private
+state, recover once with the **verified old device number and namespace**:
+
+```bash
+.venv/bin/python scripts/quiet_archive_handoff.py --profile "<profile.json>" recover-source-device \
+  --previous-device <old-device-number> --expected-namespace <old-source-namespace> \
+  --allow-transient-wechat-source-read
+```
+
+This command holds the existing producer/capture locks, reconstructs the old
+namespace from the current real path and inode, matches the marker/ledger and
+requires a complete, non-empty inventory with every non-retired shard still at
+its exact old generation. Wrong source, replaced/rekeyed DB, missing inventory or
+an unavailable stable volume identity fails without changing the marker/ledger.
+It atomically adds `source_identity` (volume UUID, root inode and original device)
+to the existing private `producer-state.json`; no second binding or receipt file
+is created. A repeated identical command reports `already_recovered` after the
+same continuity checks.
+
+Subsequent source reads verify the volume UUID/inode and retain the durable
+namespace and generation across device renumbering. Decrypted caches continue to
+use the actual physical device identity and rebuild as needed. Ordinary
+plan/status/export still do not read the source or keys; refresh arguments and
+the wire protocol are unchanged. This recovery is macOS-only and does not grant
+attachment access or establish Windows source support.
+
 ### Explicit standalone attachment resolution
 
 Refreshing messages does not grant attachment-byte access. A standalone producer

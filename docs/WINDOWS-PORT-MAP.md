@@ -202,6 +202,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/source_adapter.py` | `windows-import-safe` | Canonical read-source protocol and shared capability, cursor, inventory, page and error helpers; no durable-state ownership. |
 | `core/source_contract.py` | `windows-import-safe` | Generated Markdown provenance helpers; unrelated to WeChat source reading. |
 | `core/state_storage.py` | `windows-import-safe` | Platform IO binding for the three migrated JSON state owners; no schema or revision authority. |
+| `core/source_device_binding.py` | `windows-import-safe` | Checks the existing producer marker’s source binding against the stable macOS volume UUID/root inode and reconstructs its durable namespace. Import-safe standard library only; no stable volume identity exists on Windows, so it fails closed there. |
 | `core/source_inventory.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve completeness, revisions, and read-only inspection; source activation remains W1+. |
 | `core/source_metadata_plan.py` | `deferred-w0.2` | Transitively imports digest/knowledge/config storage. |
 | `core/taxonomy_assignment.py` | `windows-import-safe` | Platform-neutral taxonomy resolution. |
