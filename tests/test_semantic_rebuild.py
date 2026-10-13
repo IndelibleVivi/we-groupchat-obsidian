@@ -18,6 +18,11 @@ PROFILE = {"schema": "we-groupchat-obsidian.semantic-providers.v1", "decision": 
            "vectorize_index": "", "secret_name": "synthetic-key"}
 
 
+def journal_details(root, run_id):
+    journal = RebuildJournal(root, run_id)
+    return journal.payloads.expand(journal.read())
+
+
 class SyntheticManagedRuntime:
     def __init__(self):
         self.events = []
@@ -171,7 +176,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.managed.on_restore = self.live_increment
         result = self.execute()
         self.assertEqual(result["state"], "run_complete", result)
-        run = RebuildJournal(self.runtime_root, "test-run").read()
+        run = journal_details(self.runtime_root, "test-run")
         self.assertEqual(len(run["verification"]["capture_passes"]), 2)
         self.assertEqual((self.legacy.tree / "life.md").read_bytes(), self.legacy.page_bytes)
         self.assertEqual(run["migrations"].keys(), {"chat"})
@@ -237,7 +242,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
             self.coordinator.rollback("test-run", apply=True, allow_runtime_changes=True)
         self.coordinator.fault_hook = lambda _phase: None
         if fault_phase == "after_rollback_intent":
-            self.assertEqual(RebuildJournal(self.runtime_root, "test-run").read()["phase"], "run_complete")
+            self.assertEqual(journal_details(self.runtime_root, "test-run")["phase"], "run_complete")
         self.assertNotEqual(self.coordinator.status("test-run")["state"], "run_complete")
         with self.assertRaisesRegex(RebuildError, "rebuild_rollback_recovery_required"):
             self.execute()
@@ -254,7 +259,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.use_semantic_text()
         self.coordinator.plan(PROFILE, run_id="test-run")
         result = self.execute()
-        run = RebuildJournal(self.runtime_root, "test-run").read()
+        run = journal_details(self.runtime_root, "test-run")
         self.assertIn("live_check", result, (result, run.get("acceptance")))
         self.assertTrue(run["acceptance"]["complete"], run["acceptance"])
         self.assertGreater(run["acceptance"]["counts"]["items"], 0)
@@ -296,7 +301,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         from core.semantic.verification import RebuildVerifier
         self.coordinator.plan(PROFILE, run_id="test-run")
         self.execute()
-        run = RebuildJournal(self.runtime_root, "test-run").read()
+        run = journal_details(self.runtime_root, "test-run")
         omitted = dict(run["verification"])
         omitted.pop("required_brief")
         report = RebuildVerifier(run["plan"]["database"], omitted,
@@ -367,7 +372,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.coordinator.fault_hook = late
         result = self.execute()
         self.assertEqual(result["live_check"]["code"], "rebuild_live_increment_pending", result)
-        run = RebuildJournal(self.runtime_root, "test-run").read()
+        run = journal_details(self.runtime_root, "test-run")
         with closing(sqlite3.connect(run["plan"]["database"])) as conn:
             rows = [r[0] for r in conn.execute("SELECT text FROM source_records WHERE source_namespace='source-fixture' ORDER BY capture_seq")]
         self.assertEqual(rows, ["嗯", "late old timestamp", "B"])
@@ -381,7 +386,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.coordinator.fault_hook = fault
         first = self.execute()
         self.assertTrue(first["restored"], first)
-        before = RebuildJournal(self.runtime_root, "test-run").read()
+        before = journal_details(self.runtime_root, "test-run")
         with closing(sqlite3.connect(before["plan"]["database"])) as conn:
             old_count = conn.execute("SELECT COUNT(*) FROM source_records WHERE source_namespace LIKE 'legacy:%' AND provenance_grade='raw_exact'").fetchone()[0]
         self.assertEqual(old_count, 3)
@@ -389,7 +394,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.coordinator.fault_hook = lambda _: None
         second = self.execute()
         self.assertIn("live_check", second, second)
-        run = RebuildJournal(self.runtime_root, "test-run").read()
+        run = journal_details(self.runtime_root, "test-run")
         self.assertEqual(len(run["freeze_receipts"]), 2)
         self.assertTrue(run["acceptance"]["complete"], run["acceptance"])
         with closing(sqlite3.connect(run["plan"]["database"])) as conn:
@@ -405,7 +410,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.assertEqual(result["state"], "incomplete", result)
         self.assertFalse(result["restored"])
         self.assertEqual(GenerationRegistry(self.runtime_root).pin().generation_id,
-                         RebuildJournal(self.runtime_root, "test-run").read()["plan"]["generation_id"])
+                         journal_details(self.runtime_root, "test-run")["plan"]["generation_id"])
 
     def test_interrupted_capture_prefix_is_retained_then_new_full_pass_proves_h1(self):
         from core.semantic.source import SemanticCapture
@@ -423,7 +428,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.source.shards["shard"]["messages"][0]["text"] = "changed after interruption"
         result = self.execute()
         self.assertIn("live_check", result, result)
-        run = RebuildJournal(self.runtime_root, "test-run").read()
+        run = journal_details(self.runtime_root, "test-run")
         abandoned = run["verification"]["abandoned_capture_passes"]
         self.assertEqual(len(abandoned), 1)
         self.assertFalse(abandoned[0]["complete"])
@@ -491,7 +496,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.coordinator.fault_hook = lambda _: None
         result = self.execute()
         self.assertIn("live_check", result, result)
-        run = RebuildJournal(self.runtime_root, "test-run").read()
+        run = journal_details(self.runtime_root, "test-run")
         self.assertTrue(self.coordinator.verify("test-run")["complete"])
         with closing(sqlite3.connect(run["plan"]["database"])) as conn:
             rows = [json.loads(r[0])["legacy_row"]["queue_item"] for r in conn.execute("SELECT payload_json FROM source_records WHERE kind='legacy_queue' ORDER BY capture_seq")]
@@ -577,6 +582,17 @@ class RebuildCoordinatorTests(unittest.TestCase):
             complete = self.coordinator.rollback("test-run", apply=True, allow_runtime_changes=True)
         self.assertEqual(complete["state"], "rolled_back")
         self.assertTrue(complete["restored"])
+
+
+    def test_interrupt_before_provider_releases_locks_and_restores_exact_app(self):
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        with patch.object(self.coordinator, '_freeze', side_effect=KeyboardInterrupt):
+            result = self.execute()
+        self.assertEqual(result['state'], 'incomplete')
+        self.assertTrue(result['restored'])
+        run = RebuildJournal(self.runtime_root, 'test-run').read()
+        self.assertIn('rebuild_interrupted', [entry['code'] for entry in run['errors']])
+        self.assertIsNone(GenerationRegistry(self.runtime_root).pin())
 
 
 class ManagedRuntimeIdentityTests(unittest.TestCase):

@@ -223,6 +223,7 @@ owner keeps its portable storage boundary, including v3 capture/applied receipts
 | `core/semantic/projections.py` | `deferred-w0.2` | Reading artifacts and ownership-aware publication use current filesystem/symlink/mode semantics; Windows native path/private publication acceptance remains outstanding. |
 | `core/semantic/reader_runtime.py` | `deferred-w0.2` | Background reader controls, direct-open and delivery composition use current projection storage and the macOS application shell. |
 | `core/semantic/rebuild.py` | `macos-only` | GenerationRegistry is read-only; the coordinator also owns explicit protected-source grants, macOS LaunchAgent/app lifecycle and current capture locks. No Windows rebuild/runtime claim. |
+| `core/semantic/rebuild_payloads.py` | `deferred-w0.2` | Private immutable payload publication and locked streaming journal conversion; Windows rebuild activation remains unsupported. |
 | `core/semantic/retrieval.py` | `deferred-w1+` | Generation/profile-bound lexical and dense retrieval with index receipts; Windows canonical/index lifecycle acceptance remains deferred. |
 | `core/semantic/runtime.py` | `deferred-w0.2` | Composition for the current long-lived macOS menu app and rebuild; transitive legacy digest/capture storage and provider usage require later migration. |
 | `core/semantic/scheduling.py` | `deferred-w1+` | Process-local provider admission and bounded parallel preparation; canonical stores retain durable jobs and outcomes. Windows semantic runtime acceptance remains deferred. |

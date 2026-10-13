@@ -189,6 +189,37 @@ app、生成新 DB、发布 `WGO/` 并 CAS 更新 monitor checkpoint。
 resource DB backup lock、real-path output lock、checkpoint execution locks 和
 新阅读根的 projection lock 覆盖冻结与切换。所有锁释放后才恢复 LaunchAgent。
 
+## Journal 存储升级与内存边界
+
+Run journal v2 只保存小型状态与不可变 payload references。旧 inventory、冻结
+receipt、source capture receipt 和 verification manifest 保存在同一私有 run
+目录的 `payloads/`，以内容 digest、byte length 和 run ID 绑定。状态推进不再
+解析、复制或重新序列化全部旧正文。同一 journal reader 对已验证且文件 identity
+未改变的 payload 复用验证；首次读取与变化后的读取仍核对完整 bytes，实际消费
+正文时再 decode。此优化不降低冻结、来源完整性或 canonical conservation 验证。
+
+旧内联 journal 必须在 run lock 内逐块转换。可先独立执行以下操作；它只升级
+本地 journal 存储，不读微信、不调用 provider、不停止或激活 app：
+
+```bash
+.venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \
+  compact-journal FIRST_MIGRATION
+```
+
+`execute` / `resume` 在同一个锁内也会自动转换。只读 `status` / `verify` 不暗中
+升级旧文件，返回 `rebuild_journal_upgrade_required` 后使用上述命令。转换验证旧
+plan fingerprint，保留 run/generation/阶段/错误和全部证据；原 journal 原字节
+保存在 `inline-v1.json`，新 payload durable 后才原子替换 `run.json`。中断可沿同一
+run 重试，不能删除原件或手改 phase。旧 writer 生成的 canonical key order 必须
+保持；乱序、损坏、错 run、坏 hash、缺文件及 symlink 均失败关闭。旧版本程序
+不能读取 v2 journal，应使用包含该修复的 coordinator 恢复。
+
+转换按 64 KiB 读取，单个 JSON scalar 上限为 64 MiB，mutable metadata 上限为
+16 MiB；越限保留旧 journal 并明确停止。完整 inventory 的实际导入和独立 verifier
+仍可能按其数据量占用内存，这里不宣称整个重建具有固定 RAM 上限。
+收到正常 Ctrl-C / SIGINT 后，coordinator 记录中断并释放锁；切换状态允许安全
+恢复时再恢复精确 app，不能把中断当完成。强制终止仍按 durable journal 恢复。
+
 ## 冻结、完整来源与 publication
 
 每次真正重新冻结都会生成新的 `freeze-N`：fresh 读取旧 DB/state/config 与

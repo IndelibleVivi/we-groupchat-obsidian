@@ -26,3 +26,9 @@ is implied by this document.
 Use [semantic-workflow.md](semantic-workflow.md) for reading behavior and
 [semantic-rebuild.md](semantic-rebuild.md) for migration, resume and rollback.
 Private run receipts and local operator continuity are not tracked here.
+
+Run-journal storage now uses compact v2 metadata and immutable private payloads.
+The locked `compact-journal` command upgrades interrupted inline v1 runs without
+starting source/model processing; original bytes remain available for recovery.
+This is source capability, not evidence that any private run has been converted
+or activated. See the migration runbook for limits and recovery.

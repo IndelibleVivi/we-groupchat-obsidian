@@ -23,6 +23,8 @@ import uuid
 
 from core.app_runtime import AppInstanceLock, AppAlreadyRunning
 from core.platform import LockMode, create_platform_services
+from core.semantic.rebuild_payloads import (Payloads, STORAGE_SCHEMA, MAX_JOURNAL,
+                                           convert_inline, opened)
 
 
 SCHEMA = "we-groupchat-obsidian.semantic-rebuild.v1"
@@ -201,6 +203,8 @@ class RebuildJournal:
         self.run_root = safe_path(self.root, f"runs/{run_id}")
         self.path = safe_path(self.run_root, "run.json")
         self.registry = GenerationRegistry(self.root)
+        self.payloads = Payloads(self.run_root, self.run_id)
+        self._locked = False
 
     @contextmanager
     def locked(self):
@@ -209,14 +213,19 @@ class RebuildJournal:
         with services.require("locks").acquire(
             str(self.run_root / "run.lock"), mode=LockMode.EXCLUSIVE, blocking=False,
         ):
-            yield
+            self._locked = True
+            try:
+                yield
+            finally:
+                self._locked = False
 
     def create(self, plan):
-        if read_regular(self.path) is not None:
+        if regular_exists(self.path):
             raise RebuildError("run_already_exists")
         if plan.get("run_id") != self.run_id or plan.get("schema") != SCHEMA:
             raise RebuildError("rebuild_plan_invalid")
-        document = {"schema": SCHEMA, "run_id": self.run_id, "revision": 1,
+        plan = self.payloads.compact(plan, ("plan",))
+        document = {"schema": STORAGE_SCHEMA, "run_id": self.run_id, "revision": 1,
                     "plan": plan, "plan_fingerprint": fingerprint(plan), "phase": "planned",
                     "steps": {}, "errors": [], "freeze_receipts": [], "runtime": {},
                     "created_at": time.time(), "updated_at": time.time()}
@@ -224,12 +233,36 @@ class RebuildJournal:
         return document
 
     def read(self):
-        document = read_json(self.path)
-        if (not document or document.get("schema") != SCHEMA
+        with opened(self.path) as stream:
+            size = os.fstat(stream.fileno()).st_size
+            raw = stream.read(MAX_JOURNAL + 1) if size <= MAX_JOURNAL else None
+        if raw is None:
+            if not self._locked:
+                raise RebuildError("rebuild_journal_upgrade_required")
+            document = convert_inline(self.path, self.payloads)
+        else:
+            try:
+                document = json.loads(raw)
+            except (ValueError, UnicodeError) as exc:
+                raise RebuildError("rebuild_corrupt_json") from exc
+            if isinstance(document, dict) and document.get("schema") == SCHEMA:
+                if not self._locked:
+                    raise RebuildError("rebuild_journal_upgrade_required")
+                document = convert_inline(self.path, self.payloads)
+        if (not isinstance(document, dict) or document.get("schema") != STORAGE_SCHEMA
                 or document.get("run_id") != self.run_id
                 or document.get("plan_fingerprint") != fingerprint(document.get("plan"))):
             raise RebuildError("rebuild_run_invalid")
+        self.payloads.check_refs(document)
         return document
+
+    def verification(self, run=None):
+        run = self.read() if run is None else run
+        return self.payloads.expand(run["verification"], ("verification",))
+
+    def frozen(self, run=None):
+        run = self.read() if run is None else run
+        return self.payloads.get(run["freeze_receipts"][-1])
 
     def update(self, mutator):
         current = self.read()
@@ -238,6 +271,9 @@ class RebuildJournal:
         current = current if result is None else result
         current["revision"] = before + 1
         current["updated_at"] = time.time()
+        current = self.payloads.compact(current)
+        if len(canonical_json(current)) > MAX_JOURNAL:
+            raise RebuildError("rebuild_journal_metadata_limit")
         write_json(self.path, current)
         return current
 
@@ -254,6 +290,7 @@ class RebuildJournal:
     def step(self, name, evidence):
         if not isinstance(evidence, dict) or not evidence.get("receipt_id"):
             raise RebuildError("rebuild_receipt_required")
+        evidence = self.payloads.compact(evidence, ("steps", name))
         def patch(row):
             previous = row["steps"].get(name)
             if previous is not None and previous != evidence:
@@ -726,6 +763,14 @@ class RebuildCoordinator:
         return self.execute(run_id, allow_source_read=allow_source_read,
                             allow_model_processing=allow_model_processing)
 
+    def compact_journal(self, run_id):
+        """Convert only local run storage; no source/provider/app construction."""
+        journal = RebuildJournal(self.root, run_id)
+        with journal.locked():
+            run = journal.read()
+            return {"run_id": run_id, "generation_id": run["plan"]["generation_id"],
+                    "state": "journal_ready", "phase": run["phase"]}
+
     def _execute_locked(self, journal):
         from core.semantic.store import SemanticStore
         run, config = journal.read(), self._config()
@@ -792,9 +837,10 @@ class RebuildCoordinator:
                     if callable(close):
                         close()
                 self._finish_cutover(journal, store, roles, config, states)
-        except Exception as exc:
-            failure = exc
-            journal.error(getattr(exc, "code", "rebuild_operation_failed"), journal.read()["phase"])
+        except (Exception, KeyboardInterrupt) as exc:
+            failure = RebuildError("rebuild_interrupted") if isinstance(exc, KeyboardInterrupt) else exc
+            code = "rebuild_interrupted" if isinstance(exc, KeyboardInterrupt) else getattr(exc, "code", "rebuild_operation_failed")
+            journal.error(code, journal.read()["phase"])
         finally:
             try:
                 lock_stack.close()
@@ -863,7 +909,7 @@ class RebuildCoordinator:
                 write_private(empty, b"{}\n")
                 checkpoint_backups[chat] = str(empty)
         frozen = {"receipt_id": identity, "created_at": self.clock(), "databases": databases,
-                  "files": copies, "legacy_inventory": inventory.to_dict(), "legacy_backups": backup_paths,
+                  "files": copies, "legacy_inventory": journal.payloads.put(inventory.to_dict()), "legacy_backups": backup_paths,
                   "checkpoints": snapshots, "checkpoint_backups": checkpoint_backups,
                   "fixed_files": fixed_files, "previous_manifest": previous,
                   "config_fingerprint": fingerprint(config)}
@@ -878,7 +924,7 @@ class RebuildCoordinator:
         run = journal.read()
         attempt = run.get("capture_attempts", {}).get(label)
         if attempt and attempt.get("receipt"):
-            return attempt["receipt"]
+            return journal.payloads.get(attempt["receipt"])
         identity = attempt["snapshot_id"] if attempt else journal.run_id + "-" + label
         if not attempt:
             journal.update(lambda r: r.setdefault("capture_attempts", {}).update({label: {"snapshot_id": identity}}))
@@ -989,7 +1035,7 @@ class RebuildCoordinator:
                 journal.update(lambda r, label=label: r["capture_attempts"][label].update(abandoned=True))
         prefix = frozen["receipt_id"]
         self._snapshot(journal, capture, prefix + "-C0", list(states))
-        inventory = LegacyInventory.from_dict(frozen["legacy_inventory"])
+        inventory = LegacyInventory.from_dict(journal.payloads.get(frozen["legacy_inventory"]))
         imported = import_legacy(store, inventory, allow_preserved_refresh=True)
         record_legacy_backups(store, inventory, frozen["legacy_backups"])
         if imported.batch_ids:
@@ -1023,7 +1069,7 @@ class RebuildCoordinator:
             new, receipt = bridge.migration(old, boundary, batch_ids, pending_batch=pending.get(chat))
             migrations[chat] = {"state": new, "receipt": receipt, "old_revision": old.revision}
         manifest = self._verification_manifest(journal, store, roles, final, inventory, publication)
-        write_json(journal.run_root / "verification.json", manifest)
+        write_json(journal.run_root / "verification.json", journal.payloads.compact(manifest, ("verification",)))
         from core.semantic.verification import RebuildVerifier
         report = RebuildVerifier(store.path, manifest, projection_root=runtime.publisher.root).verify().to_dict()
         acceptance = {"receipt_id": fingerprint(report), **report}
@@ -1040,7 +1086,7 @@ class RebuildCoordinator:
             batches = [{"batch_id": row["batch_id"], "member_version_ids": json.loads(row["receipt_json"])["member_version_ids"]} for row in rows]
         run = journal.read()
         position = {row["batch_id"]: index for index, row in enumerate(rows)}
-        passes = [a["receipt"] for a in run.get("capture_attempts", {}).values() if a.get("receipt")]
+        passes = [journal.payloads.get(a["receipt"]) for a in run.get("capture_attempts", {}).values() if a.get("receipt")]
         passes.sort(key=lambda value: position[value["batches"][0]["batch_id"]])
         abandoned = []
         for attempt in run.get("capture_attempts", {}).values():
@@ -1072,7 +1118,7 @@ class RebuildCoordinator:
     def _publish_staged(self, journal):
         run = journal.read()
         staged = run["staged_files"]
-        originals = {r["relative"]: r["sha256"] for r in run["freeze_receipts"][-1]["fixed_files"]}
+        originals = {r["relative"]: r["sha256"] for r in journal.frozen(run)["fixed_files"]}
         for entry in staged:
             relative = entry["relative"]
             raw = read_regular(entry["path"])
@@ -1127,7 +1173,7 @@ class RebuildCoordinator:
         active = journal.activate_pointer()
         self.fault_hook("after_active_pointer")
         self._cutover_step(journal, "active_manifest", active)
-        report = RebuildVerifier(store.path, run["verification"], projection_root=plan["projection_root"]).verify().to_dict()
+        report = RebuildVerifier(store.path, journal.verification(run), projection_root=plan["projection_root"]).verify().to_dict()
         if report.get("complete") is not True or fingerprint(self._config()) != plan["config_fingerprint"]:
             raise RebuildError("rebuild_cutover_consistency_failed")
         self._cutover_step(journal, "consistency", {"receipt_id": fingerprint(report), **report})
@@ -1136,7 +1182,7 @@ class RebuildCoordinator:
             if "activation" not in row:
                 floor = conn.execute("SELECT COALESCE(MAX(change_id),0) FROM change_events").fetchone()[0]
                 row["activation"] = {"run_id": journal.run_id, "activated_at": self.clock(),
-                                     "delivery_floor_change_id": floor, "h1": run["verification"]["h1"]}
+                                     "delivery_floor_change_id": floor, "h1": journal.payloads.get(run["verification"])["h1"]}
                 conn.execute("UPDATE generation_manifest SET metadata_json=?", (canonical_json(row).decode(),))
             activation = row["activation"]
         self._cutover_step(journal, "activation_committed", {"receipt_id": fingerprint(activation), **activation})
@@ -1204,7 +1250,7 @@ class RebuildCoordinator:
         self._admit_private_paths(self._config())
         journal = RebuildJournal(self.root, run_id)
         run = journal.read()
-        manifest = run.get("verification")
+        manifest = journal.verification(run) if run.get("verification") else None
         if manifest is None:
             return {"complete": False, "issues": [{"code": "rebuild_staged_manifest_missing", "category": "source_pending", "count": 1}], "counts": {}}
         cutover = read_json(journal.registry.journal_path)
@@ -1290,7 +1336,7 @@ class RebuildCoordinator:
     def _rollback_checkpoints(self, journal, states):
         from core.monitor_state import monitor_state_fingerprint
         run = journal.read()
-        frozen = run["freeze_receipts"][-1]
+        frozen = journal.frozen(run)
         path = journal.run_root / "rollback-replay.json"
         replay = read_json(path)
         if replay is None:
@@ -1298,7 +1344,7 @@ class RebuildCoordinator:
                 captures = [r[0] for r in conn.execute("SELECT receipt_id FROM capture_batches ORDER BY rowid")]
             replay = {"receipt_id": journal.run_id + "-rollback-replay", "run_id": journal.run_id,
                       "retained_database": run["plan"]["database"], "retained_capture_receipt_ids": captures,
-                      "h1": run["verification"]["h1"], "checkpoints": {}, "applied": {}}
+                      "h1": journal.payloads.get(run["verification"])["h1"], "checkpoints": {}, "applied": {}}
             for chat, state_store in states.items():
                 current = state_store.inspect()
                 raw = read_regular(frozen["checkpoint_backups"][chat])
@@ -1353,8 +1399,8 @@ class RebuildCoordinator:
         run = journal.read()
         root = Path(run["plan"]["projection_root"])
         generated = {row["relative"]: row["sha256"] for row in run["staged_files"]}
-        copies = {row["path"]: row for row in run["freeze_receipts"][-1]["files"]}
-        for original in run["freeze_receipts"][-1]["fixed_files"]:
+        copies = {row["path"]: row for row in journal.frozen(run)["files"]}
+        for original in journal.frozen(run)["fixed_files"]:
             current = read_regular(safe_path(root, original["relative"]))
             digest = hashlib.sha256(current).hexdigest() if current is not None else None
             if digest == original["sha256"]:

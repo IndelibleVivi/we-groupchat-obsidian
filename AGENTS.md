@@ -207,6 +207,12 @@
   active different semantic generation is not an admissible new rebuild plan.
   Source/model grants, budget/account setup, installation and activation are
   separate from source tests; see `docs/semantic-rebuild.md`.
+- `core/semantic/rebuild_payloads.py` owns run-bound immutable journal payloads
+  and bounded v1-to-v2 journal storage conversion under RebuildJournal's run lock.
+  Routine reads/updates must stay compact; do not expand inventories in phase
+  transitions. Preserve exact inline-v1 bytes, the verified original plan identity,
+  and the same run/generation across conversion. Only explicit consumers expand
+  immutable evidence. This does not change canonical knowledge or checkpoint schemas.
 - `launchers/` owns the canonical Finder-friendly `.command` entrypoints. The
   root `启动.command` is a compatibility stub for deployed source-mode
   LaunchAgents and must not grow a second implementation.

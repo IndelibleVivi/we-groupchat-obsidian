@@ -51,7 +51,9 @@ SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务
 
 已有安装按[首次迁移 runbook](docs/semantic-rebuild.md)执行：保全旧知识、读者状态和原始历史，
 两次完整观察来源、验证有限 cutover horizon，再切换唯一 generation pin 并检查恢复后的增量 runtime。
-拉取代码本身不会迁移或激活数据。日常操作见[语义阅读指南](docs/semantic-workflow.md)，
+拉取代码本身不会迁移或激活数据。大体积迁移 journal 将不可变证据与小型阶段状态分开保存；
+中断的旧内联 journal 可通过 `scripts/rebuild_knowledge.py compact-journal RUN_ID` 升级，
+原件保留，升级本身不读取微信或调用模型。日常操作见[语义阅读指南](docs/semantic-workflow.md)，
 数据流见[provider contract](docs/semantic-providers.md)，准确阶段见[候选状态](docs/current-state.md)。
 专用 archive producer、profile 与菜单已移至外部 adapter；公共 WGO 保留通用 source/capture、
 显式 context capture、CAS 和 mounted backup。

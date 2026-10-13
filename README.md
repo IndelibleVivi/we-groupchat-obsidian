@@ -64,9 +64,12 @@ stays on it. See the [provider data boundary](docs/semantic-providers.md).
 The app does not create a Cloudflare account, provision an index or grant spending.
 
 Existing installations use the [first-migration runbook](docs/semantic-rebuild.md).
-It preserves old knowledge, reader state and raw history, verifies two complete
+The migration preserves old knowledge, reader state and raw history, verifies two complete
 source observations and a finite cutover horizon, then switches one generation
-pin and checks the restored runtime. A source checkout does not migrate or
+pin and checks the restored runtime. Large journals keep immutable evidence outside
+small mutable state. `scripts/rebuild_knowledge.py compact-journal RUN_ID` upgrades
+an interrupted inline journal, preserving original bytes without starting source
+or model processing. A source checkout does not migrate or
 activate data. Start with the [reading guide](docs/semantic-workflow.md),
 [provider contract](docs/semantic-providers.md), and [candidate status](docs/current-state.md).
 Consumer-specific archive producers now belong to external adapters; generic

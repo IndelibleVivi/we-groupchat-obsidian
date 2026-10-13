@@ -26,7 +26,7 @@ def parser():
         command.add_argument("run_id")
         command.add_argument("--allow-transient-wechat-source-read", action="store_true")
         command.add_argument("--allow-model-processing", action="store_true")
-    for name in ("status", "verify"):
+    for name in ("status", "verify", "compact-journal"):
         commands.add_parser(name).add_argument("run_id")
     rollback = commands.add_parser("rollback", help="Plan retained-raw rollback; mutation requires both apply flags")
     rollback.add_argument("run_id")
@@ -78,10 +78,12 @@ def main(argv=None, *, coordinator_factory=None):
             result = getattr(coordinator, args.command)(args.run_id, allow_source_read=True, allow_model_processing=True)
         elif args.command == "rollback":
             result = coordinator.rollback(args.run_id, apply=args.apply, allow_runtime_changes=args.allow_runtime_changes)
+        elif args.command == "compact-journal":
+            result = coordinator.compact_journal(args.run_id)
         else:
             result = getattr(coordinator, args.command)(args.run_id)
         print(json.dumps(public_result(result), ensure_ascii=False, sort_keys=True))
-        if args.command == "status" or result.get("state") in {"run_complete", "rolled_back", "rollback_planned"} or result.get("complete") is True:
+        if args.command in {"status", "compact-journal"} or result.get("state") in {"run_complete", "rolled_back", "rollback_planned"} or result.get("complete") is True:
             return 0
         return 1
     except Exception as exc:
