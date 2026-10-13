@@ -99,6 +99,12 @@ ledger；Text 仍按当前 monitor provider 配置执行。若其中任一角色
 需提供该账户字段及相应 AI/Vectorize budget evidence。local embedding 不是
 Cloudflare 失败后的隐式 fallback。
 
+Loopback endpoint 也可以是操作员维护的 SSH tunnel，连接已明确授权的自托管
+embedding 服务。此时文本会离开 Mac 到该主机，`embedding: local` 不证明同机计算；
+本地索引仍留在 Mac。两端只绑定 loopback，先用合成文本核对维度、pooling、query
+instruction、容量拒绝行为和实际 adapter，再冻结 profile。WGO 不负责安装服务或
+tunnel；自托管 embedding 也不能代替独立 Text 套餐的额度确认。
+
 Cloudflare 预算属于应用级 `DATA_DIR/provider-usage.sqlite`，跨 generation
 共用。外部账户用量必须先由操作员实际核对，缺失不能填作零。
 现有 Text vendor 保留自己的配置与限额，不套用 Cloudflare 免费额度。

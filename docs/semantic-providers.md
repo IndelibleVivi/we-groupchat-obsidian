@@ -169,6 +169,15 @@ local service is running. The separately configured Text route still uses its
 own authorization, credentials and limits. To keep all model calls local, that
 Text route must also be configured for a local service.
 
+A loopback endpoint may also be an operator-managed SSH forward to a self-hosted
+embedding service. In that deployment, selected text leaves the Mac for that
+explicitly authorized host; `embedding: local` describes the adapter, not proof
+of same-machine processing. Keep both tunnel ends bound to loopback, provision
+and maintain the service separately, and verify its dimension, pooling, query
+instruction and rejection of oversized input before creating the generation.
+The local index remains on the Mac. WGO does not install the service or tunnel,
+and an existing server does not establish the separate Text provider's quota.
+
 Selecting **any** Cloudflare role requires the existing `account_id` and
 `secret_name`; Vectorize also requires `vectorize_index`. Workers AI evidence is
 required only when Decision or Embedding uses Cloudflare. Vectorize evidence is
