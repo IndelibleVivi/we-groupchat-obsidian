@@ -970,8 +970,14 @@ class RebuildCoordinator:
             wave = 1 + max((last_owner.get(source_id, -1) for source_id in members), default=-1)
             waves.setdefault(wave, []).append(row)
             last_owner.update({source_id: wave for source_id in members})
+        def prepare_extraction(row):
+            # extract_batch durably accepts and commits its artifact. Resolution
+            # reloads one batch below; retaining all returned observations in
+            # scheduler.map would make a full historical wave occupy RAM.
+            runtime.engine.extract_batch(row["batch_id"])
+
         for wave in sorted(waves):
-            runtime.scheduler.map("text", waves[wave], lambda row: runtime.engine.extract_batch(row["batch_id"]))
+            runtime.scheduler.map("text", waves[wave], prepare_extraction)
         index = runtime.index_all()
         if index.get("complete") is not True:
             raise RebuildError(index.get("code", "rebuild_index_pending"))

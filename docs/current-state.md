@@ -37,3 +37,6 @@ Local cosine now keeps vectors in a private disposable SQLite disk cache, and
 retrieval reads bounded vector payload pages instead of retaining all vectors
 and receipt payloads in Python. This candidate change does not establish a
 whole-migration RAM bound or real private-data acceptance.
+Full-rebuild extraction preparation also releases each durable artifact rather
+than collecting every batch's observations in the scheduler's result list.
+Resolution reads the accepted result for one batch at a time.

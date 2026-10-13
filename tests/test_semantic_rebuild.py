@@ -595,6 +595,54 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.assertIsNone(GenerationRegistry(self.runtime_root).pin())
 
 
+class RebuildPreparationMemoryTests(unittest.TestCase):
+    def test_full_extraction_wave_releases_persisted_artifacts(self):
+        import tracemalloc
+        from core.semantic.scheduling import ProviderScheduler
+
+        batches = [{"batch_id": str(index)} for index in range(48)]
+        extracted, verified, published = [], [], []
+
+        def connect():
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.executescript("""
+                CREATE TABLE capture_batch_members(batch_id TEXT, source_version_id TEXT, core INTEGER);
+                CREATE TABLE processing_receipts(batch_id TEXT, receipt_json TEXT);
+            """)
+            conn.executemany("INSERT INTO processing_receipts VALUES(?,?)",
+                             [(row["batch_id"], json.dumps(row)) for row in batches])
+            return conn
+
+        def extract(batch_id):
+            extracted.append(batch_id)
+            # Stand in for an already durable, resumed model artifact. The
+            # coordinator has no reason to retain every returned payload.
+            return {"observations": bytearray(512 * 1024)}
+
+        runtime = SimpleNamespace(
+            store=SimpleNamespace(list_batches=lambda: batches, connect=connect,
+                                  verify_processing_receipt=verified.append),
+            scheduler=ProviderScheduler(),
+            engine=SimpleNamespace(extract_batch=extract,
+                                   consolidate=lambda _: {"status": "unchanged"},
+                                   reconcile_views=lambda _: {"status": "unchanged"}),
+            index_all=lambda: {"complete": True},
+            publish_all=lambda: published.append(True),
+        )
+        tracemalloc.start()
+        try:
+            result = RebuildCoordinator.__new__(RebuildCoordinator)._process_all(runtime, run_id="synthetic")
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(sorted(extracted), sorted(row["batch_id"] for row in batches))
+        self.assertEqual(verified, batches)
+        self.assertEqual(published, [True])
+        self.assertTrue(result["index"]["complete"])
+        self.assertLess(peak, 12 * 1024 * 1024)
+
+
 class ManagedRuntimeIdentityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
