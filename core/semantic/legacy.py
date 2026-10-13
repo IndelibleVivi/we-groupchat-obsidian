@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import closing
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 import hashlib
 import json
 import os
@@ -54,7 +54,21 @@ def _digest(value: bytes | str) -> str:
 
 
 def _opaque(*parts: Any) -> str:
-    return "legacy_" + _digest(_json(parts))[:40]
+    return "legacy_" + _json_digest(parts)[:40]
+
+
+def _json_digest(value: Any) -> str:
+    """Same canonical bytes/identity, without allocating a whole encoded inventory."""
+    def encode_dataclass(obj):
+        if is_dataclass(obj) and not isinstance(obj, type):
+            return {member.name: getattr(obj, member.name) for member in fields(obj)}
+        raise TypeError("unsupported legacy identity value")
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                               allow_nan=False, default=encode_dataclass)
+    digest = hashlib.sha256()
+    for chunk in encoder.iterencode(value):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _value(value: Any) -> Any:
@@ -178,7 +192,7 @@ class LegacyInventory:
 
     @property
     def manifest_id(self) -> str:
-        return _opaque(self.to_dict())
+        return _opaque(self)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -233,7 +247,7 @@ class LegacyInventory:
                         or page.payload.get("byte_length") != file.byte_length
                         or page.text != page_text):
                     raise LegacyError("legacy_manifest_bytes_changed")
-        expected = _digest(_json([asdict(r) for r in self.records if r.table != "files"]))
+        expected = _json_digest(tuple(r for r in self.records if r.table != "files"))
         if expected != self.database_snapshot_digest:
             raise LegacyError("legacy_manifest_rows_changed")
         external_records = []
@@ -292,7 +306,7 @@ def include_review_queue(manifest: LegacyInventory, queue_dir: str | Path) -> Le
     entry = {"role": "review_queue", "path": str(path), "sha256": _digest(raw), "byte_length": len(raw),
              "bytes_base64": base64.b64encode(raw).decode("ascii")}
     result = replace(manifest, records=records, external_files=manifest.external_files + (entry,),
-                     database_snapshot_digest=_digest(_json([asdict(r) for r in records if r.table != "files"])))
+                     database_snapshot_digest=_json_digest(tuple(r for r in records if r.table != "files")))
     result.validate()
     return result
 
@@ -487,7 +501,7 @@ def plan_legacy(config: Mapping[str, Any] | None = None, *, db_path: str | Path 
     if prior_selected_chats is not None:
         selection["prior_selected_chats"] = list(prior_selected_chats)
     inventory = LegacyInventory(namespace, str(db), str(root), managed_subdir,
-        _digest(_json([asdict(r) for r in records])), records + tuple(page_records),
+        _json_digest(records), records + tuple(page_records),
         tuple(files_out), tuple(missing), json.loads(_json(selection)), tables)
     inventory.validate()
     return inventory
@@ -783,9 +797,10 @@ def build_publication_plan(manifest: LegacyInventory, topic_item_map: Mapping[st
 def _topic_families(manifest, conn):
     """Return only versions proven to belong to this exact frozen inventory."""
     versions = {}
+    manifest_id = manifest.manifest_id
     for row in conn.execute("SELECT legacy_id,target_id,metadata_json FROM legacy_mappings WHERE target_type='source_version'"):
         metadata = json.loads(row[2])
-        if metadata.get("manifest_id") == manifest.manifest_id:
+        if metadata.get("manifest_id") == manifest_id:
             versions.setdefault(row[0], set()).add(row[1])
     families = {}
     for topic in (r for r in manifest.records if r.kind == "topic"):
@@ -902,6 +917,7 @@ def record_legacy_backups(store, manifest: LegacyInventory,
     private regular files after its own durable backup step.
     """
     manifest.validate()
+    manifest_id = manifest.manifest_id
     verified = []
     for file in manifest.files:
         if not file.owned:
@@ -933,7 +949,7 @@ def record_legacy_backups(store, manifest: LegacyInventory,
             if current != expected or recovery != expected:
                 raise LegacyError("legacy_backup_bytes_mismatch")
             conn.execute("UPDATE legacy_mappings SET disposition='preserved_in_place',metadata_json=? WHERE kind='external_file' AND legacy_id=? AND target_id=?",
-                         (_json({"manifest_id": manifest.manifest_id, "file": external, "backup_path": str(backup_path)}),
+                         (_json({"manifest_id": manifest_id, "file": external, "backup_path": str(backup_path)}),
                           _opaque(manifest.namespace, external["path"]), external["sha256"]))
 
 
@@ -948,6 +964,7 @@ def publish_legacy_navigation(store, manifest: LegacyInventory, publication_plan
     from .projections import ReadingError
 
     manifest.validate()
+    manifest_id = manifest.manifest_id
     if publisher.ledger.generation_id != store.generation_id:
         raise LegacyError("legacy_generation_mismatch")
     with publisher.ledger.connection() as conn:
@@ -1016,7 +1033,7 @@ def publish_legacy_navigation(store, manifest: LegacyInventory, publication_plan
                         disposition=excluded.disposition,metadata_json=excluded.metadata_json""",
                         ("navigation", _opaque(manifest.namespace, "path", file.relative_path),
                          "projection", object_id, receipt.status,
-                         _json({"manifest_id": manifest.manifest_id, "page": page, "receipt": asdict(receipt)})))
+                         _json({"manifest_id": manifest_id, "page": page, "receipt": asdict(receipt)})))
             queue = supplied.get("queue_history")
             if queue:
                 receipt = publisher.publish_document(object_id=queue["object_id"], path=queue["path"],
@@ -1026,11 +1043,11 @@ def publish_legacy_navigation(store, manifest: LegacyInventory, publication_plan
                 with store.transaction() as conn:
                     conn.execute("INSERT INTO legacy_mappings VALUES(?,?,?,?,?,?) ON CONFLICT(kind,legacy_id,target_type,target_id) DO UPDATE SET disposition=excluded.disposition,metadata_json=excluded.metadata_json",
                         ("queue_navigation", manifest.namespace, "projection", queue["object_id"], receipt.status,
-                         _json({"manifest_id": manifest.manifest_id, "queue": queue, "receipt": asdict(receipt)})))
+                         _json({"manifest_id": manifest_id, "queue": queue, "receipt": asdict(receipt)})))
     except ReadingError as exc:
         raise LegacyError("legacy_publication_conflict") from exc
     status = ("projection_pending" if any(r["status"] not in {"published", "unchanged"} for r in receipts)
               else "semantic_pending" if any(p["mode"] == "pending" for p in supplied["pages"])
               else "published")
-    return {"manifest_id": manifest.manifest_id, "status": status,
+    return {"manifest_id": manifest_id, "status": status,
             "receipts": receipts, "history_copies": histories}

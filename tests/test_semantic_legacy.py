@@ -91,6 +91,34 @@ class LegacyInventoryTests(unittest.TestCase):
         self.assertNotIn("subscriptions", plan.to_dict())
         self.assertEqual(plan.to_dict(), LegacyInventory.from_dict(json.loads(json.dumps(plan.to_dict()))).to_dict())
 
+    def test_streamed_inventory_identity_matches_original_canonical_bytes(self):
+        import hashlib
+        from unittest.mock import patch
+        plan = self.fixture.plan()
+        raw = json.dumps((plan.to_dict(),), ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode()
+        expected = 'legacy_' + hashlib.sha256(raw).hexdigest()[:40]
+        with patch.object(LegacyInventory, 'to_dict', side_effect=AssertionError('no full manifest copy')):
+            self.assertEqual(plan.manifest_id, expected)
+        # Nested metadata is mutable despite the frozen dataclass: no stale
+        # process-global identity cache may mask a material change.
+        plan.records[0].payload['synthetic_change'] = 'different'
+        self.assertNotEqual(plan.manifest_id, expected)
+
+    def test_streamed_record_digest_does_not_allocate_encoded_inventory(self):
+        from dataclasses import replace
+        import tracemalloc
+        from core.semantic.legacy import _json_digest
+        row = replace(self.fixture.plan().records[0], text='猫🐈' + 'x' * (1024 * 1024))
+        tracemalloc.start()
+        try:
+            digest = _json_digest((row,) * 128)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(len(digest), 64)
+        self.assertLess(peak, 32 * 1024 * 1024)
+
     def test_raw_excerpt_summary_are_distinct_and_duplicate_id_is_one_source(self):
         rows = {r.old_id: r for r in self.fixture.plan().records if r.kind == "event"}
         self.assertEqual("excerpt_only", rows["1"].raw_level)
