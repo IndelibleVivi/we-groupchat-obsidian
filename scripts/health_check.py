@@ -7,13 +7,22 @@ import os
 import re
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from core.config import DATA_DIR, active_monitor_chats, load_config
+from core.config import (
+    DATA_DIR,
+    DEFAULT_CONFIG,
+    ConfigError,
+    ConfigStore,
+    LEGACY_DATA_CONFIG_FILE,
+    LEGACY_CONFIG_FILE,
+    active_monitor_chats,
+)
 from core.attachment_archive import AttachmentArchive
 from core.attachment_backup import AttachmentBackup
 from core.google_drive_auth import GoogleDriveOAuth
@@ -41,12 +50,14 @@ from core.project_identity import SOURCE_GUARD_LAUNCH_AGENT_LABEL
 from core.monitor import STATE_DIR as MONITOR_STATE_DIR, state_file_for_chat
 from core.monitor_state import MonitorStateError, MonitorStateStore
 from core.monitor_source import MonitorSourceError, pending_monitor_source_batch
+from core.monitor_ops import (
+    monitor_operational_status,
+)
 from core.resource_backup import inspect_mounted_resource_backup
 from core.source_inventory import (
     SOURCE_STATES,
     SourceInventoryError,
     SourceInventoryStore,
-    source_namespaces_for_root,
 )
 from core.taxonomy_assignment import taxonomy_assignment_summary
 from core.wechat_source_guard import source_guard_status
@@ -187,6 +198,32 @@ def relation_integrity_status(db_path: str | os.PathLike[str]) -> tuple[str, boo
 
 def _path_status(path: str | os.PathLike[str]) -> str:
     return "configured" if path else "not configured"
+
+
+def _format_ts(value) -> str:
+    """Render an epoch-seconds observation as a bounded UTC label."""
+    try:
+        ts = float(value or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    if ts <= 0:
+        return "none"
+    try:
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return "invalid"
+
+
+def load_config():
+    """Inspect only existing config; never discover source or initialize state."""
+    try:
+        for store in [ConfigStore(), ConfigStore(LEGACY_DATA_CONFIG_FILE), ConfigStore(LEGACY_CONFIG_FILE)]:
+            config = store.inspect()
+            if config is not None:
+                return config
+        return dict(DEFAULT_CONFIG)
+    except OSError as exc:
+        raise ConfigError("config_unreadable") from exc
 
 
 def _sensitive_log_status(delete: bool = False) -> tuple[str, bool]:
@@ -332,13 +369,56 @@ def monitor_state_health(
     }
 
 
+def _bound_source_namespace(config) -> str:
+    """Validate recorded identity using strings only; do not observe source."""
+    from core.source_device_binding import validate_runtime_identity
+    identity = (config or {}).get("wechat_source_identity")
+    if identity is None:
+        return ""
+    return validate_runtime_identity(identity, (config or {}).get("db_dir") or "")["source_namespace"]
+
+
+def _inventory_namespaces(store):
+    try:
+        return store.namespaces()
+    except SourceInventoryError:
+        return None
+
+
+def _legacy_monitor_namespace(config, store, namespaces):
+    """Use only uniquely matching recorded cursor bindings as legacy evidence."""
+    cursor_keys = set()
+    for chat in active_monitor_chats(config or {}):
+        try:
+            snapshot = MonitorStateStore(state_file_for_chat(chat["username"])).inspect()
+        except MonitorStateError:
+            return ""
+        cursor_keys.update((snapshot.data.get("source_cursors") or {}).keys())
+    if not cursor_keys:
+        return namespaces[0] if len(namespaces) == 1 else ""
+    matches = []
+    for namespace in namespaces:
+        snapshot = store.inspect(namespace)
+        keys = {r["logical_shard_id"] for r in snapshot.shards}
+        if cursor_keys and cursor_keys.issubset(keys):
+            matches.append(namespace)
+    if len(matches) != 1:
+        raise SourceInventoryError("source_namespace_cursor_mismatch")
+    return matches[0]
+
+
 def source_inventory_health(
     config,
     *,
     store=None,
     sensitive: bool = False,
 ) -> dict:
-    """Inspect the configured source inventory without scanning or mutation."""
+    """Inspect the configured source inventory without touching the source.
+
+    The namespace is resolved from durable evidence only: a validated stored
+    identity binding or a unique namespace already present in the inventory
+    ledger.  The protected source root is never stat/realpath-ed or opened.
+    """
     db_dir = str((config or {}).get("db_dir") or "").strip()
     empty_counts = {state: 0 for state in sorted(SOURCE_STATES)}
     if not db_dir:
@@ -348,10 +428,52 @@ def source_inventory_health(
             "counts": empty_counts,
             "error_codes": ["source_not_configured"],
             "shards": [],
+            "namespace": "",
         }
-    _cache_namespace, source_namespace = source_namespaces_for_root(db_dir)
+    store = store or SourceInventoryStore()
+    from core.source_device_binding import SourceDeviceBindingError
     try:
-        snapshot = (store or SourceInventoryStore()).inspect(source_namespace)
+        source_namespace = _bound_source_namespace(config)
+    except SourceDeviceBindingError as exc:
+        return {"state": "degraded", "complete": False, "counts": empty_counts,
+                "error_codes": [exc.code], "shards": [], "namespace": ""}
+    if not source_namespace:
+        namespaces = _inventory_namespaces(store)
+        if namespaces is None:
+            return {
+                "state": "unresolved",
+                "complete": False,
+                "counts": empty_counts,
+                "error_codes": ["source_namespace_evidence_unavailable"],
+                "shards": [],
+                "namespace": "",
+            }
+        try:
+            source_namespace = _legacy_monitor_namespace(config, store, namespaces)
+        except SourceInventoryError as exc:
+            return {"state": "unresolved", "complete": False, "counts": empty_counts,
+                    "error_codes": [exc.code], "shards": [], "namespace": ""}
+        if len(namespaces) > 1 and not source_namespace:
+            return {
+                "state": "ambiguous",
+                "complete": False,
+                "counts": empty_counts,
+                "error_codes": ["source_namespace_ambiguous"],
+                "shards": [],
+                "namespace": "",
+            }
+        if not namespaces:
+            return {
+                "state": "uninitialized",
+                "complete": False,
+                "counts": empty_counts,
+                "error_codes": ["source_inventory_uninitialized"],
+                "shards": [],
+                "namespace": "",
+            }
+        source_namespace = source_namespace or namespaces[0]
+    try:
+        snapshot = store.inspect(source_namespace)
     except SourceInventoryError as exc:
         return {
             "state": "degraded",
@@ -359,6 +481,7 @@ def source_inventory_health(
             "counts": empty_counts,
             "error_codes": [exc.code],
             "shards": [],
+            "namespace": source_namespace,
         }
     if "source_inventory_uninitialized" in snapshot.error_codes:
         state = "uninitialized"
@@ -369,6 +492,7 @@ def source_inventory_health(
         "complete": bool(snapshot.complete),
         "counts": dict(snapshot.counts),
         "error_codes": list(snapshot.error_codes),
+        "namespace": source_namespace,
         "shards": (
             snapshot.as_dict(sensitive=True).get("shards", [])
             if sensitive else []
@@ -390,7 +514,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    config = load_config()
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"[WARN] Config inspection: {exc.code}")
+        return 2
     keys = get_cached_keys() or {}
     api_key_available = bool(load_key("ai-api-key")) or config.get("ai_provider") == "ollama"
     live_ai_success = recent_autostart_ai_success()
@@ -427,6 +555,7 @@ def main(argv: list[str] | None = None) -> int:
         oauth=GoogleDriveOAuth(),
     )
     monitor_state = monitor_state_health(config)
+    monitor_ops = monitor_operational_status(config)
     source_inventory = source_inventory_health(
         config,
         sensitive=args.sensitive,
@@ -479,8 +608,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[{ok(bool(config.get('monitor_topic')))}] Monitor topic: {'已设置' if config.get('monitor_topic') else '未设置'}")
     monitor_counts = monitor_state["counts"]
     monitor_enabled = bool(config.get("monitor_enabled", False))
-    monitor_ok = monitor_state["state"] == "healthy" or (
-        not monitor_enabled and monitor_state["state"] == "missing"
+    ops_counts = monitor_ops["counts"]
+    # The enabled switch is intentionally distinct from functional status: a
+    # monitor that is switched on but blocked/stale/unknown must not read as OK.
+    ops_ok = monitor_ops["state"] == "healthy" or (
+        not monitor_enabled
+        and monitor_ops["state"] in {"disabled", "unconfigured"}
+    )
+    monitor_ok = ops_ok and (
+        monitor_state["state"] == "healthy"
+        or (not monitor_enabled and monitor_state["state"] == "missing")
     )
     print(
         f"[{ok(monitor_ok)}] Monitor state: {monitor_state['state']}; "
@@ -489,6 +626,21 @@ def main(argv: list[str] | None = None) -> int:
         f"last_runtime={monitor_state['runtime_result']}; "
         f"legacy={monitor_state['legacy_states']}"
     )
+    print(
+        f"[{ok(ops_ok)}] Monitor operational status: {monitor_ops['state']}; "
+        f"enabled={int(monitor_ops['enabled'])}; "
+        f"blocked={ops_counts['blocked']}; stale={ops_counts['stale']}; "
+        f"unknown={ops_counts['unknown']}; "
+        f"last_attempt={_format_ts(monitor_ops['last_attempt_ts'])}; "
+        f"attempt_code={monitor_ops.get('last_attempt_code') or '-'}; "
+        f"last_success={_format_ts(monitor_ops['last_success_ts'])}; "
+        f"progress_watermark={_format_ts(monitor_ops['progress_watermark_ts'])}"
+    )
+    if monitor_ops["blocked_codes"]:
+        print(
+            "[WARN] Monitor blocked codes: "
+            + ", ".join(monitor_ops["blocked_codes"])
+        )
     print(
         f"[{ok(monitor_ok)}] Monitor raw cursor progress: "
         f"checkpointed_chats={monitor_counts['healthy']}/{monitor_state['chat_count']}; "
@@ -517,6 +669,8 @@ def main(argv: list[str] | None = None) -> int:
         f"errors={len(source_inventory['error_codes'])}"
     )
     if args.sensitive:
+        if source_inventory.get("namespace"):
+            print(f"  - Source namespace: {source_inventory['namespace']}")
         for shard in source_inventory.get("shards") or []:
             print(
                 "  - Source shard: "

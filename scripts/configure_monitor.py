@@ -201,7 +201,7 @@ def configure(args: argparse.Namespace) -> int:
         print("没有找到 WeChat db_dir。先运行一次 ./启动.command 让程序自动检测微信数据库路径。")
         return 1
 
-    db = WeChatDB.for_runtime(config["db_dir"], keys)
+    db = WeChatDB.for_runtime(config["db_dir"], keys, config=config)
     groups = list_groups(db, args.search)
     if not groups:
         print("没有找到群聊。可以先在微信里打开目标群，再重新运行这个配置。")

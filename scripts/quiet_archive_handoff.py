@@ -30,7 +30,7 @@ def _source(config):
     keys = get_cached_keys() or {}
     if not keys or not config.get("db_dir"):
         return None
-    return WeChatDB.for_runtime(config["db_dir"], keys)
+    return WeChatDB.for_runtime(config["db_dir"], keys, config=config)
 
 
 def build_parser():

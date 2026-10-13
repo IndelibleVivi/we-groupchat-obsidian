@@ -174,6 +174,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/launch_agent.py` | `macos-only` | macOS LaunchAgent adapter; Windows autostart is W6. |
 | `core/link_preview.py` | `windows-import-safe` | Platform-neutral exact URL extraction plus inert zero-network compatibility receipts; remote preview is retired. |
 | `core/monitor.py` | `deferred-w0.2` | Transitively imports config/knowledge/review storage; Windows activation is W3. |
+| `core/monitor_ops.py` | `deferred-w0.2` | Content-free diagnostic attempts/freshness; activates through the Mac monitor, never owns source progress. |
 | `core/monitor_result.py` | `windows-import-safe` | Pure bounded outcome interpretation; unknown results block catch-up. No platform or product activation. |
 | `core/monitor_source.py` | `windows-import-safe` | Pure source-cursor merge and pending-batch metadata validation; platform storage remains owned by callers. |
 | `core/monitor_state.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve checkpoint CAS and read-only inspection; Windows monitor activation remains W3. |
@@ -202,7 +203,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/source_adapter.py` | `windows-import-safe` | Canonical read-source protocol and shared capability, cursor, inventory, page and error helpers; no durable-state ownership. |
 | `core/source_contract.py` | `windows-import-safe` | Generated Markdown provenance helpers; unrelated to WeChat source reading. |
 | `core/state_storage.py` | `windows-import-safe` | Platform IO binding for the three migrated JSON state owners; no schema or revision authority. |
-| `core/source_device_binding.py` | `windows-import-safe` | Checks the existing producer marker’s source binding against the stable macOS volume UUID/root inode and reconstructs its durable namespace. Import-safe standard library only; no stable volume identity exists on Windows, so it fails closed there. |
+| `core/source_device_binding.py` | `windows-import-safe` | Checks app-config and standalone producer source bindings against the stable macOS volume UUID/root inode and reconstructs its durable namespace. Import-safe standard library only; no stable volume identity exists on Windows, so it fails closed there. |
 | `core/source_inventory.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve completeness, revisions, and read-only inspection; source activation remains W1+. |
 | `core/source_metadata_plan.py` | `deferred-w0.2` | Transitively imports digest/knowledge/config storage. |
 | `core/taxonomy_assignment.py` | `windows-import-safe` | Platform-neutral taxonomy resolution. |
@@ -212,6 +213,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/wechat_resign.py` | `macos-only` | Exact-target AppKit/codesign/sudo re-sign orchestration; Windows key-provider authorization belongs to W1+. |
 | `core/wechat_signing_identity.py` | `macos-only` | macOS `security`/openssl adapter owning the persistent self-signed re-sign identity keychain; no Windows signing support. |
 | `core/wechat_source_guard.py` | `macos-only` | `fcntl`, macOS key/process adapter, and osascript notification behavior. |
+| `core/wechat_source_recovery.py` | `macos-only` | Explicit stable-volume app-source continuity proof under the capture lock; patches config identity without translating checkpoints. |
 | `ui/__init__.py` | `windows-import-safe` | Empty reusable UI package boundary; Windows tray is W6. |
 | `scripts/__init__.py` | `windows-import-safe` | Empty operator package boundary. |
 | `scripts/attachment_archive.py` | `operator-deferred` | Depends on W0.2 storage and W5 attachment authorization. |
@@ -228,6 +230,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `scripts/organize_obsidian.py` | `operator-deferred` | Depends on W0.2 path/storage and W3 projection activation. |
 | `scripts/quiet_archive_handoff.py` | `macos-only` | Explicit protected-source capture/drain/backfill and local JSON handoff; reuses current Mac capture/backup owners. |
 | `scripts/refresh_data_source.py` | `macos-only` | Invokes the current macOS key/process adapter. |
+| `scripts/recover_source_device.py` | `macos-only` | Explicit stopped-app device-renumber proof/apply with per-invocation source grant and app singleton ownership. |
 | `scripts/resign_wechat.py` | `macos-only` | Explicit-consent thin CLI for the exact-target macOS re-sign operation. |
 | `scripts/repair_relation_markdown.py` | `operator-deferred` | Depends on knowledge/config storage. |
 | `scripts/repair_relations.py` | `operator-deferred` | Depends on configured private relation state. |

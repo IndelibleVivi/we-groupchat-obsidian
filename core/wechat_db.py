@@ -6,6 +6,7 @@ import html
 import hashlib
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import tempfile
@@ -403,6 +404,7 @@ class WeChatDB:
         self.cache_namespace, self.source_namespace = source_namespaces_for_root(
             self.db_dir
         )
+        self._message_identity_namespace = self.cache_namespace
         self._source_device = None
         self._original_device = None
         if source_binding is not None:
@@ -414,6 +416,12 @@ class WeChatDB:
             self._original_device = source_binding["original_device"]
             self.source_namespace = source_namespace(
                 observed["source_db_dir"], self._original_device, observed["root_inode"])
+            # Keep the established v2 message-ID namespace across a proven
+            # device renumber. Decrypted cache placement must remain physical.
+            self._message_identity_namespace = hashlib.sha256(
+                f'{observed["source_db_dir"]}\0{self._original_device}\0{observed["root_inode"]}'
+                .encode("utf-8")
+            ).hexdigest()
         cache_root = os.path.abspath(os.path.expanduser(cache_root or self.CACHE_DIR))
         self.cache_dir = os.path.join(cache_root, self.cache_namespace)
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -509,12 +517,21 @@ class WeChatDB:
         return result
 
     @classmethod
-    def for_runtime(cls, db_dir, keys):
+    def for_runtime(cls, db_dir, keys, *, config=None):
         """Create a source reader bound to the durable private inventory."""
+        identity = (config or {}).get("wechat_source_identity")
+        binding = None
+        if identity is not None:
+            from .source_device_binding import validate_runtime_identity
+            try:
+                binding = validate_runtime_identity(identity, db_dir)["binding"]
+            except SourceDeviceBindingError as exc:
+                raise WeChatSourceDegraded(exc.code) from exc
         return cls(
             db_dir,
             keys,
             source_inventory_store=SourceInventoryStore(),
+            source_binding=binding,
         )
 
     @staticmethod
@@ -750,6 +767,17 @@ class WeChatDB:
             return self._get_decrypted_db_locked(rel_path)
 
     @staticmethod
+    def _copy_source_snapshot_file(source_path, target_path):
+        """Copy regular source bytes into a private, newly created file."""
+        fd = os.open(source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise OSError("source_not_regular")
+            target_fd = os.open(target_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(target_fd, "wb") as target:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+
+    @staticmethod
     def _cache_rebuild_reason(
         record,
         *,
@@ -830,26 +858,33 @@ class WeChatDB:
             os.close(fd)
             decrypt_started = time.perf_counter()
             try:
-                pages = decrypt_database(db_path, temp_path, enc_key)
-                if pages == 0:
-                    return None
-                wal_pages = 0
-                if wal_identity is not None:
-                    wal_pages = int(decrypt_wal(wal_path, temp_path, enc_key) or 0)
+                # Capture one coherent DB/WAL pair before slow decryption.
+                # Ordinary live writes after capture do not mix its bytes.
+                # Public pages still validate live DB/key generation around
+                # their first pin; the next read invalidates a changed cache.
+                with tempfile.TemporaryDirectory(prefix=".cipher-snapshot-", dir=self.cache_dir) as captured:
+                    captured_db = os.path.join(captured, "source.db")
+                    captured_wal = captured_db + "-wal"
+                    self._copy_source_snapshot_file(db_path, captured_db)
+                    if wal_identity is not None:
+                        self._copy_source_snapshot_file(wal_path, captured_wal)
+                    if (self._file_identity(db_path) != db_identity
+                            or self._file_identity(wal_path) != wal_identity):
+                        continue
+                    self._add_source_stage_stats(
+                        snapshot_bytes=db_identity[2] + (wal_identity[2] if wal_identity else 0))
+                    pages = decrypt_database(captured_db, temp_path, enc_key)
+                    if pages == 0:
+                        return None
+                    wal_pages = 0
+                    if wal_identity is not None:
+                        wal_pages = int(decrypt_wal(captured_wal, temp_path, enc_key) or 0)
                 decrypted_pages = int(pages) + wal_pages
                 self._add_source_stage_stats(
                     decrypted_pages=decrypted_pages,
                     decrypted_bytes=decrypted_pages * PAGE_SZ,
                 )
 
-                # A checkpoint/reset/replacement during reconstruction can mix
-                # database generations.  Publish only when both source files
-                # still have the exact identities observed before decryption.
-                if (
-                    self._file_identity(db_path) != db_identity
-                    or self._file_identity(wal_path) != wal_identity
-                ):
-                    continue
                 try:
                     os.chmod(temp_path, 0o600)
                 except OSError:
@@ -857,7 +892,7 @@ class WeChatDB:
                 os.replace(temp_path, cache_path)
                 temp_path = ""
                 self._remove_stale_cache_siblings(rel_path, cache_path)
-            except WALSnapshotError as exc:
+            except (WALSnapshotError, OSError) as exc:
                 raise WeChatSourceDegraded("source_snapshot_failed") from exc
             finally:
                 self._add_source_stage_stats(
@@ -1169,7 +1204,8 @@ class WeChatDB:
         else:
             identity_path = self._cache_path(rel_key)
         basename = os.path.basename(str(identity_path))
-        namespace = str(getattr(self, "cache_namespace", "legacy-unscoped"))
+        namespace = str(getattr(self, "_message_identity_namespace",
+                                getattr(self, "cache_namespace", "legacy-unscoped")))
         return hashlib.sha256(
             f"wechat-db-shard-v2\0{namespace}\0{basename}".encode()
         ).hexdigest()[:20]

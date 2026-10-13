@@ -73,6 +73,7 @@ mcp = FastMCP(
 # ── Lazy-loaded singleton ──────────────────────────────
 
 _db = None
+_db_source_identity = None
 _keys_mtime = 0  # keys file mtime, used to detect key updates
 _MCP_SEND_RETIRED_RESPONSE = json.dumps(
     {
@@ -96,7 +97,7 @@ _MCP_MUTATION_RETIRED_RESPONSE = json.dumps(
 
 def _get_db():
     """Lazy-load WeChatDB singleton; auto-rebuild when keys file is updated."""
-    global _db, _keys_mtime
+    global _db, _keys_mtime, _db_source_identity
 
     from core.key_extractor import get_cached_keys
     from core.wechat_db import WeChatDB
@@ -112,7 +113,10 @@ def _get_db():
     # Detect if keys file was updated (menu bar app writes new file after refresh)
     keys_file = cfg.get("keys_file", os.path.join(DATA_DIR, "all_keys.json"))
     cur_mtime = os.path.getmtime(keys_file) if os.path.exists(keys_file) else 0
-    if _db is not None and cur_mtime == _keys_mtime:
+    identity = cfg.get("wechat_source_identity")
+    if (_db is not None and cur_mtime == _keys_mtime
+            and getattr(_db, "db_dir", None) == db_dir
+            and _db_source_identity == identity):
         return _db
 
     keys = get_cached_keys()
@@ -121,7 +125,8 @@ def _get_db():
             "未找到数据库密钥。请先运行菜单栏 app 的「🔄 刷新数据源」功能。"
         )
 
-    _db = WeChatDB.for_runtime(db_dir, keys)
+    _db = WeChatDB.for_runtime(db_dir, keys, config=cfg)
+    _db_source_identity = identity
     _keys_mtime = cur_mtime
     return _db
 

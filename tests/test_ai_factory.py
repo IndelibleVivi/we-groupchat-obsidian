@@ -2,9 +2,30 @@ import unittest
 from unittest.mock import patch
 
 from ai.factory import create_provider
+from core.config import ConfigError, _sanitize_config
 
 
 class AIProviderFactoryTests(unittest.TestCase):
+    def test_custom_thinking_is_explicit_and_preserves_other_custom_endpoints(self):
+        config = {"ai_provider": "custom", "ai_model": "synthetic",
+                  "ai_base_url": "http://127.0.0.1:12345/v1", "ai_thinking": False}
+        with patch("ai.factory.load_key", return_value="synthetic-key"), \
+                patch("ai.openai_provider.OpenAIProvider") as provider:
+            create_provider(config)
+            self.assertNotIn("thinking", provider.call_args.kwargs)
+            create_provider(dict(config, custom_thinking_parameter="thinking"))
+            self.assertIs(provider.call_args.kwargs["thinking"], False)
+            self.assertEqual(provider.call_args.kwargs["thinking_parameter"], "thinking")
+            create_provider(dict(config, custom_thinking_parameter="enable_thinking"))
+            self.assertEqual(provider.call_args.kwargs["thinking_parameter"], "enable_thinking")
+            for invalid in ([], {}, True, None, "guess"):
+                with self.subTest(invalid=invalid):
+                    value = dict(config, custom_thinking_parameter=invalid)
+                    with self.assertRaises(ValueError):
+                        create_provider(value)
+                    with self.assertRaises(ConfigError):
+                        _sanitize_config(value)
+
     def test_ollama_does_not_open_credential_store(self):
         with patch("ai.factory.load_key", side_effect=AssertionError("credential access")), \
              patch("ai.ollama_provider.OllamaProvider") as provider:

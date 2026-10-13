@@ -71,11 +71,20 @@ def create_provider(config):
             raise ValueError("自定义提供者需要设置模型名称（设置 → AI 模型）")
         if not config.get("ai_base_url"):
             raise ValueError("自定义提供者需要设置 Base URL（设置 → AI Base URL）")
+        parameter = config.get("custom_thinking_parameter", "")
+        if not isinstance(parameter, str) or parameter not in {"", "thinking", "enable_thinking"}:
+            raise ValueError("自定义 thinking 参数不受支持")
+        # A custom endpoint declares its dialect explicitly. Ordinary custom
+        # servers keep their existing payload; monitor policy can opt a known
+        # DeepSeek/Qwen-compatible gateway into its existing thinking control.
+        thinking_options = ({"thinking": config.get("ai_thinking"),
+                             "thinking_parameter": parameter} if parameter else {})
         return OpenAIProvider(
             api_key=api_key,
             model=model,
             base_url=config.get("ai_base_url", ""),
             timeout_seconds=config.get("ai_timeout_seconds", 45.0),
+            **thinking_options,
         )
 
     else:

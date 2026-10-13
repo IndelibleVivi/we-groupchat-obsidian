@@ -23,6 +23,7 @@ LEGACY_CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 DEFAULT_CONFIG = {
     "config_revision": 0,
     "db_dir": "",
+    "wechat_source_identity": None,
     "keys_file": os.path.join(DATA_DIR, "all_keys.json"),
     "decrypted_dir": os.path.join(DATA_DIR, "decrypted"),
     "ai_provider": "qwen",  # Options: qwen, ollama, deepseek, claude, openai, custom
@@ -31,6 +32,7 @@ DEFAULT_CONFIG = {
     "ollama_model": "qwen3:8b",
     "auto_refresh_on_open": False,
     "ai_base_url": "",
+    "custom_thinking_parameter": "",
     "image_aes_key": "",
     "show_group_nickname": True,
     "batch_msg_limit": 100,
@@ -313,6 +315,14 @@ def _sanitize_config(saved):
     if not isinstance(saved, dict):
         return cfg
 
+    if saved.get("wechat_source_identity") is not None:
+        from .source_device_binding import SourceDeviceBindingError, validate_runtime_identity
+        try:
+            cfg["wechat_source_identity"] = validate_runtime_identity(
+                saved["wechat_source_identity"], saved.get("db_dir") or "")
+        except SourceDeviceBindingError as exc:
+            raise ConfigError(exc.code) from exc
+
     revision = saved.get("config_revision")
     if isinstance(revision, int) and revision >= 0:
         cfg["config_revision"] = revision
@@ -331,6 +341,11 @@ def _sanitize_config(saved):
         value = saved.get(key)
         if isinstance(value, str):
             cfg[key] = value
+
+    parameter = saved.get("custom_thinking_parameter", "")
+    if not isinstance(parameter, str) or parameter not in {"", "thinking", "enable_thinking"}:
+        raise ConfigError("custom_thinking_parameter_invalid")
+    cfg["custom_thinking_parameter"] = parameter
 
     monitor_chats = saved.get("monitor_chats")
     if isinstance(monitor_chats, list):
@@ -533,6 +548,30 @@ class ConfigStore:
             return self._read_locked()
         finally:
             self._unlock(fd)
+
+    def inspect(self):
+        """Read existing atomic config without creating directories or locks."""
+        try:
+            value = os.lstat(self.path)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(value.st_mode):
+            raise ConfigError("config_not_regular")
+        fd = os.open(self._storage.operational_path(), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ConfigError("config_not_regular")
+            with os.fdopen(fd, encoding="utf-8") as handle:
+                fd = -1
+                data = json.load(handle)
+                if not isinstance(data, dict):
+                    raise ConfigError("config_corrupt")
+                return _sanitize_config(data)
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise ConfigError("config_corrupt") from exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
     def _write_locked(self, value):
         data = (json.dumps(value, indent=4, ensure_ascii=False) + "\n").encode("utf-8")

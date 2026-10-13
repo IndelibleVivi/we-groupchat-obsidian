@@ -579,7 +579,7 @@ def _load_runtime() -> tuple[dict, list[dict], WeChatDB]:
     db_dir = os.path.expanduser(str(config.get("db_dir") or ""))
     if not db_dir or not os.path.isdir(db_dir):
         raise RuntimeError("WeChat db_dir 不可用；先运行 ./启动.command")
-    db = WeChatDB.for_runtime(db_dir, keys)
+    db = WeChatDB.for_runtime(db_dir, keys, config=config)
     if hasattr(db, "refresh_cache_view"):
         db.refresh_cache_view()
     return config, chats, db

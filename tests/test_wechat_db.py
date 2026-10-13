@@ -116,6 +116,15 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
             rel_path: {"enc_key": "33" * 32},
         })
         calls = []
+        copies = []
+        original_copy = db._copy_source_snapshot_file
+
+        def changing_copy(source, target):
+            original_copy(source, target)
+            copies.append(target)
+            if len(copies) == 1:
+                with open(source_path, "ab") as handle:
+                    handle.write(b"changed")
 
         def fake_decrypt(_source, output, _key):
             calls.append(output)
@@ -124,18 +133,17 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
             conn.execute("INSERT INTO snapshot_value VALUES ('stable')")
             conn.commit()
             conn.close()
-            if len(calls) == 1:
-                with open(source_path, "ab") as handle:
-                    handle.write(b"changed")
             return 1
 
         with (
             patch.object(db, "_is_plain_sqlite", return_value=False),
+            patch.object(db, "_copy_source_snapshot_file", side_effect=changing_copy),
             patch("core.wechat_db.decrypt_database", side_effect=fake_decrypt),
         ):
             path = db._get_decrypted_db(rel_path)
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(copies), 2)
+        self.assertEqual(len(calls), 1)
         conn = sqlite3.connect(path)
         try:
             self.assertEqual(
@@ -145,6 +153,67 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
         finally:
             conn.close()
 
+
+    def test_live_writes_during_decryption_do_not_change_captured_db_or_wal(self):
+        rel_path = "message/message_6.db"
+        source_path = os.path.join(self.tmp.name, rel_path)
+        os.makedirs(os.path.dirname(source_path), exist_ok=True)
+        for path, value in ((source_path, b"encrypted original"), (source_path + "-wal", b"original wal")):
+            with open(path, "wb") as handle:
+                handle.write(value)
+        db = WeChatDB(self.tmp.name, {rel_path: {"enc_key": "33" * 32}})
+
+        def fake_decrypt(source, output, _key):
+            with open(source_path, "ab") as live:
+                live.write(b"new live write")
+            with open(source_path + "-wal", "ab") as live:
+                live.write(b"new wal write")
+            with open(source, "rb") as captured:
+                self.assertEqual(captured.read(), b"encrypted original")
+            self.assertEqual(os.stat(source).st_mode & 0o777, 0o600)
+            conn = sqlite3.connect(output)
+            conn.execute("CREATE TABLE captured(value TEXT)")
+            conn.commit()
+            conn.close()
+            return 1
+
+        def fake_wal(source, _output, _key):
+            with open(source, "rb") as captured:
+                self.assertEqual(captured.read(), b"original wal")
+            return 1
+
+        with patch("core.wechat_db.decrypt_database", side_effect=fake_decrypt) as decrypt, \
+                patch("core.wechat_db.decrypt_wal", side_effect=fake_wal):
+            self.assertTrue(db._get_decrypted_db(rel_path))
+            self.assertEqual(decrypt.call_count, 1)
+        self.assertFalse(any(name.startswith(".cipher-snapshot-") for name in os.listdir(db.cache_dir)))
+        self.assertNotEqual(db._db_cache[rel_path]["db_identity"], db._file_identity(source_path))
+
+    def test_unstable_cipher_capture_never_decrypts_or_replaces_published_payload(self):
+        rel_path = "message/message_6.db"
+        source_path = os.path.join(self.tmp.name, rel_path)
+        os.makedirs(os.path.dirname(source_path), exist_ok=True)
+        with open(source_path, "wb") as handle:
+            handle.write(b"encrypted original")
+        db = WeChatDB(self.tmp.name, {rel_path: {"enc_key": "33" * 32}})
+        published = db._cache_path(rel_path)
+        with open(published, "wb") as handle:
+            handle.write(b"previous payload")
+        original_copy = db._copy_source_snapshot_file
+
+        def changing_copy(source, target):
+            original_copy(source, target)
+            with open(source_path, "ab") as live:
+                live.write(b"change during copy")
+
+        with patch.object(db, "_copy_source_snapshot_file", side_effect=changing_copy), \
+                patch("core.wechat_db.decrypt_database", side_effect=AssertionError("unstable capture decrypted")):
+            with self.assertRaisesRegex(WeChatSourceDegraded, "source_snapshot_failed"):
+                db._get_decrypted_db(rel_path)
+        with open(published, "rb") as handle:
+            self.assertEqual(handle.read(), b"previous payload")
+        self.assertFalse(any(name.startswith((".cipher-snapshot-", ".partial-"))
+                             for name in os.listdir(db.cache_dir)))
 
     def test_decrypted_cache_publish_is_atomic_and_snapshot_is_pinned(self):
         rel_path = "message/message_1.db"
@@ -199,7 +268,7 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
                 name.startswith(".partial-")
                 for name in os.listdir(db.cache_dir)
             ))
-            self.assertEqual(db.source_stage_stats()["snapshot_bytes"], 0)
+            self.assertGreater(db.source_stage_stats()["snapshot_bytes"], 0)
 
     def test_cache_namespace_and_key_fingerprint_isolate_source_roots(self):
         rel_path = "message/message_2.db"
@@ -217,7 +286,8 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
             conn = sqlite3.connect(output)
             try:
                 conn.execute("CREATE TABLE source_value(value TEXT)")
-                conn.execute("INSERT INTO source_value VALUES (?)", (source,))
+                with open(source, "rb") as handle:
+                    conn.execute("INSERT INTO source_value VALUES (?)", (handle.read(),))
                 conn.commit()
             finally:
                 conn.close()
@@ -239,7 +309,7 @@ class WeChatDBCacheRefreshTests(unittest.TestCase):
             value = conn.execute("SELECT value FROM source_value").fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(value, os.path.join(first_root, rel_path))
+        self.assertEqual(value, first_root.encode("utf-8"))
 
     def test_warm_refresh_reuses_decryption_and_real_identity_changes_rebuild(self):
         rel_path = "message/message_8.db"

@@ -60,6 +60,16 @@ class MonitorDecisionError(RuntimeError):
 class MonitorConfigError(RuntimeError):
     """Raised when the monitor is missing required user configuration."""
 
+    code = "monitor_config_error"
+
+
+class MonitorProviderError(RuntimeError):
+    """Carry a bounded provider reason alongside its redacted user message."""
+
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
 
 def load_state(path=STATE_FILE):
     """Compatibility reader backed by the canonical state store."""
@@ -138,11 +148,19 @@ class TopicMonitor:
     def check_once(self, dry_run=False):
         if dry_run:
             return self._check_once(dry_run=True)
+        from .monitor_ops import observe_monitor_attempt
         try:
             with self.state_store.execution_lock():
-                return self._check_once(dry_run=False)
+                result = self._check_once(dry_run=False)
+                observe_monitor_attempt(self.state_store, result)
+                return result
         except MonitorStateError as exc:
-            return self._state_error_result(exc)
+            result = self._state_error_result(exc)
+            observe_monitor_attempt(self.state_store, result)
+            return result
+        except Exception as exc:
+            observe_monitor_attempt(self.state_store, exc)
+            raise
 
     def _check_once(self, dry_run=False):
         """Run a single monitor check.
@@ -604,6 +622,14 @@ class TopicMonitor:
         if isinstance(error, MonitorDecisionError):
             return error.code
         text = str(error or "").casefold()
+        if "missing credentials" in text or "未配置 api key" in text:
+            return "ai_credential_unavailable"
+        if "api key 无效" in text or "401" in text or "authentication" in text:
+            return "ai_auth_failed"
+        if "额度已用完" in text or "insufficient_quota" in text:
+            return "ai_quota_exhausted"
+        if "请求频率超限" in text or "429" in text:
+            return "ai_rate_limited"
         if "empty response" in text or "空响应" in text:
             return "ai_empty_response"
         if "timeout" in text or "timed out" in text or "请求超时" in text:
@@ -1452,8 +1478,9 @@ lead_key 用稳定短语描述这条资源线索，便于去重；没有 resourc
             raise MonitorConfigError(str(e)) from None
         except Exception as e:
             provider = provider_config.get("ai_provider", "AI")
-            raise RuntimeError(
-                redact_urls_in_text(normalize_ai_error(e, provider))
+            message = redact_urls_in_text(normalize_ai_error(e, provider))
+            raise MonitorProviderError(
+                self._ai_failure_code(message), message
             ) from None
 
     def _batch_policy_fingerprint(self):

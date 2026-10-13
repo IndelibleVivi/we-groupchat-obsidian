@@ -114,6 +114,23 @@ def validate_binding(value):
     return dict(value)
 
 
+def validate_runtime_identity(value, db_dir=None):
+    """Validate recorded app identity without observing the protected source."""
+    if (not isinstance(value, dict)
+            or set(value) != {"source_db_dir", "source_namespace", "binding"}
+            or not isinstance(value["source_db_dir"], str)
+            or not os.path.isabs(value["source_db_dir"])):
+        raise SourceDeviceBindingError("source_device_binding_invalid")
+    binding = validate_binding(value["binding"])
+    expected = source_namespace(value["source_db_dir"], binding["original_device"],
+                                binding["root_inode"])
+    if value["source_namespace"] != expected:
+        raise SourceDeviceBindingError("source_device_binding_namespace_changed")
+    if db_dir is not None and os.path.abspath(os.path.expanduser(db_dir)) != value["source_db_dir"]:
+        raise SourceDeviceBindingError("source_device_binding_path_changed")
+    return dict(value, binding=binding)
+
+
 def check_binding(root, value):
     binding = validate_binding(value)
     observed = resolve_root_identity(root)

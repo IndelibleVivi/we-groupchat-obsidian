@@ -158,6 +158,39 @@ macOS menu app 会在 daemon worker 上准备依赖来源的群聊列表与 upda
 menu/dialog 数据交回 AppKit main thread。重复的 chat-menu refresh trigger 会合并成一轮正在运行的
 pass 加至多一轮 pending pass，因此 UI 操作不会堆出无界 source-reader queue。
 
+### 菜单 app 的设备号恢复
+
+macOS 重新挂载或重启后，设备号变化可能让来源 namespace 与旧 monitor cursor 无法接续。
+`scripts/recover_source_device.py` 复用 stable volume UUID / root inode proof：只有旧 namespace、
+完整 inventory、每个非 retired shard 的 generation，以及所有 selected monitor bindings 都一致，
+才允许把 `wechat_source_identity` 写进主 config。缓存仍使用当前 physical identity，既有 message ID
+保留原 namespace；旧 checkpoint、
+pending intent、resource ledger 和 source inventory 不被改写。正常 runtime reader 显式消费该 config
+binding；独立 Quiet Archive producer 仍由自己的 marker 管理。真正的 DB replacement、rekey、
+新 shard、不同 volume/inode 都会 fail closed，不能使用本命令跳过一般 generation admission。
+
+使用已记录的旧 device 与 namespace，不要猜值。先从 `scripts/autostart.py status` 核对 exact
+managed plist，备份私有 config，再停止该 job。CLI 自己取得 `AppInstanceLock` 和 capture-operation
+lock；app 仍在运行时会在 keys/source 访问前拒绝。默认命令只做 proof，`--apply` 才保存 binding。
+无论 proof/apply 成功与否，都要用原 plist 恢复此前 loaded 的 job，并检查 loaded/running：
+
+```bash
+.venv/bin/python scripts/autostart.py status
+launchctl bootout "gui/$(id -u)" "<exact-managed-plist>"
+.venv/bin/python scripts/recover_source_device.py \
+  --previous-device <recorded-device> --expected-namespace <recorded-namespace> \
+  --allow-transient-wechat-source-read
+.venv/bin/python scripts/recover_source_device.py \
+  --previous-device <recorded-device> --expected-namespace <recorded-namespace> \
+  --allow-transient-wechat-source-read --apply
+launchctl bootstrap "gui/$(id -u)" "<exact-managed-plist>"
+.venv/bin/python scripts/autostart.py status
+```
+
+恢复只证明 source identity 可连续使用，尚未证明 monitor/provider 或 historical backlog 已完成。
+恢复后先查看 health，再按原 catch-up procedure 有界补跑并核对 receipt。Binding 不保存授权；
+每次 transient source operation 仍需自己的显式 flag。
+
 ### Monitor raw-row cursor authority
 
 `core/monitor_source.py` 把 complete inventory 变成一批 bounded monitor work。Durable
@@ -210,9 +243,12 @@ durably 记录 `launch_agent_restore_failed`，按 canonical work 完成情况�
 关闭 `resume_supported` 并返回 nonzero。Receipt 只保存 content-free error code，不保存 provider 或 chat content。
 
 Encrypted WAL reconstruction 会验证 SQLite WAL header 与 cumulative frame checksum，只回放到最后一个
-valid commit marker，按 committed database-page count 截断，并丢弃 uncommitted tail。发布 decrypted
-cache 前还会重新核对 main/WAL identity；并发 checkpoint、reset 或 replacement 只做一次 bounded retry，
-再失败就报告 `source_snapshot_failed`，不会发布 mixed snapshot。
+valid commit marker，按 committed database-page count 截断，并丢弃 uncommitted tail。Encrypted rebuild
+先把 main/WAL pair 复制到私有 temporary directory（`0700`，文件 `0600`），复制完成立即重新核对
+两份 live identity；capture 期间变化只做一次 bounded retry，再失败报告 `source_snapshot_failed`。
+解密只消费已取得的一致副本，慢解密期间的正常 live write 不会改变它。下一次 cache lookup 仍会因
+DB/WAL identity 变化而失效，public page 仍保留 first pin 前后的 live generation 检查。临时副本需要
+额外容纳 encrypted pair 的磁盘空间，rebuild 后清理，其复制 bytes 计入 snapshot metric。
 
 File XML 与 image packed metadata 在 message text cleaning 之前解析。Resource envelope 可以保存
 原文件名、declared size、declared MD5/SHA-256、attach id、extension 或 image hash。
@@ -704,6 +740,20 @@ DB/catalog 缺失时仍能工作。这一 tranche 故意没有 automatic restore
 
 ## 7. Health 与安全 rollout
 
+Monitor operational status 在私有 `monitor_ops.json` 记录检查/成功的 wall-clock 时间与 bounded code，
+仅作诊断，不拥有 checkpoint。App 与 catch-up 的 production check 复用 TopicMonitor 的同一路径；
+dry-run/busy 不覆盖观察。已验证 EOF 的检查是成功，即使消息 watermark 较旧。缺失/损坏观察为 unknown，
+新阻断不得沿用旧成功；停滞阈值是三个 interval，最低 15 分钟。菜单只读 worker 准备好的 snapshot。
+Health 使用 ConfigStore.inspect 与 durable namespace 查询，不初始化/migrate config，不触及 source path；
+损坏或 symlink config 会拒绝。Stored binding 只做纯 metadata 验证；legacy 只能选唯一有 durable 证据的
+namespace。Inventory complete 是上次记录的证据，不是本轮重新探测 source 可达性。
+
+Provider failure 保留 `ai_credential_unavailable`、`ai_auth_failed`、`ai_quota_exhausted`、
+`ai_rate_limited`、`ai_timeout` 等 bounded reason，不再一律变成通用 runtime error。
+Provider/config error 仍保留 pending intent 与 source progress。Custom endpoint 的 thinking
+control 必须显式声明 README 中的 `custom_thinking_parameter` dialect；转发请求参数不证明
+上游实际执行它。
+
 Redacted health check 现在提供一份 privacy-safe reliability matrix：明确区分 monitor state
 `healthy|missing|corrupt|conflict`，统计 generation-bound raw cursors；对 configured source inventory
 只读 inspect，不做 source scan、也不创建 ledger，并分别报告 complete/degraded、present、missing、
@@ -715,7 +765,8 @@ objects。Mounted `sync_delegated` 始终保留 `provider_side_sync=unknown` 与
 `remote_verified=False`。独立 Direct Drive 行只统计通过 Drive API verification 的 ledger objects；
 这份 remote evidence 与 source completeness 互不替代。Health 还直接写明三个固定产品边界：remote
 link preview 是 `link_preview_disabled` 且零请求；MCP 是 legacy read-only、send retired；Windows
-W0.2A 只提供可移植文件锁源码，不代表产品支持。
+只提供分阶段的 shared storage/credential foundation，尚未激活 Windows 微信来源或产品；
+具体 module boundary 见 [Windows port map](WINDOWS-PORT-MAP.md)。
 
 ```bash
 .venv/bin/python scripts/health_check.py

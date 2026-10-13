@@ -2,6 +2,7 @@ import ast
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.project_identity import MCP_SERVER_ID
@@ -66,6 +67,26 @@ class _FakeAI:
     "`./.venv/bin/python -m pip install -r requirements-mcp.txt`",
 )
 class McpReadOnlyTests(unittest.TestCase):
+    def test_source_singleton_rebuilds_when_binding_changes_or_is_removed(self):
+        cfg = {"db_dir": "/synthetic/source", "keys_file": "/synthetic/keys.json",
+               "wechat_source_identity": {"binding": {"volume_identity": "a" * 32}}}
+        readers = [SimpleNamespace(db_dir=cfg["db_dir"]) for _ in range(3)]
+        with patch("mcp_server.load_config", side_effect=lambda: dict(cfg)), \
+                patch("mcp_server.os.path.isdir", return_value=True), \
+                patch("mcp_server.os.path.exists", return_value=True), \
+                patch("mcp_server.os.path.getmtime", return_value=123), \
+                patch("core.key_extractor.get_cached_keys", return_value={"synthetic": {}}), \
+                patch("core.wechat_db.WeChatDB.for_runtime", side_effect=readers) as create, \
+                patch("mcp_server._db", None), patch("mcp_server._keys_mtime", 0), \
+                patch("mcp_server._db_source_identity", None):
+            self.assertIs(mcp_server._get_db(), readers[0])
+            self.assertIs(mcp_server._get_db(), readers[0])
+            cfg["wechat_source_identity"] = {"binding": {"volume_identity": "b" * 32}}
+            self.assertIs(mcp_server._get_db(), readers[1])
+            cfg["wechat_source_identity"] = None
+            self.assertIs(mcp_server._get_db(), readers[2])
+            self.assertEqual(create.call_count, 3)
+
     def test_fastmcp_registers_the_canonical_server_id(self):
         self.assertEqual(mcp_server.mcp.name, MCP_SERVER_ID)
 

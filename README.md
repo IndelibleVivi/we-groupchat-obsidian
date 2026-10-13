@@ -303,7 +303,11 @@ The Qwen provider accepts `ai_base_url` for a regional Model Studio
 OpenAI-compatible endpoint. Structured monitor calls use
 `monitor_ai_timeout_seconds` (90 seconds by default) and send Qwen's native
 `enable_thinking=false`; custom OpenAI-compatible providers inherit the same
-monitor timeout without WGO guessing a provider-specific thinking schema.
+monitor timeout. For a known compatible custom endpoint, explicitly set
+`custom_thinking_parameter` to `thinking` (DeepSeek dialect) or `enable_thinking`
+(Qwen dialect) to forward the monitor's `monitor_ai_thinking` setting. Its default
+is empty, preserving ordinary custom requests. Forwarding the flag does not prove
+that an intervening gateway or upstream model honors it.
 
 When DeepSeek is selected without an explicit `ai_model`, the current default
 is `deepseek-v4-flash`; a different compatible model can still be configured.
@@ -473,6 +477,7 @@ operational facts that were previously easy to collapse:
 | Health line | What it proves |
 | --- | --- |
 | `Monitor state` | Per-chat state files are valid, missing, corrupt, or the last runtime result observed a revision conflict. Corrupt state blocks progress; it is never reset to now. |
+| `Monitor operational status` | Distinguishes enabled, healthy, blocked, stale and unknown; reports recorded attempt/success times separately from the source-message watermark. A verified EOF check stays healthy even with no new messages. |
 | `Monitor raw cursor progress` | Counts of checkpointed chats and generation-bound shard cursors; no chat or cursor value is printed. |
 | `Source inventory` | Complete versus degraded/uninitialized inventory plus present, missing, cache-only, key-missing, and unreadable counts. “Complete” requires a complete expected-shard inventory, stable current generations, and successful reads. |
 | `Mounted resource handoff` | Existing destination binding and latest snapshot handoff evidence. `provider_side_sync=unknown` and `remote_verified=False` remain explicit even after `sync_delegated`. |
@@ -482,6 +487,22 @@ operational facts that were previously easy to collapse:
 `--sensitive` may show local paths, chat names, topic titles, source-relative
 paths, and opaque shard IDs for deliberate on-device debugging. Default output
 never prints those values, message text, API endpoints, or token material.
+
+An explicit stopped-app `scripts/recover_source_device.py` can prove old-shard continuity
+after macOS device renumbering and save a config binding without resetting checkpoints
+or bypassing actual source changes. See [device recovery](docs/source-reliability.md#menu-app-device-renumber-recovery)
+for source consent, exact LaunchAgent restoration and acceptance steps.
+
+The menu shows the enabled switch, operational state, bounded blocked reasons, last recorded
+attempt/success and message watermark. Freshness uses three configured intervals, with a
+15-minute floor. Health reads existing config and durable namespace evidence without source
+metadata, discovery or initialization; ambiguous legacy identities remain explicit. Config
+corruption/non-regular files fail closed. These observations do not replace cursor authority.
+
+Encrypted source rebuilds decrypt a coherent private DB/WAL copy so ordinary live writes during
+slow decryption do not repeatedly discard the work. Capture-time changes and real generation
+changes still fail closed. Rebuilds temporarily require disk space for the encrypted pair in
+addition to the decrypted cache; see [source-read boundaries](docs/source-reliability.md#bounded-source-read-load).
 
 Monitor maintenance helpers:
 

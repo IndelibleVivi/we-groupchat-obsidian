@@ -251,7 +251,10 @@ internal continuity docs。
 OpenAI-compatible endpoint。结构化 monitor 调用使用
 `monitor_ai_timeout_seconds`（默认 90 秒），并发送 Qwen 原生的
 `enable_thinking=false`；自定义 OpenAI-compatible provider 继承同一 monitor
-timeout，但 WGO 不猜测第三方的 thinking schema。
+timeout。确认自定义 endpoint 兼容后，可显式设置 `custom_thinking_parameter` 为
+`thinking`（DeepSeek dialect）或 `enable_thinking`（Qwen dialect），转发 monitor 的
+`monitor_ai_thinking` 设置；默认空值保留普通 custom request。参数已转发不代表中间
+gateway 或上游 model 已执行它。
 
 选择 DeepSeek 且没有显式填写 `ai_model` 时，当前默认使用
 `deepseek-v4-flash`；仍可在配置中指定其他兼容 model。
@@ -392,6 +395,7 @@ source install 与 LaunchAgent 继续使用。
 | Health line | 它能证明什么 |
 | --- | --- |
 | `Monitor state` | 每个 selected chat 的 state 是 healthy、missing、corrupt，或最近 runtime 观察到 revision conflict。Corrupt state 会阻断推进，绝不会自动 reset to now。 |
+| `Monitor operational status` | 把 enabled 开关与 healthy、blocked、stale、unknown 分开；检查/成功时间与消息 watermark 分别报告。已验证 EOF 的安静检查仍是成功，不因消息时间旧而判停滞。 |
 | `Monitor raw cursor progress` | 只输出 checkpointed chat 数和 generation-bound shard cursor 数，不输出 chat/cursor value。 |
 | `Source inventory` | 区分 complete、degraded 与 uninitialized，并分别统计 present、missing、cache-only、key-missing、unreadable。只有 expected inventory 完整、current generations 稳定且 required reads 全部成功，才能叫 source complete。 |
 | `Mounted resource handoff` | 只读检查现有 destination binding 与 latest snapshot handoff；即使是 `sync_delegated`，也明确保留 `provider_side_sync=unknown`、`remote_verified=False`。 |
@@ -400,6 +404,20 @@ source install 与 LaunchAgent 继续使用。
 
 只有显式 `--sensitive` 才可能显示本机 paths、chat names、topic titles、source-relative
 paths 与 opaque shard IDs。默认输出不打印这些值，也不打印 message text、API endpoint 或 token material。
+
+macOS 设备号变化导致旧 cursor 接不上时，可使用显式、stopped-app 的
+`scripts/recover_source_device.py` 先证明旧 shard 连续性，再保存 config binding；
+不会重置 checkpoint 或跳过真实来源变化。前提、source flag、恢复原 LaunchAgent
+与验收步骤见[设备号恢复](docs/source-reliability.zh-CN.md#菜单-app-的设备号恢复)。
+
+菜单同时显示开关、运行状态、bounded 阻断原因、最近记录的检查/成功与消息进度。
+Freshness 阈值是三个配置 interval，最低 15 分钟。Health 只读既有 config 与 durable namespace
+证据，不探测 source metadata、不 discovery、不初始化；legacy identity 不明确时显式报告。
+Config 损坏或非普通文件会 fail closed。上述诊断不替代 cursor authority。
+
+Encrypted source rebuild 改为解密一致的私有 DB/WAL 副本，避免慢解密期间的正常 live write
+让整轮反复作废；capture 期间变化和真正的 generation 变化仍 fail closed。Rebuild 暂时需要
+额外容纳 encrypted pair 的磁盘空间；详见[读取边界](docs/source-reliability.zh-CN.md#有界-source-read-负载)。
 
 面向 monitor 的维护脚本：
 

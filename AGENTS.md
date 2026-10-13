@@ -53,6 +53,25 @@
   Monitor/catch-up may read only a complete inventory. Resource and Direct
   Drive scanners may consume present generations while reporting
   `source_degraded`; they must never relabel that partial observation complete.
+- `core/wechat_source_recovery.py` owns explicit app-source device-renumber
+  continuity proof. The thin `scripts/recover_source_device.py` requires the
+  transient source grant before config/key/source access and acquires
+  `AppInstanceLock`; the operator must stop and restore the exact managed app.
+  Recovery holds the capture-operation lock, verifies the old complete inventory
+  and every monitor generation binding, then patches only
+  `ConfigStore.wechat_source_identity`. Its canonical path, namespace and stable
+  volume/root binding do not grant source/attachment consent. All app-config
+  runtime readers pass config explicitly to `WeChatDB.for_runtime`; standalone
+  producer identity remains isolated. Physical cache identity stays physical;
+  checkpoints, pending intent and ledgers are never reset or translated. Durable
+  message IDs retain the original compatible namespace after proved renumbering.
+- `core/monitor_ops.py` owns content-free diagnostic attempt observations only.
+  Production `TopicMonitor.check_once` records results for app and catch-up callers;
+  dry-run and busy/skipped work never replace the newest real attempt. Verified
+  EOF is successful even when the message watermark is old. Diagnostics cannot
+  gate, reset or replace MonitorStateStore progress. Menu status consumes prepared
+  worker data; health inspects ConfigStore/inventory without source discovery or
+  protected path metadata and reports ambiguous legacy identity explicitly.
 - `scripts/health_check.py` is the canonical operator health matrix. Its
   default output is path-free and content-free: no chat identity/body,
   source-relative path, local absolute path, API endpoint, or token. It must
@@ -240,6 +259,10 @@
   logical shard.
   Immutable published decrypted payloads may be pinned by private hard link;
   plaintext SQLite snapshots use Online Backup so WAL state is not lost.
+  Encrypted rebuilds copy a private main/WAL pair and recheck source identities
+  immediately after capture, before slow decryption. Changes during capture
+  fail closed after the bounded retry; live generation checks around first pin
+  remain mandatory. Later DB/WAL changes invalidate the next cache lookup.
 - Source-inventory evidence is path-free and content-free. A mounted snapshot's
   `catalog_complete` marker binds the durable exported catalog only; its
   separate `source_observation.complete` field is the authority for whether the

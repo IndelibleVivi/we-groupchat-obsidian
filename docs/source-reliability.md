@@ -204,6 +204,41 @@ workers, then sends only prepared menu/dialog data to the AppKit main thread.
 Repeated chat-menu refresh triggers coalesce into one running pass plus at most
 one pending pass, so UI actions do not create an unbounded source-reader queue.
 
+### Menu-app device-renumber recovery
+
+A macOS device-number change can disconnect the source namespace from existing monitor cursors.
+`scripts/recover_source_device.py` reuses the stable-volume UUID/root-inode proof. It publishes
+`wechat_source_identity` through ConfigStore only when the recorded namespace, complete inventory,
+every non-retired shard generation and all selected monitor bindings agree. Physical cache identity
+remains current; established message IDs keep their original namespace. Checkpoints, pending
+intent, capture ledgers and inventory are not rewritten.
+App-config runtime readers explicitly consume this binding; the standalone Quiet Archive producer
+retains its separate marker. Real replacement, rekey, new shards or changed volume/inode fail closed.
+This command cannot bypass general generation admission.
+
+Use recorded old device/namespace values, never guesses. Inspect `scripts/autostart.py status`,
+back up private config, and stop the exact managed job. The CLI takes AppInstanceLock before
+keys/source access and retains the capture-operation lock through proof and config publication.
+Default mode only verifies; `--apply` saves the binding. Restore the original plist whenever the
+job was previously loaded, even after a failed proof/apply, then inspect loaded/running:
+
+```bash
+.venv/bin/python scripts/autostart.py status
+launchctl bootout "gui/$(id -u)" "<exact-managed-plist>"
+.venv/bin/python scripts/recover_source_device.py \
+  --previous-device <recorded-device> --expected-namespace <recorded-namespace> \
+  --allow-transient-wechat-source-read
+.venv/bin/python scripts/recover_source_device.py \
+  --previous-device <recorded-device> --expected-namespace <recorded-namespace> \
+  --allow-transient-wechat-source-read --apply
+launchctl bootstrap "gui/$(id -u)" "<exact-managed-plist>"
+.venv/bin/python scripts/autostart.py status
+```
+
+Recovery proves identity continuity, not provider health or completed historical catch-up. Inspect
+health and use the existing bounded catch-up procedure/receipt after recovery. The binding records
+no consent; each transient source operation still needs its own explicit flag.
+
 ### Monitor raw-row cursor authority
 
 `core/monitor_source.py` turns that complete inventory into one bounded monitor
@@ -276,9 +311,14 @@ Receipts keep content-free error codes rather than provider or chat content.
 Encrypted WAL reconstruction validates the SQLite WAL header and cumulative
 frame checksums, applies frames only through the last valid commit marker,
 honors the committed database-page count, and discards an uncommitted tail.
-Main/WAL identities are checked again before publishing the decrypted cache;
-a concurrent checkpoint, reset, or replacement triggers one bounded retry and
-then `source_snapshot_failed` rather than publishing a mixed snapshot.
+Encrypted rebuilds first copy the main/WAL pair into a private temporary directory
+(`0700`, files `0600`) and recheck both live identities immediately after the copy.
+A change during capture triggers one bounded retry, then `source_snapshot_failed`;
+decryption consumes only that coherent captured pair. Normal live writes during
+slow decryption cannot alter it. The next cache lookup still invalidates changed
+DB/WAL identities, and public pages retain live generation checks before/after
+their first pin. Temporary copies require additional disk space for the encrypted
+pair, are removed after rebuild, and contribute to the snapshot-byte metric.
 
 File XML and image packed metadata are parsed before message text is cleaned.
 The resulting resource envelope can contain the original file name, declared
@@ -888,6 +928,22 @@ tranche deliberately provides no automatic restore or deletion.
 
 ## 7. Health and safe rollout
 
+Monitor operational status records attempt/success wall-clock times and bounded codes in private
+`monitor_ops.json`. It is diagnostic, not a checkpoint. Production app and catch-up checks share
+one TopicMonitor observation path; dry-run/busy calls do not overwrite it. A verified EOF check is
+successful even when source messages are old. Missing/corrupt observations are unknown; a newer
+blocked result cannot reuse old success. Staleness is three intervals, floored at 15 minutes.
+The menu reads a worker-prepared snapshot. Health's ConfigStore.inspect and inventory namespace
+selection never initialize/migrate config or touch source paths; it rejects corrupt/symlink config.
+Stored bindings are validated without IO; legacy namespace selection requires unambiguous durable
+evidence. Inventory completeness is recorded evidence, not a new source reachability probe.
+
+Provider failures retain bounded reasons such as `ai_credential_unavailable`, `ai_auth_failed`,
+`ai_quota_exhausted`, `ai_rate_limited` and `ai_timeout` rather than collapsing into a generic
+runtime error. Provider/config errors still preserve pending intent and source progress. Custom
+endpoint thinking controls require the explicit `custom_thinking_parameter` dialect described
+in the README; request forwarding alone is not evidence of upstream execution.
+
 The redacted health check now gives one privacy-safe reliability matrix. It
 distinguishes monitor state `healthy|missing|corrupt|conflict`, counts
 generation-bound raw cursors, reads the configured source inventory without
@@ -904,8 +960,9 @@ Drive line reports the number of ledger objects that passed Drive API
 verification; that remote evidence is independent from source completeness.
 It also states the fixed product boundaries: remote link preview is
 `link_preview_disabled` with zero requests, MCP is legacy read-only with send
-retired, and Windows W0.2A provides portable file-lock source only, not product
-support.
+retired, and Windows provides the staged shared storage/credential foundation,
+not an activated WeChat source or Windows product. See the
+[Windows port map](WINDOWS-PORT-MAP.md) for the exact module boundaries.
 
 ```bash
 .venv/bin/python scripts/health_check.py

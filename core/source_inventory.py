@@ -351,6 +351,17 @@ class SourceInventoryStore:
         errors = () if records else ("source_inventory_uninitialized",)
         return _snapshot(namespace, payload["revision"], records, errors)
 
+    def namespaces(self) -> tuple[str, ...]:
+        """List recorded identities without observing any source or writing."""
+        if not self.path:
+            with self._memory_lock:
+                payload = self._validate_payload(self._memory_payload)
+        elif not os.path.lexists(self.path):
+            return ()
+        else:
+            payload = self._read_file()
+        return tuple(sorted(payload["sources"]))
+
     def reconcile(
         self,
         source_namespace: str,

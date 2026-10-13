@@ -135,6 +135,9 @@ from core.monitor import (
     state_file_for_chat,
 )
 from core.monitor_state import MonitorStateError
+from core.monitor_ops import (
+    monitor_operational_status,
+)
 from core.source_adapter import format_source_stage_summary, source_cycle_stage_stats
 from ai.factory import create_provider
 
@@ -308,6 +311,10 @@ class WeGroupchatObsidianApp(rumps.App):
         self._monitor_lock = threading.Lock()
         self._monitor_last_error = ""
         self._monitor_last_dispatch_ts = 0
+        # Content-free diagnostic observation of the newest monitor attempt.
+        # It is not a checkpoint: monitor_state.json remains the sole progress
+        # authority. Reads for the menu use only the in-memory snapshot below.
+        self._monitor_ops_status = None
         self._daily_digest_timer = None
         self._daily_digest_lock = threading.Lock()
         self._drive_sync_timer = None
@@ -1531,6 +1538,37 @@ class WeGroupchatObsidianApp(rumps.App):
 
     # ── Topic monitor menu ────────────────────────────────────
 
+    def _refresh_monitor_ops(self):
+        """Prepare durable status on a worker; menu building uses memory only."""
+        if not hasattr(self, "_monitor_ops_status"):
+            return
+        self._monitor_ops_status = monitor_operational_status(self.config)
+        self._run_on_main(self._rebuild_monitor_menu)
+
+    def _monitor_ops_detail_label(self):
+        status = getattr(self, "_monitor_ops_status", None) or {}
+        state = status.get("state", "unknown")
+        if state == "healthy" and time.time() - status.get("last_attempt_ts", 0) > status.get("stale_after_seconds", 900):
+            state = "stale"
+        label = {"healthy": "检查正常", "blocked": "已阻断", "stale": "检查停滞",
+                 "unknown": "尚无检查证据", "unconfigured": "未配置", "disabled": "已暂停"}.get(state, "状态未知")
+        codes = status.get("blocked_codes") or []
+        return " · " + label + (" (" + ", ".join(codes) + ")" if codes else "")
+
+    def _monitor_ops_evidence_lines(self):
+        status = getattr(self, "_monitor_ops_status", None) or {}
+        lines = []
+        for name, field in [("最近检查", "last_attempt_ts"), ("最近成功检查", "last_success_ts"),
+                            ("消息进度", "progress_watermark_ts")]:
+            value = status.get(field) or 0
+            try:
+                label = datetime.fromtimestamp(value).strftime("%m-%d %H:%M") if value else "未知"
+            except (TypeError, ValueError, OverflowError, OSError):
+                label = "未知"
+            lines.append(f"{name}: {label}")
+        lines.append("最近结果: " + (status.get("last_attempt_code") or "未知"))
+        return lines
+
     def _build_monitor_menu(self):
         """Build macOS notification monitor submenu."""
         monitor = rumps.MenuItem("🔔 关注推送")
@@ -1544,10 +1582,13 @@ class WeGroupchatObsidianApp(rumps.App):
         topic_label = topic[:24] + "..." if len(topic) > 24 else topic
 
         status = "已开启" if enabled else "已暂停"
-        monitor.add(rumps.MenuItem(f"状态: {status} · 每 {interval} 分钟"))
+        detail = self._monitor_ops_detail_label() if enabled else ""
+        monitor.add(rumps.MenuItem(f"状态: {status}{detail} · 每 {interval} 分钟"))
         monitor.add(rumps.MenuItem(f"群聊: {chat_name}"))
         monitor.add(rumps.MenuItem(f"AI: {provider_name}"))
         monitor.add(rumps.MenuItem(f"关注: {topic_label or '未设置'}"))
+        for evidence in self._monitor_ops_evidence_lines():
+            monitor.add(rumps.MenuItem(evidence))
         monitor.add(rumps.separator)
 
         toggle_label = "⏸ 暂停监控" if enabled else "▶️ 启用监控"
@@ -2010,6 +2051,7 @@ class WeGroupchatObsidianApp(rumps.App):
             if summary:
                 print(summary)
             self._monitor_lock.release()
+            self._refresh_monitor_ops()
 
     def _handle_monitor_result(self, result, manual=False, dry_run=False):
         status = result.get("status")
@@ -2817,7 +2859,10 @@ class WeGroupchatObsidianApp(rumps.App):
             return
 
         print("[init] 正在加载数据库...")
-        self.db = WeChatDB.for_runtime(self.config["db_dir"], keys)
+        self.db = WeChatDB.for_runtime(
+            self.config["db_dir"], keys, config=self.config
+        )
+        self._refresh_monitor_ops()
         if self.config.get("attachment_archive_enabled", False):
             self._start_attachment_archive_consumer()
         if self.config.get("resource_backup_enabled", False):
@@ -4468,7 +4513,9 @@ class WeGroupchatObsidianApp(rumps.App):
             keys = extract_keys()
             print(f"[keys] extract_keys 返回: {len(keys) if keys else 0} 个密钥")
             if keys:
-                self.db = WeChatDB.for_runtime(self.config["db_dir"], keys)
+                self.db = WeChatDB.for_runtime(
+                    self.config["db_dir"], keys, config=self.config
+                )
                 self._run_on_main(self._rebuild_chat_menu)
                 _notify("微信总结", "数据源刷新成功", f"已同步 {len(keys)} 个数据库")
             else:
