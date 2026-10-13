@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -25,18 +26,15 @@ from core.config import (
 )
 from core.attachment_archive import AttachmentArchive
 from core.attachment_backup import AttachmentBackup
-from core.google_drive_auth import GoogleDriveOAuth
 from core.google_drive_file_sync import GoogleDriveFileSync
 from core.knowledge import TAXONOMY_PROFILES
 from core.link_preview import LINK_PREVIEW_STATE
 from core.key_extractor import (
     EXTRACT_LOG,
-    get_cached_keys,
     is_wechat_running,
     is_wechat_signed,
     process_lookup_available,
 )
-from core.keychain import load_key
 from core.daily_digest import digest_output_path
 from core.review_queue import QUEUE_DIR, ReviewQueue
 from core.relation_audit import audit_relations
@@ -60,6 +58,7 @@ from core.source_inventory import (
     SourceInventoryStore,
 )
 from core.taxonomy_assignment import taxonomy_assignment_summary
+from core.semantic.health import HEALTH_SCHEMA, semantic_health
 from core.wechat_source_guard import source_guard_status
 
 AUTOSTART_ERR_LOG = Path(DATA_DIR) / "logs" / "autostart.err.log"
@@ -503,6 +502,10 @@ def source_inventory_health(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Print local we-groupchat-obsidian health status.")
     parser.add_argument(
+        "--semantic-json", action="store_true",
+        help="Print only versioned content-free semantic health JSON; no native probes or credentials.",
+    )
+    parser.add_argument(
         "--sensitive",
         action="store_true",
         help="Print local paths, chat names, topic titles, and log fragments.",
@@ -513,14 +516,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Delete legacy extract_keys.log if it exists.",
     )
     args = parser.parse_args(argv)
+    if args.semantic_json and args.delete_sensitive_key_log:
+        parser.error("--semantic-json cannot be combined with --delete-sensitive-key-log")
 
     try:
         config = load_config()
     except ConfigError as exc:
-        print(f"[WARN] Config inspection: {exc.code}")
+        if args.semantic_json:
+            print(json.dumps({"schema": HEALTH_SCHEMA, "state": "blocked", "error_codes": [exc.code]}, sort_keys=True))
+        else:
+            print(f"[WARN] Config inspection: {exc.code}")
         return 2
-    keys = get_cached_keys() or {}
-    api_key_available = bool(load_key("ai-api-key")) or config.get("ai_provider") == "ollama"
+    semantic = semantic_health(config, checkpoint_paths=[
+        state_file_for_chat(chat.get("username", "")) for chat in active_monitor_chats(config)
+    ])
+    if args.semantic_json:
+        print(json.dumps(semantic, ensure_ascii=False, sort_keys=True, allow_nan=False))
+        return 0
     live_ai_success = recent_autostart_ai_success()
     wechat_signed = is_wechat_signed()
     can_lookup_processes = process_lookup_available()
@@ -550,10 +562,8 @@ def main(argv: list[str] | None = None) -> int:
     guard = source_guard_status(config)
     attachment_archive = AttachmentArchive.from_config(config).status()
     attachment_backup = AttachmentBackup.from_config(config).status()
-    drive_sync = GoogleDriveFileSync.inspect_status(
-        config,
-        oauth=GoogleDriveOAuth(),
-    )
+    drive_sync = GoogleDriveFileSync.inspect_status(config)
+    drive_sync["auth"] = "not_probed"
     monitor_state = monitor_state_health(config)
     monitor_ops = monitor_operational_status(config)
     source_inventory = source_inventory_health(
@@ -571,14 +581,11 @@ def main(argv: list[str] | None = None) -> int:
     # separate macOS App Data consent prompt. Source reachability belongs to the
     # long-lived menu app and is represented here by its durable inventory.
     print(f"[{ok(bool(str(db_dir).strip()))}] WeChat DB: {db_label}")
-    print(f"[{ok(bool(keys))}] DB keys cache: {len(keys)} 个数据库 key")
-    if api_key_available:
-        ai_note = "Keychain 可读取"
-    elif live_ai_success:
-        ai_note = "当前进程读不到 Keychain；live monitor 最近 AI 调用成功"
-    else:
-        ai_note = "未检测到 API key，或当前进程无 Keychain 读取权限"
-    print(f"[{ok(api_key_available or live_ai_success)}] AI key/provider: {config.get('ai_provider')} / {config.get('ai_model') or 'default'} ({ai_note})")
+    print(f"[{ok(source_inventory['complete'])}] DB keys cache: probe=not_performed; "
+          f"inventory_key_missing={source_inventory['counts'].get('key_missing', 0)}")
+    ai_note = "recent_durable_success" if live_ai_success else "unknown"
+    print(f"[{ok(live_ai_success)}] AI key/provider: credential_probe=not_performed; "
+          f"recent_attempt={ai_note}; provider_configured={bool(config.get('ai_provider'))}")
     print(f"[{ok(wechat_signed)}] WeChat re-sign: {'已授权' if wechat_signed else '需要重新授权或无法检测'}")
     if wechat_running is None:
         print("[WARN] WeChat running: 当前进程无法检测 macOS process list")
@@ -655,6 +662,35 @@ def main(argv: list[str] | None = None) -> int:
         f"invalid_response_chats={monitor_state.get('invalid_response_chats', 0)}"
     )
     inventory_counts = source_inventory["counts"]
+    print(f"[{ok(semantic['state'] in {'healthy', 'inactive'})}] Semantic generation: "
+          f"state={semantic['state']}; active={semantic['active_state']}; "
+          f"candidates={semantic['candidate_count']}; retained={semantic['retained_generation_count']}; "
+          f"cutover={semantic['cutover_state']}")
+    progress = semantic["checkpoints"]
+    print(f"[{ok(progress['state'] in {'current', 'not_active', 'not_configured'})}] Semantic captured/applied: "
+          f"state={progress['state']}; captured_shards={progress.get('captured_shards', 0)}; "
+          f"applied_shards={progress.get('applied_shards', 0)}; lagging_shards={progress.get('lagging_shards', 0)}; "
+          f"max_lag_seconds={progress.get('max_lag_seconds', 0)}; "
+          f"generation_conflicts={progress.get('generation_conflicts', 0)}")
+    database = semantic["database"]
+    raw, jobs, outbox = database.get("raw", {}), database.get("jobs", {}), database.get("outbox", {})
+    print(f"[{ok(database['state'] in {'available', 'not_active'})}] Semantic durable work: "
+          f"database={database['state']}; captured_sources={raw.get('captured_sources', 0)}; "
+          f"pending_batches={raw.get('processing_pending_batches', 0)}; "
+          f"pending_jobs={jobs.get('pending', 0)}; running_jobs={jobs.get('running', 0)}; "
+          f"failed_jobs={jobs.get('failed', 0)}; unknown_jobs={jobs.get('unknown', 0)}; "
+          f"reader_unknown={jobs.get('reader_unknown', 0)}; "
+          f"index_pending={outbox.get('index', {}).get('pending', 0)}; "
+          f"projection_pending={outbox.get('projection', {}).get('pending', 0)}; "
+          f"projection_conflicts={outbox.get('projection_conflicts', 0)}")
+    budget = semantic["provider_budget"]
+    print(f"[{ok(budget['state'] == 'not_active' or budget['ready'])}] Semantic provider budget: "
+          f"state={budget['state']}; missing={budget.get('counts', {}).get('missing', 0)}; "
+          f"expired={budget.get('counts', {}).get('expired', 0)}; "
+          f"unknown_requests={budget.get('unknown_requests', 0)}; "
+          "network_requests=0; remote_balance_verified=False")
+    if semantic["error_codes"]:
+        print("[WARN] Semantic evidence: " + ", ".join(semantic["error_codes"]))
     inventory_ok = source_inventory["state"] == "complete" or (
         not monitor_enabled and source_inventory["state"] == "unconfigured"
     )
@@ -691,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
         f"handoff={mounted_backup.get('handoff_semantics') or 'unknown'}; "
         f"target={'configured' if mounted_backup.get('target_configured') else 'not_configured'}; "
         f"delegated_objects={int(delivery_counts.get('sync_delegated') or 0)}; "
+        f"obsidian_projection={mounted_backup.get('obsidian_projection_state') or 'not_probed'}; "
+        f"target_projection={mounted_backup.get('target_projection_state') or 'not_probed'}; "
         "provider_side_sync=unknown; remote_verified=False"
     )
     print(

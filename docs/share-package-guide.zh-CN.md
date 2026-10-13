@@ -15,7 +15,7 @@ archival artifact 的历史 offline fallback。完整隐私边界、MCP read-onl
 - 需要一个 AI provider API Key，或者本地 Ollama。
 - 这不是微信/Tencent 官方软件，不是机器人，也不是远程服务。
 - 默认数据目录是 `~/.we-groupchat-obsidian/`，API Key 存在 macOS Keychain。
-- 云端 AI 会收到你要求总结的聊天文本；想尽量本地化就用 Ollama。
+- 云端 AI 会收到所选输入。文本、判断、embedding 和索引分别选择路线；语义 embedding 支持显式 loopback 本机模型或 Cloudflare。本机 embedding 配本地索引可保留向量处理在本机，完整离线还要求文本与判断使用本地模型。
 
 ## 第一次运行
 
@@ -29,6 +29,7 @@ source guard 和资源索引都在这只长驻 app 内运行，不会每 300 秒
 历史补链接不读取附件 bytes；附件解析只接受本次 app 会话授权，CLI 则必须在单次 `run` 上显式传 `--resolve-files`。
 Mounted backup 完成一轮后，可从菜单选择 `📂 在 Finder 打开文件备份`，或打开 target 下的
 `wgo-resource-backup/00-打开微信资源备份.md`；待解析项会与真正可打开的备份文件分开显示。
+机器快照独立于 Obsidian 和挂载索引封存；索引暂时无法写入时，已完成的快照仍然有效，状态会另外提示投影尚需处理。
 
 这是 source-distributed macOS menu-bar app，不包含已签名 installer、`.dmg` 或
 bundled Python runtime。
@@ -40,6 +41,13 @@ bundled Python runtime。
 ```
 
 这一步可能会退出微信，并要求输入 Mac 登录密码；终端输入密码时不显示字符是正常的。
+
+## 语义候选与迁移
+
+本源码包含新的 Item／故事／简报工作流；普通启动不会自行迁移数据。先读 `docs/semantic-workflow.md` 和
+`docs/semantic-rebuild.md`，核对 provider、预算、完整备份与来源范围，再明确执行首次迁移。
+可选 Obsidian visible-open 插件在 `integrations/obsidian/`，需要手动安装和启用；未安装时可手动标记已知。
+激活后旧配置、历史总结、补跑、整理、Review Queue 和 Digest CLI 会阻断旧写入；日常从菜单与 Obsidian 操作。
 
 ## 常用入口
 

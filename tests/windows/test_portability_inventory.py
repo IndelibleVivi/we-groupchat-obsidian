@@ -67,6 +67,15 @@ class WindowsPortabilityInventoryTests(unittest.TestCase):
         self.assertEqual(set(mapped), python_inventory())
         self.assertEqual(set(mapped.values()) - ALLOWED_CLASSIFICATIONS, set())
 
+    def test_semantic_runtime_and_provider_storage_stay_outside_windows_gate(self):
+        mapped = port_map_inventory()
+        for path in ("core/provider_usage.py", "core/semantic/store.py", "core/semantic/projections.py",
+                     "core/semantic/runtime.py", "core/semantic/reader_runtime.py", "core/semantic/rebuild.py",
+                     "core/semantic/health.py", "ai/cloudflare_provider.py", "scripts/rebuild_knowledge.py"):
+            with self.subTest(path=path):
+                self.assertIn(path, mapped)
+                self.assertNotEqual(mapped[path], "windows-import-safe")
+
     def test_import_safe_modules_have_no_direct_platform_imports(self):
         mapped = port_map_inventory()
         for path, classification in mapped.items():

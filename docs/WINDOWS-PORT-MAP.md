@@ -139,6 +139,13 @@ require the owning phase's evidence, not a new label for an old import.
 root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 `windows-import-safe` module in a fresh process on Windows.
 
+The semantic generation, provider-budget ledger and rebuild modules below are
+source candidates for the current macOS application. Their pure contracts and
+synthetic tests do not activate a Windows monitor, provider account, projection
+writer or rebuild command. New modules remain outside the Windows import gate
+until their owning phase supplies Windows evidence. The existing checkpoint
+owner keeps its portable storage boundary, including v3 capture/applied receipts.
+
 ## Module inventory
 
 | Path | Classification | Current boundary and next owner |
@@ -149,9 +156,13 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `ai/__init__.py` | `windows-import-safe` | Empty shared provider package boundary. |
 | `ai/base.py` | `windows-import-safe` | Platform-neutral provider interface. |
 | `ai/claude_provider.py` | `windows-import-safe` | Provider adapter imports cleanly; API credentials use the native W0.3 secret boundary. |
+| `ai/cloudflare_provider.py` | `deferred-w0.2` | Explicit account, typed decision/embedding REST adapters; runtime admission depends on the not-yet-migrated provider usage ledger. No Windows provider activation. |
 | `ai/factory.py` | `windows-import-safe` | API keys use the active native secret store; Ollama bypasses credentials; no config-key fallback. |
+| `ai/local_embedding_provider.py` | `deferred-w1+` | Explicit loopback OpenAI-compatible/Ollama embeddings; transitive semantic provider contracts and actual Windows model-service behavior remain outside current foundation acceptance. |
 | `ai/ollama_provider.py` | `windows-import-safe` | Platform-neutral HTTP provider adapter; runtime behavior is not a Windows product-support claim. |
 | `ai/openai_provider.py` | `windows-import-safe` | Provider adapter imports cleanly; API credentials use the native W0.3 secret boundary. |
+| `ai/semantic_provider.py` | `deferred-w1+` | Text, typed decision and embedding contracts plus validation; semantic provider activation and its Windows evidence remain later work. |
+| `ai/vector_index.py` | `deferred-w1+` | Local cosine and explicit remote index contracts; index profile/receipt tests do not enable Windows indexing or network calls. |
 | `core/__init__.py` | `windows-import-safe` | Empty shared package boundary. |
 | `core/api_errors.py` | `windows-import-safe` | Provider-independent error normalization. |
 | `core/app_runtime.py` | `windows-import-safe` | W0.2A singleton now uses the portable exclusive non-blocking lock; Windows app activation remains W6. |
@@ -177,7 +188,7 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/monitor_ops.py` | `deferred-w0.2` | Content-free diagnostic attempts/freshness; activates through the Mac monitor, never owns source progress. |
 | `core/monitor_result.py` | `windows-import-safe` | Pure bounded outcome interpretation; unknown results block catch-up. No platform or product activation. |
 | `core/monitor_source.py` | `windows-import-safe` | Pure source-cursor merge and pending-batch metadata validation; platform storage remains owned by callers. |
-| `core/monitor_state.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve checkpoint CAS and read-only inspection; Windows monitor activation remains W3. |
+| `core/monitor_state.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve checkpoint CAS and read-only inspection. V3 capture/applied and explicit migration/rollback receipts retain that owner; Windows monitor activation remains W3. |
 | `core/notification_identity.py` | `macos-only` | Foundation/app-bundle notification identity diagnostics. |
 | `core/notification_target.py` | `macos-only` | Emits the macOS `open` command; target-opening adapter is W6. |
 | `core/platform/__init__.py` | `windows-import-safe` | Exposes contracts and active-platform lock/path/private-storage/publication selectors. |
@@ -192,23 +203,42 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `core/platform/windows_private_storage.py` | `windows-import-safe` | Handle-based protected NTFS DACL enforcement/verification and atomic publication; path admission remains in windows_paths. |
 | `core/platform/windows_paths.py` | `windows-import-safe` | Local-NTFS identity via handle-relative NT traversal, retained ancestry handles, volume/file IDs, extended operational paths, and fail-closed reparse/case-sensitive/unsupported-filesystem checks. |
 | `core/project_identity.py` | `windows-import-safe` | Shared public project identifiers. |
-| `core/quiet_archive_handoff.py` | `deferred-w0.2` | Private local v3 context handoff using existing capture/backup POSIX storage and locks; not a Windows feature. |
-| `core/quiet_archive_producer.py` | `deferred-w0.2` | Explicit standalone profile and local ledger/CAS adoption; reuses POSIX capture locks and current Mac source reader. |
+| `core/provider_usage.py` | `deferred-w0.2` | Application-wide SQLite budget evidence and unknown request receipts; current POSIX mode-based creation has no native Windows DACL acceptance. |
 | `core/relation_audit.py` | `windows-import-safe` | Imports without platform services; filesystem behavior remains unclaimed. |
 | `core/relation_markdown_cleanup.py` | `deferred-w0.2` | Transitively imports knowledge/config storage. |
 | `core/resource_backup_launch_agent.py` | `macos-only` | Retired short-lived job inspection/removal; installation returns `long_lived_app_required`. |
 | `core/resource_backup.py` | `deferred-w0.2` | Direct `fcntl`, path identity, target lock, and atomic semantics; Windows is W5. |
 | `core/resource_capture.py` | `deferred-w0.2` | Direct `fcntl` and source/config dependencies; Windows is W4. |
 | `core/review_queue.py` | `deferred-w0.2` | Transitively imports ConfigStore/private storage; Windows activation is W3. |
+| `core/semantic/__init__.py` | `deferred-w1+` | Semantic package boundary; no Windows semantic product activation or import acceptance claimed. |
+| `core/semantic/attribution.py` | `deferred-w1+` | Pure source-scoped speaker/display attribution shared by extraction and reading; no source discovery or Windows semantic runtime acceptance. |
+| `core/semantic/briefing.py` | `deferred-w0.2` | Generation-bound brief plans consume the current reading/projection storage path. |
+| `core/semantic/contracts.py` | `deferred-w1+` | Pure canonical action, provenance and receipt validation; Windows semantic integration remains deferred. |
+| `core/semantic/controls.py` | `deferred-w0.2` | Reader control reconciliation depends on current projection/file ownership and publication. |
+| `core/semantic/delivery.py` | `deferred-w0.2` | Durable attention/delivery receipts consume current reading storage; no Windows notification or opening adapter is enabled. |
+| `core/semantic/engine.py` | `deferred-w1+` | Bounded extraction and semantic proposal orchestration with typed accepted jobs; no Windows source/runtime activation. |
+| `core/semantic/health.py` | `deferred-w1+` | Config-inspected generation/checkpoint/budget counters only; existing SQLite evidence is opened read-only, never initialized or migrated. No provider, credential or protected-source access. |
+| `core/semantic/jobs.py` | `deferred-w1+` | Lease, accepted artifact and explicit unknown-outcome reconciliation over an injected canonical transaction; Windows generation store acceptance remains deferred. |
+| `core/semantic/legacy.py` | `deferred-w0.2` | Exact local legacy evidence import and association preservation; current file/path and projection storage have not received Windows acceptance. |
+| `core/semantic/projections.py` | `deferred-w0.2` | Reading artifacts and ownership-aware publication use current filesystem/symlink/mode semantics; Windows native path/private publication acceptance remains outstanding. |
+| `core/semantic/reader_runtime.py` | `deferred-w0.2` | Background reader controls, direct-open and delivery composition use current projection storage and the macOS application shell. |
+| `core/semantic/rebuild.py` | `macos-only` | GenerationRegistry is read-only; the coordinator also owns explicit protected-source grants, macOS LaunchAgent/app lifecycle and current capture locks. No Windows rebuild/runtime claim. |
+| `core/semantic/retrieval.py` | `deferred-w1+` | Generation/profile-bound lexical and dense retrieval with index receipts; Windows canonical/index lifecycle acceptance remains deferred. |
+| `core/semantic/runtime.py` | `deferred-w0.2` | Composition for the current long-lived macOS menu app and rebuild; transitive legacy digest/capture storage and provider usage require later migration. |
+| `core/semantic/scheduling.py` | `deferred-w1+` | Process-local provider admission and bounded parallel preparation; canonical stores retain durable jobs and outcomes. Windows semantic runtime acceptance remains deferred. |
+| `core/semantic/source.py` | `deferred-w1+` | Shared source capture and exact receipt bridge preserve the checkpoint owner; actual Windows message source activation remains W1+. |
+| `core/semantic/store.py` | `deferred-w0.2` | Canonical SQLite generation owner uses private-directory services but current file creation/admission still needs native Windows file/DACL acceptance. |
+| `core/semantic/verification.py` | `deferred-w0.2` | Independent generation/rebuild evidence checks reuse current legacy/projection filesystem contracts; no Windows cutover acceptance. |
+| `core/semantic/watches.py` | `deferred-w1+` | Evidence/status-aware watch evaluation over canonical claims; no Windows background watcher or notification activation. |
 | `core/source_adapter.py` | `windows-import-safe` | Canonical read-source protocol and shared capability, cursor, inventory, page and error helpers; no durable-state ownership. |
 | `core/source_contract.py` | `windows-import-safe` | Generated Markdown provenance helpers; unrelated to WeChat source reading. |
 | `core/state_storage.py` | `windows-import-safe` | Platform IO binding for the three migrated JSON state owners; no schema or revision authority. |
-| `core/source_device_binding.py` | `windows-import-safe` | Checks app-config and standalone producer source bindings against the stable macOS volume UUID/root inode and reconstructs its durable namespace. Import-safe standard library only; no stable volume identity exists on Windows, so it fails closed there. |
+| `core/source_device_binding.py` | `windows-import-safe` | Checks explicit source identity bindings against the stable macOS volume UUID/root inode and reconstructs their durable namespace. Import-safe standard library only; no stable volume identity exists on Windows, so it fails closed there. |
 | `core/source_inventory.py` | `windows-import-safe` | W0.2B.2 private/atomic storage and admitted paths preserve completeness, revisions, and read-only inspection; source activation remains W1+. |
 | `core/source_metadata_plan.py` | `deferred-w0.2` | Transitively imports digest/knowledge/config storage. |
 | `core/taxonomy_assignment.py` | `windows-import-safe` | Platform-neutral taxonomy resolution. |
 | `core/taxonomy_migration.py` | `deferred-w0.2` | Direct `fcntl` and knowledge storage. |
-| `core/url_safety.py` | `windows-import-safe` | Stdlib-only canonical URL display/export/prompt redaction. |
+| `core/url_safety.py` | `windows-import-safe` | Stdlib-only canonical URL display/export/prompt redaction and linear raw-to-visible replacement offsets. |
 | `core/wechat_db.py` | `windows-import-safe` | Current Mac WeChatSource implementation; import-safe only. Windows schema, key provider and private decrypted cache remain W1.2+. |
 | `core/wechat_resign.py` | `macos-only` | Exact-target AppKit/codesign/sudo re-sign orchestration; Windows key-provider authorization belongs to W1+. |
 | `core/wechat_signing_identity.py` | `macos-only` | macOS `security`/openssl adapter owning the persistent self-signed re-sign identity keychain; no Windows signing support. |
@@ -225,10 +255,10 @@ root, `ai/`, `core/`, `ui/`, and `scripts/` Python module and imports every
 | `scripts/configure_monitor.py` | `operator-deferred` | Depends on config, source, keychain, and knowledge activation. |
 | `scripts/daily_digest.py` | `operator-deferred` | Depends on W0.2 storage and W3 activation. |
 | `scripts/google_drive_file_sync.py` | `operator-deferred` | Depends on current auth/config/source adapters. |
-| `scripts/health_check.py` | `macos-only` | Privacy-safe reliability matrix plus LaunchAgent/notification/macOS source diagnostics; its Windows line reports the shared storage/credential foundation without claiming product support. |
+| `scripts/health_check.py` | `macos-only` | Privacy-safe reliability matrix plus LaunchAgent/notification/macOS diagnostics. Semantic rows and `--semantic-json` inspect existing registry/checkpoint/SQLite evidence without source/provider/credential access; its Windows line still claims only the shared foundation. |
 | `scripts/migrate_taxonomy.py` | `operator-deferred` | Depends on W0.2 config/knowledge storage. |
 | `scripts/organize_obsidian.py` | `operator-deferred` | Depends on W0.2 path/storage and W3 projection activation. |
-| `scripts/quiet_archive_handoff.py` | `macos-only` | Explicit protected-source capture/drain/backfill and local JSON handoff; reuses current Mac capture/backup owners. |
+| `scripts/rebuild_knowledge.py` | `macos-only` | Thin explicit plan/execute/resume/verify/rollback CLI for the macOS rebuild coordinator; source grants and live lifecycle authority remain separate from source tests. |
 | `scripts/refresh_data_source.py` | `macos-only` | Invokes the current macOS key/process adapter. |
 | `scripts/recover_source_device.py` | `macos-only` | Explicit stopped-app device-renumber proof/apply with per-invocation source grant and app singleton ownership. |
 | `scripts/resign_wechat.py` | `macos-only` | Explicit-consent thin CLI for the exact-target macOS re-sign operation. |

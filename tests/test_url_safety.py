@@ -6,10 +6,37 @@ from core.url_safety import (
     INVALID_URL_VALUE,
     redact_url_for_display,
     redact_urls_in_text,
+    redact_urls_with_offsets,
 )
 
 
 class URLSafetyTests(unittest.TestCase):
+    def test_offsets_keep_exact_surroundings_and_whole_url_replacements(self):
+        raw = "长" * 55000 + " https://example.test/?token=private " + "尾" * 7000
+        visible, ranges = redact_urls_with_offsets(raw)
+        self.assertEqual(visible, raw.replace("token=private", "token=REDACTED"))
+        self.assertEqual(visible, redact_urls_in_text(raw))
+        self.assertEqual(len(ranges), 3)
+        self.assertEqual(ranges[1][0], "replace")
+        for tag, a, b, x, y in ranges:
+            if tag == "equal":
+                self.assertEqual(raw[a:b], visible[x:y])
+            else:
+                self.assertEqual(redact_url_for_display(raw[a:b]), visible[x:y])
+        self.assertEqual(ranges[0][1:3], (0, ranges[1][1]))
+        self.assertEqual(ranges[-1][2], len(raw))
+        self.assertEqual(ranges[-1][4], len(visible))
+
+    def test_offset_identity_and_legacy_substitution_are_exact(self):
+        from core.url_safety import URL_RE
+        for raw in ("", "猫" * 55000, "https://example.test/a?view=1",
+                    "start https://user:p@example.test/a?token=s then https://bad／url end"):
+            with self.subTest(length=len(raw)):
+                visible, ranges = redact_urls_with_offsets(raw)
+                self.assertEqual(visible, URL_RE.sub(lambda m: redact_url_for_display(m.group(0)), raw))
+                if "http" not in raw and raw:
+                    self.assertEqual(ranges, [("equal", 0, len(raw), 0, len(raw))])
+
     def test_benign_query_and_fragment_remain_exact(self):
         url = "https://example.com/report?view=full&lang=zh#section-2"
 

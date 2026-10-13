@@ -14,6 +14,7 @@ from typing import Literal
 
 _PROGRESS_CODES = frozenset({
     "no_match", "notified", "duplicate", "cooldown", "source_advanced_no_visible",
+    "semantic_applied",
 })
 _STATUS_RE = re.compile(r"[a-z][a-z0-9_]{0,79}\Z")
 

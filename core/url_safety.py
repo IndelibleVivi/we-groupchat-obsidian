@@ -195,8 +195,36 @@ def redact_url_for_display(url) -> str:
 
 def redact_urls_in_text(value) -> str:
     """Redact every HTTP(S) URL embedded in one display/log/prompt string."""
-    text = str(value or "")
-    return URL_RE.sub(
-        lambda match: redact_url_for_display(match.group(0)),
-        text,
-    )
+    return redact_urls_with_offsets(value)[0]
+
+
+def redact_urls_with_offsets(value) -> tuple[str, list[tuple[str, int, int, int, int]]]:
+    """Return the same display text and source-to-display replacement ranges.
+
+    Each entry is ``(equal|replace, raw_start, raw_end, visible_start,
+    visible_end)`` in Python character offsets. A changed URL is one replacement
+    range: consumers may bind it to the complete exact raw URL, never infer
+    character correspondence within a redacted credential. Surrounding text
+    retains one-to-one offsets. Work is linear in the surrounding text; repeated
+    passages are never aligned by a general-purpose diff.
+    """
+    raw = str(value or "")
+    pieces, ranges = [], []
+    start = visible_end = 0
+    for match in URL_RE.finditer(raw):
+        if start < match.start():
+            plain = raw[start:match.start()]
+            pieces.append(plain)
+            ranges.append(("equal", start, match.start(), visible_end, visible_end + len(plain)))
+            visible_end += len(plain)
+        original = match.group(0)
+        display = redact_url_for_display(original)
+        pieces.append(display)
+        ranges.append(("equal" if original == display else "replace", match.start(), match.end(),
+                       visible_end, visible_end + len(display)))
+        visible_end += len(display)
+        start = match.end()
+    if start < len(raw):
+        pieces.append(raw[start:])
+        ranges.append(("equal", start, len(raw), visible_end, visible_end + len(raw) - start))
+    return "".join(pieces), ranges

@@ -1,5 +1,5 @@
 """OpenAI-compatible API provider (supports OpenAI, DeepSeek, Qwen, etc.)."""
-from .base import AIProvider
+from .base import AIProvider, OutputTruncatedError
 from core.api_errors import normalize_ai_error
 
 
@@ -26,6 +26,7 @@ class OpenAIProvider(AIProvider):
             kwargs["base_url"] = base_url
         self.client = OpenAI(**kwargs)
         self.model = model
+        self.max_output_tokens = 4096
         self.thinking = thinking
         self.thinking_parameter = thinking_parameter
 
@@ -35,7 +36,7 @@ class OpenAIProvider(AIProvider):
             request = {
                 "model": self.model,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 4096,
+                "max_tokens": getattr(self, "max_output_tokens", 4096),
             }
             thinking = getattr(self, "thinking", None)
             if thinking is not None:
@@ -46,10 +47,14 @@ class OpenAIProvider(AIProvider):
                         "thinking": {"type": "enabled" if thinking else "disabled"},
                     }
             response = self.client.chat.completions.create(**request)
+            if getattr(response.choices[0], "finish_reason", None) == "length":
+                raise OutputTruncatedError()
             result = response.choices[0].message.content
             if not isinstance(result, str) or not result.strip():
                 raise RuntimeError("AI API 返回空响应，请稍后重试")
             print(f"[ai] 返回 {len(result)} 字符")
             return result
+        except OutputTruncatedError:
+            raise
         except Exception as e:
             raise RuntimeError(normalize_ai_error(e, "AI")) from None

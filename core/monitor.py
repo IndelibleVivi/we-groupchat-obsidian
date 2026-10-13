@@ -31,7 +31,7 @@ from .url_safety import URL_RE, redact_urls_in_text
 from .api_errors import is_retryable_ai_error, normalize_ai_error
 from .review_queue import ReviewQueue
 from .daily_digest import source_window_dates
-from .monitor_state import MonitorStateError, MonitorStateStore
+from .monitor_state import MONITOR_V3_STATE_SCHEMA, MonitorStateError, MonitorStateStore
 from .monitor_source import (
     MonitorSourceError,
     freeze_monitor_source_batch,
@@ -130,6 +130,7 @@ class TopicMonitor:
         link_preview_fetcher=None,
         state_store=None,
         now_func=time.time,
+        semantic_runtime=None,
     ):
         self.db = db
         self.config = config
@@ -144,6 +145,7 @@ class TopicMonitor:
         self.link_preview_fetcher = None
         self.state_store = state_store or MonitorStateStore(state_file)
         self.now_func = now_func
+        self.semantic_runtime = semantic_runtime
 
     def check_once(self, dry_run=False):
         if dry_run:
@@ -168,6 +170,28 @@ class TopicMonitor:
         Args:
             dry_run: When True, do not update state or save hit files.
         """
+        # The active generation is the sole selector. Legacy remains callable
+        # only for an un-migrated installation or explicit checkpoint rollback.
+        from .semantic.runtime import SemanticRuntime
+        from .semantic.rebuild import RebuildError
+        from .semantic.contracts import SemanticStoreError
+        from .semantic.engine import SemanticValidationError
+        from ai.semantic_provider import ProviderError
+        try:
+            semantic = self.semantic_runtime or SemanticRuntime.active(self.config)
+            if semantic is not None:
+                return semantic.check_monitor(self, dry_run=dry_run)
+        except (RebuildError, SemanticStoreError, SemanticValidationError, ProviderError,
+                MonitorSourceError) as exc:
+            return {"status": exc.code, "message": exc.code}
+        try:
+            # A missing pin is not permission to reinterpret semantic progress
+            # as a legacy timestamp. Explicit rollback restores legacy state.
+            if self.state_store.inspect().schema == MONITOR_V3_STATE_SCHEMA:
+                return {"status": "semantic_active_generation_missing",
+                        "message": "semantic_active_generation_missing"}
+        except MonitorStateError as exc:
+            return self._state_error_result(exc)
         topic = self.config.get("monitor_topic", "").strip()
         if not topic:
             return {"status": "missing_topic", "message": "请先设置关注描述"}

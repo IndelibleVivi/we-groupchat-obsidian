@@ -156,6 +156,29 @@ def summarize_file_coverage(occurrences, validated_deliveries=None):
     }
 
 
+def _projection_outcome(backup_result):
+    obsidian_state = str(
+        (backup_result.get("obsidian") or {}).get("state") or "unknown"
+    )
+    target_state = str(
+        (backup_result.get("target_projection") or {}).get("state") or "unknown"
+    )
+    successful = {"written", "unchanged"}
+    if obsidian_state not in successful:
+        state = obsidian_state
+    elif target_state not in successful:
+        state = target_state
+    else:
+        state = (
+            "written" if "written" in {obsidian_state, target_state} else "unchanged"
+        )
+    return {
+        "projection_state": state,
+        "obsidian_projection_state": obsidian_state,
+        "target_projection_state": target_state,
+    }
+
+
 def evaluate_resource_backup_outcome(capture_result, backup_result):
     """Return one shared success decision for app and CLI reporting."""
     capture_result = capture_result or {}
@@ -167,9 +190,8 @@ def evaluate_resource_backup_outcome(capture_result, backup_result):
     resolve_state = str(
         (capture_result.get("resolve") or {}).get("state") or "unknown"
     )
-    projection_state = str(
-        (backup_result.get("obsidian") or {}).get("state") or "unknown"
-    )
+    projections = _projection_outcome(backup_result)
+    projection_state = projections["projection_state"]
     handoff_state = str(backup_result.get("state") or "unknown")
     coverage = backup_result.get("coverage") or {}
     if "coverage_complete" in backup_result:
@@ -203,6 +225,8 @@ def evaluate_resource_backup_outcome(capture_result, backup_result):
         state = scan_state
     elif resolve_state not in {"healthy", "skipped"}:
         state = resolve_state
+    elif handoff_state not in {"idle", "sync_delegated", "pending_resources"}:
+        state = handoff_state
     elif projection_state not in {"written", "unchanged"}:
         state = projection_state
     else:
@@ -216,8 +240,9 @@ def evaluate_resource_backup_outcome(capture_result, backup_result):
         "capture_state": capture_state,
         "scan_state": scan_state,
         "resolve_state": resolve_state,
-        "projection_state": projection_state,
+        **projections,
         "handoff_state": handoff_state,
+        "catalog_complete": bool(backup_result.get("catalog_complete")),
     }
 
 
@@ -228,9 +253,8 @@ def evaluate_link_backfill_outcome(backfill_result, backup_result):
         and str(backfill_result.get("state") or "") == "applied"
     )
     backup_result = backup_result or {}
-    projection_state = str(
-        (backup_result.get("obsidian") or {}).get("state") or "unknown"
-    )
+    projections = _projection_outcome(backup_result)
+    projection_state = projections["projection_state"]
     handoff_state = str(backup_result.get("state") or "unknown")
     completed = (
         source_completed
@@ -244,12 +268,15 @@ def evaluate_link_backfill_outcome(backfill_result, backup_result):
             if completed
             else str(backfill_result.get("state") or "failed")
             if not source_completed
+            else handoff_state
+            if handoff_state not in {"idle", "sync_delegated", "pending_resources"}
             else projection_state
             if projection_state not in {"written", "unchanged"}
             else handoff_state
         ),
-        "projection_state": projection_state,
+        **projections,
         "handoff_state": handoff_state,
+        "catalog_complete": bool(backup_result.get("catalog_complete")),
     }
 
 
@@ -960,12 +987,16 @@ class MountedResourceBackup:
             os.path.join(self.backup_root, "objects"),
             os.path.join(self.backup_root, "objects", "sha256"),
             os.path.join(self.backup_root, "snapshots"),
-            os.path.join(self.backup_root, "views"),
         }
         for row in object_rows or []:
             planned.add(os.path.dirname(os.path.join(
                 self.backup_root, self._target_relpath(row)
             )))
+        return self._target_subtree_error(planned)
+
+    def _target_view_boundary_error(self, occurrences):
+        """Views have their own admission; they never gate machine snapshots."""
+        planned = {os.path.join(self.backup_root, "views")}
         occurrence_rows = occurrences or []
         chat_parts = self._chat_path_parts(occurrence_rows)
         chats_with_files = {
@@ -983,6 +1014,10 @@ class MountedResourceBackup:
             if identity in chats_with_files:
                 planned.add(os.path.join(chat_root, "文件备份"))
                 planned.add(os.path.join(chat_root, "待补齐附件"))
+        return self._target_subtree_error(planned)
+
+    def _target_subtree_error(self, planned):
+        target_real = os.path.realpath(self.target)
         for path in sorted(planned):
             relative = os.path.relpath(path, self.backup_root)
             current = self.backup_root
@@ -2594,6 +2629,24 @@ class MountedResourceBackup:
         )
         return written + int(portal_changed)
 
+    def _render_target_indexes_safely(self, occurrences):
+        """Render only under the target lock, after machine handoff is sealed."""
+        try:
+            boundary = self._target_view_boundary_error(occurrences)
+            if boundary:
+                raise ResourceBackupError(boundary)
+            written = self._render_target_indexes(occurrences)
+            return {
+                "state": "written" if written else "unchanged",
+                "files_written": written,
+            }
+        except (OSError, ResourceBackupError) as exc:
+            return {
+                "state": "projection_failed",
+                "files_written": 0,
+                "error_code": str(getattr(exc, "code", "") or type(exc).__name__),
+            }
+
     def plan(self):
         try:
             with self.capture.canonical_operation():
@@ -2703,52 +2756,58 @@ class MountedResourceBackup:
                     self._ensure_schema()
                     return self._run_owned()
         except (ResourceBackupError, ResourceCaptureError, ArchiveError, OSError) as exc:
-            if str(getattr(exc, "code", "")) in {
-                "worker_busy",
-                "capture_worker_busy",
-            }:
-                return {
-                    "state": "worker_busy",
-                    "copied": 0,
-                    "failed": 0,
-                    "obsidian": obsidian,
-                }
-            code = str(getattr(exc, "code", "") or type(exc).__name__)
-            if isinstance(exc, ResourceCaptureError):
-                return {
-                    "state": code,
-                    "error_code": code,
-                    "copied": 0,
-                    "reused": 0,
-                    "failed": 0,
-                    "obsidian": obsidian,
-                }
+            failure = self._handoff_failure(exc)
+            if failure["state"] != "worker_busy":
+                obsidian["state"] = "not_run"
             return {
-                "state": "target_failed",
-                "copied": 0,
-                "reused": 0,
-                "failed": 1,
-                "error_codes": [code],
+                **failure,
+                "catalog_complete": False,
+                "remote_verified": False,
                 "obsidian": obsidian,
+                "target_projection": {"state": "not_run", "files_written": 0},
+                "target_index_files_written": 0,
             }
 
-    def _run_owned(self):
-        """Render and hand off while holding the cross-process operation lock."""
-        obsidian = self._render_obsidian_indexes_safely()
-        if str(obsidian.get("state") or "") not in {"written", "unchanged"}:
+    @staticmethod
+    def _handoff_failure(exc):
+        code = str(getattr(exc, "code", "") or type(exc).__name__)
+        if code in {"worker_busy", "capture_worker_busy"}:
+            return {"state": "worker_busy", "copied": 0, "reused": 0, "failed": 0}
+        if isinstance(exc, ResourceCaptureError):
             return {
-                "state": str(obsidian.get("state") or "projection_failed"),
-                "copied": 0,
-                "reused": 0,
+                "state": code, "error_code": code, "copied": 0, "reused": 0,
                 "failed": 0,
-                "obsidian": obsidian,
             }
+        return {
+            "state": "target_failed", "copied": 0, "reused": 0, "failed": 1,
+            "error_codes": [code],
+        }
+
+    def _run_owned(self):
+        """Keep one selection while independently handing off and projecting."""
+        try:
+            result = self._run_handoff_owned()
+        except (ResourceBackupError, ArchiveError, OSError) as exc:
+            result = self._handoff_failure(exc)
+        result.setdefault("catalog_complete", False)
+        result.setdefault("remote_verified", False)
+        result.setdefault(
+            "target_projection", {"state": "not_run", "files_written": 0}
+        )
+        result["target_index_files_written"] = result["target_projection"][
+            "files_written"
+        ]
+        # A machine-path failure still permits the separate local projection.
+        # Conversely, no local projection or output-root lock gates COMPLETE.
+        result["obsidian"] = self._render_obsidian_indexes_safely()
+        return result
+
+    def _run_handoff_owned(self):
         if not self.target:
             return {
                 "state": "target_not_configured",
                 "copied": 0,
                 "failed": 0,
-                "obsidian": obsidian,
             }
         occurrences = self.capture.occurrences(selected_only=True)
         object_rows = self._object_rows(occurrences)
@@ -2765,47 +2824,42 @@ class MountedResourceBackup:
                 "error_codes": [boundary] if state == "target_failed" else [],
                 "copied": 0,
                 "failed": 0,
-                "obsidian": obsidian,
             }
         if not os.path.isdir(self.target) or not os.access(self.target, os.W_OK):
             return {
                 "state": "destination_unavailable",
                 "copied": 0,
                 "failed": 0,
-                "obsidian": obsidian,
             }
         if not self.capture.selected_chats():
-            target_indexes = 0
+            target_projection = {"state": "not_required", "files_written": 0}
             if self._read_destination_marker(required=False) is not None:
                 with self._target_worker_lock():
                     self._ensure_destination_identity_owned()
-                    target_indexes = self._render_target_indexes([])
+                    target_projection = self._render_target_indexes_safely([])
             return {
                 "state": "no_selected_chats",
                 "copied": 0,
                 "failed": 0,
-                "obsidian": obsidian,
-                "target_index_files_written": target_indexes,
+                "target_projection": target_projection,
                 "coverage": summarize_file_coverage([], {}),
                 "coverage_complete": True,
             }
         with self._target_worker_lock():
             self._ensure_destination_identity_owned()
             return self._run_locked(
-                obsidian=obsidian,
                 occurrences=occurrences,
                 object_rows=object_rows,
             )
 
-    def _run_locked(self, *, obsidian, occurrences, object_rows):
+    def _run_locked(self, *, occurrences, object_rows):
         copy_result = self._copy_snapshot_objects(object_rows)
         copied, reused = copy_result["copied"], copy_result["reused"]
         if copy_result["failed"]:
-            return {"state": "target_failed", **copy_result, "obsidian": obsidian}
+            return {"state": "target_failed", **copy_result}
 
         delivery_map = self._delivery_map()
         records = self._catalog_records(occurrences, delivery_map)
-        target_indexes = self._render_target_indexes(occurrences)
         snapshot = self._write_snapshot(records, object_rows, delivery_map)
         coverage, _validated_deliveries = self._file_coverage(
             occurrences,
@@ -2826,8 +2880,8 @@ class MountedResourceBackup:
             "reused": reused,
             "failed": 0,
             "snapshot": snapshot,
-            "target_index_files_written": target_indexes,
-            "obsidian": obsidian,
+            "catalog_complete": True,
+            "target_projection": self._render_target_indexes_safely(occurrences),
             "unresolved_files": unresolved_files,
             "coverage": coverage,
             "coverage_complete": coverage_complete,
@@ -2904,6 +2958,11 @@ class MountedResourceBackup:
 
     def status(self):
         plan = self.plan()
+        # Snapshot control evidence does not certify either mutable projection.
+        plan.update({
+            "obsidian_projection_state": "not_probed",
+            "target_projection_state": "not_probed",
+        })
         if not self._schema_ready:
             return {
                 **plan,
@@ -3045,6 +3104,8 @@ def inspect_mounted_resource_backup(config, *, settings_path=SETTINGS_FILE):
         "handoff_semantics": "target_not_configured",
         "provider_side_sync": "unknown",
         "remote_verified": False,
+        "obsidian_projection_state": "not_probed",
+        "target_projection_state": "not_probed",
         "latest_snapshot": False,
         "source_complete": False,
         "delivery_counts": {},

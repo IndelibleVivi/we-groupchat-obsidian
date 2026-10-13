@@ -1064,8 +1064,7 @@ class SelectedResourceCapture:
             }
 
     def _captures_contexts(self):
-        return bool(self.config.get("quiet_archive_handoff_enabled", False)
-                    if self.capture_contexts is None else self.capture_contexts)
+        return bool(self.capture_contexts)
 
     @staticmethod
     def _insert_context(conn, candidate):

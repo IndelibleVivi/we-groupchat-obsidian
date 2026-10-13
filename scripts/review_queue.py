@@ -12,6 +12,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from core.review_queue import ACTIVE_STATUS, QUEUE_DIR, TERMINAL_STATUSES, ReviewQueue
+from core.semantic.runtime import legacy_command_blocked
 
 
 def _short(value: str, limit: int = 96) -> str:
@@ -113,6 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if legacy_command_blocked():
+        return 2
     queue = ReviewQueue(args.queue_dir)
     if args.command == "list":
         return cmd_list(queue, args)

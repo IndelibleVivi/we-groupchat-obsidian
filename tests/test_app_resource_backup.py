@@ -45,41 +45,30 @@ class AppResourceBackupTests(unittest.TestCase):
         backup.run.assert_called_once_with()
         self.assertFalse(app._resource_backup_lock.locked())
 
-    def test_quiet_archive_only_cycle_captures_once_without_old_projection(self):
+    def test_disabled_resource_cycle_does_not_construct_a_source(self):
         app = self.make_app()
-        app.config.update(resource_backup_enabled=False, quiet_archive_handoff_enabled=True)
+        app.config["resource_backup_enabled"] = False
+        app._resource_capture_service = Mock(side_effect=AssertionError("source"))
+        with patch("app.load_config", return_value=app.config):
+            app._run_resource_backup_consumer(manual=False)
+        app._resource_capture_service.assert_not_called()
+        self.assertFalse(app._resource_backup_lock.locked())
+
+    def test_backup_failure_preserves_completed_capture_result(self):
+        app = self.make_app()
         capture = Mock()
         capture.run.return_value = {"state": "healthy", "scan": {}, "resolve": {"state": "skipped"}}
         app._resource_capture_service = Mock(return_value=capture)
-        handoff = Mock()
-        handoff.run.return_value = {"state": "written"}
+        backup = Mock()
+        backup.run.side_effect = RuntimeError("synthetic")
         with (patch("app.load_config", return_value=app.config),
-              patch("app.QuietArchiveHandoff.from_config", return_value=handoff),
-              patch("app.MountedResourceBackup.from_config", side_effect=AssertionError("projection"))):
+              patch("app.MountedResourceBackup.from_config", return_value=backup)):
             app._run_resource_backup_consumer(manual=False)
-        capture.run.assert_called_once_with(resolve_limit=50, resolve_files=False)
-        handoff.run.assert_called_once_with()
-        self.assertEqual(app._run_on_main.call_args.args[1]["backup"]["state"], "disabled")
-
-    def test_downstream_failures_do_not_block_the_other_consumer(self):
-        for failing in ("handoff", "backup"):
-            with self.subTest(failing=failing):
-                app = self.make_app()
-                app.config["quiet_archive_handoff_enabled"] = True
-                capture = Mock()
-                capture.run.return_value = {"state": "healthy", "scan": {}, "resolve": {"state": "skipped"}}
-                app._resource_capture_service = Mock(return_value=capture)
-                handoff, backup = Mock(), Mock()
-                handoff.run.return_value = {"state": "written"}
-                backup.run.return_value = {"state": "idle"}
-                (handoff if failing == "handoff" else backup).run.side_effect = RuntimeError("synthetic")
-                with (patch("app.load_config", return_value=app.config),
-                      patch("app.QuietArchiveHandoff.from_config", return_value=handoff),
-                      patch("app.MountedResourceBackup.from_config", return_value=backup)):
-                    app._run_resource_backup_consumer(manual=False)
-                capture.run.assert_called_once()
-                handoff.run.assert_called_once()
-                backup.run.assert_called_once()
+        capture.run.assert_called_once()
+        backup.run.assert_called_once()
+        result = app._run_on_main.call_args.args[1]
+        self.assertEqual(result["capture"]["state"], "healthy")
+        self.assertEqual(result["backup"]["state"], "failed")
 
     def test_resource_cycle_reports_actual_projection_publish_bytes(self):
         app = self.make_app(resolve_files=False)
@@ -389,6 +378,7 @@ class AppResourceBackupTests(unittest.TestCase):
                 "backup": {
                     "state": "sync_delegated",
                     "obsidian": {"state": "written"},
+                    "target_projection": {"state": "written"},
                 },
             }, True)
         self.assertEqual(notify.call_args.args[1], "更新完成")
@@ -396,6 +386,7 @@ class AppResourceBackupTests(unittest.TestCase):
         pending_backup = {
             "state": "pending_resources",
             "obsidian": {"state": "written"},
+            "target_projection": {"state": "written"},
             "coverage": {
                 "delivered_objects": 2,
                 "delivered_occurrences": 3,

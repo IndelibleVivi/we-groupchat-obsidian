@@ -3,17 +3,14 @@
 This is the current operator guide. [Documentation and history](README.md)
 separates its maintained contract from dated development evidence.
 
-This guide covers six deliberately separate responsibilities:
+This guide covers five deliberately separate responsibilities:
 
 1. the optional WeChat source guard, which may request a normal macOS
    application launch;
 2. the attachment catalog and private local content-addressed archive;
 3. the default no-OAuth selected-resource handoff to an existing mounted target;
 4. optional advanced direct selected-chat sync to the Drive API;
-5. a provider-neutral filesystem snapshot target for the broader attachment archive; and
-6. the default-off [Quiet Archive local handoff](quiet-archive-handoff.md), which
-   explicitly retains visible message context and exports resources, contexts
-   and coverage without AI, Markdown or Drive projections.
+5. a provider-neutral filesystem snapshot target for the broader attachment archive.
 
 They remain separate domain responsibilities even though protected-data timers
 share one long-lived menu-app process. `TopicMonitor` reads messages and commits
@@ -24,15 +21,13 @@ Each selected-chat scanner owns an independent cursor/selection and may reuse
 the same local CAS without a Knowledge hit. Mounted backup reads immutable local
 archive objects and writes only to its configured filesystem target.
 
-Quiet Archive reuses the selected-resource scanner. Contexts, occurrences,
-cursors and page receipts commit together. Complete inventory means the expected
-shards were present; raw EOF additionally requires exhausting every selected
-shard and rechecking the inventory. Missing historical context from older or
-disabled capture remains a separate gap. Context-only staged backfill neither
-advances live cursors nor grants attachment-byte access. Its protected-source
-CLI commands require `--allow-transient-wechat-source-read`; export/status read
-only the local ledger/CAS. Commands and the machine contract live in the
-[handoff guide](quiet-archive-handoff.md).
+The generic selected-resource scanner retains an explicit context-capture option
+for external adapters. Contexts, occurrences, cursors and page receipts commit
+together; complete inventory, raw EOF, historical gaps and attachment availability
+remain separate. Context-only staged backfill does not advance live cursors or
+grant attachment access. Consumer-specific producers and commands are maintained
+outside this public app. The new knowledge runtime and its separate migration
+procedure are described in [the semantic workflow](semantic-workflow.md).
 
 ## 1. Optional WeChat source guard
 
@@ -212,8 +207,8 @@ A macOS device-number change can disconnect the source namespace from existing m
 every non-retired shard generation and all selected monitor bindings agree. Physical cache identity
 remains current; established message IDs keep their original namespace. Checkpoints, pending
 intent, capture ledgers and inventory are not rewritten.
-App-config runtime readers explicitly consume this binding; the standalone Quiet Archive producer
-retains its separate marker. Real replacement, rekey, new shards or changed volume/inode fail closed.
+App-config runtime readers explicitly consume this binding; independently
+injected readers retain their own explicit source identity contract. Real replacement, rekey, new shards or changed volume/inode fail closed.
 This command cannot bypass general generation admission.
 
 Use recorded old device/namespace values, never guesses. Inspect `scripts/autostart.py status`,

@@ -44,6 +44,14 @@ DEFAULT_CONFIG = {
     "monitor_chats": [],
     "monitor_chat_aliases": {},
     "monitor_chat_taxonomy_profiles": {},
+    "semantic_runtime_root": "",
+    "semantic_reader_properties": {},
+    "semantic_text_output_tokens": 16384,
+    "semantic_provider_limits": {
+        "text": {"max_inflight": 8, "requests_per_minute": None, "tokens_per_minute": None},
+        "decision": {"max_inflight": 4, "requests_per_minute": None, "tokens_per_minute": None},
+        "embedding": {"max_inflight": 4, "requests_per_minute": None, "tokens_per_minute": None},
+    },
     "monitor_topic": "",
     "monitor_max_messages_per_run": 200,
     "monitor_context_overlap_minutes": 12,
@@ -88,8 +96,6 @@ DEFAULT_CONFIG = {
     "attachment_backup_target": "",
     "resource_backup_selected_chats": [],
     "resource_backup_enabled": False,
-    "quiet_archive_handoff_enabled": False,
-    "quiet_archive_handoff_target": "",
     "resource_backup_interval_seconds": 300,
     "resource_backup_max_messages_per_scan": 500,
     "resource_backup_min_free_bytes": 1024 * 1024 * 1024,
@@ -231,6 +237,9 @@ def _sanitize_monitor_chat_list(value):
             "username": username,
             "name": name.strip() if isinstance(name, str) and name.strip() else username,
         })
+        selected_since = item.get("selected_since")
+        if type(selected_since) is int and selected_since > 0:
+            clean_chats[-1]["selected_since"] = selected_since
     return clean_chats
 
 
@@ -332,9 +341,9 @@ def _sanitize_config(saved):
         "ai_base_url", "monitor_chat_username", "monitor_chat_display_name",
         "monitor_topic", "monitor_ai_provider", "monitor_ai_model",
         "monitor_knowledge_db", "monitor_obsidian_root", "monitor_obsidian_subdir",
+        "semantic_runtime_root",
         "daily_digest_time", "daily_digest_timezone", "daily_digest_dir",
         "wechat_source_guard_pause_until",
-        "quiet_archive_handoff_target",
         "google_drive_file_sync_root_name", "google_drive_file_sync_db",
         "image_aes_key",
     ):
@@ -364,6 +373,18 @@ def _sanitize_config(saved):
         )
 
     cfg["monitor_chat_aliases"] = _sanitize_chat_map(saved.get("monitor_chat_aliases"))
+    properties = saved.get("semantic_reader_properties", {})
+    if (not isinstance(properties, dict) or set(properties) - {"follow", "mute", "wait", "query"}
+            or any(not isinstance(value, str) or not value.strip() or value.startswith("wgo_")
+                   for value in properties.values())
+            or len(set(properties.values())) != len(properties)):
+        raise ConfigError("semantic_reader_properties_invalid")
+    cfg["semantic_reader_properties"] = dict(properties)
+    from .semantic.scheduling import validate_limits
+    try:
+        cfg["semantic_provider_limits"] = validate_limits(saved.get("semantic_provider_limits"))
+    except ValueError as exc:
+        raise ConfigError("semantic_provider_limits_invalid") from exc
     cfg["monitor_chat_taxonomy_profiles"] = _sanitize_chat_map(
         saved.get("monitor_chat_taxonomy_profiles")
     )
@@ -375,7 +396,7 @@ def _sanitize_config(saved):
         "monitor_notify_writes", "monitor_notify_checkins",
         "daily_digest_enabled", "daily_digest_notify",
         "wechat_source_guard_enabled", "attachment_archive_enabled",
-        "resource_backup_enabled", "quiet_archive_handoff_enabled",
+        "resource_backup_enabled",
         "google_drive_file_sync_enabled", "google_drive_file_sync_paused",
         "google_drive_file_sync_keep_local_objects",
         "mcp_enable_send_message",
@@ -403,6 +424,7 @@ def _sanitize_config(saved):
         ]
 
     int_ranges = {
+        "semantic_text_output_tokens": (4096, 65536),
         "batch_msg_limit": (1, 5000),
         "hide_inactive_months": (0, 60),
         "monitor_interval_minutes": (1, 1440),

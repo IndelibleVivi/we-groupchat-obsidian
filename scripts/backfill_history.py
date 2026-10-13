@@ -14,6 +14,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 from ai.factory import create_provider
 from core.config import load_config
+from core.semantic.runtime import legacy_command_blocked
 from core.key_extractor import get_cached_keys
 from core.knowledge import KnowledgeStore
 from core.wechat_db import WeChatDB
@@ -204,6 +205,8 @@ def write_knowledge_note(store: KnowledgeStore, config: dict, group: dict, day: 
 
 
 def backfill(args: argparse.Namespace) -> int:
+    if legacy_command_blocked():
+        return 2
     config = load_config()
     keys = get_cached_keys()
     if not keys:

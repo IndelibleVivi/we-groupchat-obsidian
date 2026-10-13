@@ -62,6 +62,8 @@ The implementation must:
 - write a per-chat, per-month Obsidian resource index even when the mounted
   destination is absent or unavailable;
 - hand eligible CAS objects and eligible occurrence metadata to a mounted filesystem target;
+- seal machine-readable snapshots independently of Obsidian indexes, mounted
+  target views, and the separate Direct Drive lane;
 - avoid re-reading streamed cloud placeholders during ordinary scheduled runs;
 - expose honest `sync_delegated` semantics rather than claiming remote verification;
 - run bounded source-guard and mounted-resource timer work inside the long-lived
@@ -366,7 +368,10 @@ The lane must:
 - copy, never move, CAS bytes;
 - reject targets that overlap the local archive, resource DB, knowledge DB, Obsidian vault, or filesystem root;
 - reject a symlink configured target and any symlink/non-directory component in
-  the app-owned `wgo-resource-backup/v3` subtree during both plan and run;
+  the machine namespace, `objects`, or `snapshots` during both plan and run;
+- admit `views` and its generated descendants separately when rendering target
+  indexes; a view conflict fails that projection without invalidating a safe
+  machine snapshot;
 - reject symlink/non-regular destination conflicts;
 - compute SHA-256 while copying;
 - publish through a worker-owned temporary file and replace;
@@ -399,8 +404,14 @@ New source/resource `install-agent` paths are retired and refuse installation;
 their old command modes return `long_lived_app_required` before touching
 protected data. Status/uninstall remain only to detect and remove legacy plists.
 
-Resource background work captures occurrences, refreshes indexes, attempts
-mounted handoff, and writes receipts/snapshots when appropriate. File-byte
+Resource background work captures occurrences, attempts mounted object delivery
+and seals the machine snapshot, then independently attempts target views and the
+local Obsidian index. These are bounded phases under the same capture/selection
+and backup-DB authority. Machine copy, snapshot publication and target views use
+the target lock; only local Markdown requires the projection-root lock. A busy
+or unwritable Obsidian root does not prevent `COMPLETE`, and a failed mounted
+handoff does not prevent local index refresh. No Direct Drive operation is a
+prerequisite for this mounted lane. File-byte
 resolution is disabled by default and requires a separate explicit menu
 confirmation or `--resolve-files` on the current CLI run. Menu consent is
 in-memory only and resets on process exit. Link-only backfill never reads
@@ -469,18 +480,39 @@ The general redacted health check uses a stricter read-only inspection path: it
 does not create/migrate the capture ledger, does not open CAS payload objects,
 and reports only destination/snapshot control evidence plus delivery counts.
 Its mounted line always says `provider_side_sync=unknown` and
-`remote_verified=False`. Direct Drive API verification is a separate health
-line and never upgrades mounted handoff evidence.
+`remote_verified=False`. Both projection states are `not_probed`: this inspector
+does not open Markdown or infer current projection health from an older snapshot.
+`status` uses the same explicit projection uncertainty. Direct Drive API
+verification is a separate health line and never upgrades mounted handoff evidence.
 
 App/CLI reporting keeps the existing strict `completed` and CLI exit contract for
-compatibility, and adds `operational_success`, `coverage_complete`, and `coverage`.
-`operational_success` accepts a healthy capture/scan/resolution/projection cycle
-whose handoff is `idle`, `sync_delegated`, or `pending_resources`.
+compatibility. `MountedResourceBackup.run()` reports independent results:
+
+| Field | Meaning |
+| --- | --- |
+| `state` | Machine handoff result: for example `sync_delegated`, `idle`, `pending_resources`, or `target_failed`. |
+| `catalog_complete` | This run sealed or validated the current hash-bound machine snapshot. It says nothing about either projection or remote upload. |
+| `obsidian.state` | Local index result, including `written`, `projection_failed`, or `worker_busy`. |
+| `target_projection.state` | Target-view result: `written`, `unchanged`, `projection_failed`, or `not_run`. An empty selection with no owned destination uses `not_required`. |
+| `target_index_files_written` | Existing compatibility count from the target-view result. It is not a snapshot success flag. |
+
+The shared outcome helper reports `handoff_state`, `catalog_complete`,
+`obsidian_projection_state`, and `target_projection_state`; CLI `run` exposes
+these alongside its aggregate `state`. `projection_state` in the helper is the
+combined projection result. Missing projection evidence is `unknown`, never
+successful. `operational_success` requires healthy capture/scan/resolution and
+both projections to be `written` or `unchanged`, with handoff `idle`,
+`sync_delegated`, or `pending_resources`. `completed` additionally requires the
+handoff to be `idle` or `sync_delegated`; CLI `run` returns 2 otherwise. Thus a
+successful machine snapshot with a failed target view remains available to
+machine consumers while CLI/app report that the overall cycle needs attention.
+
 `coverage_complete` is true only when no file occurrence remains outside
 `delivered`. The additive coverage object reports delivered occurrence/object
 counts and a count for every non-delivered surface state. Thus
-`pending_resources` truthfully means “catalog/index updated; attachment-byte
-coverage incomplete,” without relabeling a normal backlog as an operational error.
+`pending_resources` means “catalog updated; attachment-byte coverage incomplete.”
+Projection success is reported separately; an ordinary attachment backlog with
+successful projections remains operationally successful.
 
 ## 12. Snapshot contract
 
@@ -492,7 +524,10 @@ A snapshot contains only currently eligible occurrences. It must not include raw
 mode, the SHA-256 of `resources.jsonl`, and a separate path-free
 `source_observation` copied from the authoritative shard inventory.
 
-`COMPLETE` is written last and binds the manifest and resource catalog hashes. An incomplete directory without a valid `COMPLETE` marker is not a complete snapshot.
+`COMPLETE` is the last machine snapshot file written and binds the manifest and
+resource catalog hashes. Target-view and Obsidian rendering happen afterward;
+neither is an admission condition for `COMPLETE`. An incomplete directory
+without a valid `COMPLETE` marker is not a complete snapshot.
 
 `COMPLETE` means `catalog_complete`: the exported occurrence catalog and its
 listed objects are internally bound and independently readable. It does not turn
@@ -511,15 +546,17 @@ and its `link_export_mode`, handoff semantics, and `source_observation` match th
 current run. A missing/invalid snapshot or changed source evidence is rebuilt
 even when local SQLite still holds the old catalog hash.
 
-### 12.1 Quiet Archive extension
+### 12.1 Explicit context-capture extension
 
-The optional [Quiet Archive local handoff](quiet-archive-handoff.md) reuses this
-v3 resource/object structure and the canonical capture ledger. It adds hashed
-`contexts.jsonl` and `coverage.json` through the explicit
-`we-groupchat-obsidian.quiet-archive.v1` manifest extension, uses a distinct local
-destination purpose, and runs no Markdown/Drive projection. Full visible-message
-retention defaults off. Its raw EOF, selected source scope, legacy context gaps
-and attachment coverage do not change the existing mounted snapshot semantics.
+External adapters may reuse the canonical capture ledger and v3 copy/snapshot
+transport. Full visible-message retention is an explicit constructor option and
+defaults off; this public app has no consumer-specific producer, profile or menu.
+Enabled contexts commit with occurrences, cursors and page receipts. Raw EOF,
+selected scope, historical context gaps and attachment coverage remain distinct;
+this extension does not change mounted snapshot semantics or grant attachment
+access. Each adapter owns its machine manifest and a separate destination purpose.
+Semantic knowledge instead uses the immutable capture contract in
+[the semantic workflow](semantic-workflow.md).
 
 ## 13. Link privacy modes
 
@@ -558,10 +595,16 @@ must report `link_preview_disabled` with `network_requests=0`; a legacy
   continue refreshing the local Obsidian resource index.
 - Obsidian projection conflict: preserve unmanaged files and use the managed
   `.generated.md` fallback; if no safe managed path exists, report
-  `projection_failed` without rolling back captured occurrences.
+  `obsidian.state=projection_failed` without rolling back captured occurrences
+  or preventing machine snapshot publication. The next run can repair the
+  projection while reusing an unchanged snapshot and verified delivery receipts.
 - Target volume below the configured reserve: stop before copy with
   `insufficient_target_space`; do not publish a complete snapshot.
-- Target conflict: fail closed; do not overwrite unknown bytes.
+- Target object/snapshot/identity conflict: fail closed; do not overwrite
+  unknown bytes or label an unsafe machine handoff complete.
+- Target-view conflict: report `target_projection.state=projection_failed`,
+  preserve unmanaged files and already sealed machine output, and continue the
+  independent Obsidian phase. A projection error never erases `COMPLETE`.
 - Concurrent worker: DB-, projection-root-, and target-scoped non-blocking locks
   permit only one owner for each affected surface; a contender returns
   `worker_busy` without mutating that surface.
@@ -570,6 +613,8 @@ must report `link_preview_disabled` with `network_requests=0`; a legacy
 - Process crash after target publication but before receipt: the next run verifies the existing target object once and reconstructs the receipt.
 - Process crash before `COMPLETE`: the snapshot is incomplete and ignored.
 - Removing selection: do not delete prior target data.
+  Still render an explicit empty scope and collect only manifest-owned indexes
+  on each available projection; failure on one surface does not gate the other.
 
 ## 15. Compatibility
 
@@ -675,6 +720,11 @@ At minimum, automated tests must prove:
   `sync_delegated` run state;
 - catalog-complete snapshots separately preserve incomplete source-observation
   evidence and are rebuilt when that evidence changes;
+- readonly/symlink/busy Obsidian projections and target-view conflicts do not
+  block an independently verifiable machine snapshot, while unsafe object or
+  snapshot paths still block it;
+- actual CLI/app results distinguish machine success from projection attention,
+  and content-free health reports projection evidence as `not_probed`;
 - Obsidian indexes reference CAS files but do not duplicate bytes.
 - long-lived app timers use non-blocking overlap guards; retired source/resource
   command modes do not touch protected data, installation is refused, and

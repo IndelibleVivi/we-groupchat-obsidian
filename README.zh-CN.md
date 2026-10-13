@@ -1,8 +1,9 @@
 # we-groupchat-obsidian
 
-本地优先的微信群聊总结、关注推送与 Obsidian 知识库工具。
+本地优先的微信群聊知识、故事、资源与 Obsidian 阅读工具。
 
-当前状态：可完整运行的 source-distributed macOS app。它已经拥有菜单栏 app、可选的 legacy read-only MCP compatibility Server、
+当前状态：source-distributed macOS app，正在集成语义重建候选。
+已有安装在明确迁移并激活 generation 之前继续运行旧 monitor。它已经拥有菜单栏 app、可选的 legacy read-only MCP compatibility Server、
 operator CLI、持久化本地状态、recovery/backup workers 和完整 regression suite；请先读完
 数据流和账号安全边界，再在真实聊天数据上使用。当前不分发 bundled Python runtime
 或已签名 installer。当前 package metadata 对应 `v0.1.0-alpha.1` prerelease line；
@@ -26,21 +27,40 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 
 [文档与开发历史入口](docs/README.md) · [English README](README.md)
 
-可选的 [Quiet Archive 本机私有交接](docs/quiet-archive-handoff.md) 把明确选中来源的资源与完整可见消息正文
-输出为 JSON/CAS snapshot，不依赖 AI 笔记、Obsidian 或 Drive，保留既有备份。功能默认关闭；开启才允许
-普通扫描保存全部选中消息正文。raw EOF、历史 context 缺口和待补附件分别报告。 本轮部分 shard 读取失败时，已提交内容仍导出为 fresh `pending`，consumer 可继续收录；failed shard 与未覆盖范围保留，不声称完整。显式带 `--allow-attachment-read` 的 `refresh` 可按 `--file-limit` 在导出前补取已选来源的本机缓存文件；普通 refresh 不读取附件。专用 CLI 支持既有 app 配置，
-也支持独立 `--profile`：明确指定 source/keys、选群和私有 ledger/cache，plan/status/export 不读取微信或 keys。
-有限预算 refresh 和 staged 历史回补须明确授予 source read；已有交接可保留 identity 承接，新附件也有单独授权的
-解析入口，因此不需要菜单栏 app 或笔记总结任务先运行。profile 与迁移命令见交接指南。
-macOS 设备号变化时，可明确运行一次 `recover-source-device`：核对旧 shard 后在既有 producer marker
-保存卷 UUID／目录 inode，保留 archive、selection 与游标；后续设备号变化自动沿用该绑定。
-命令和恢复条件见上述 handoff 指南。
+## 新的语义知识工作流（候选）
+
+新 runtime 保存不可变的 source versions，从一条来源提取零到多个 Observation，
+再把跨群、跨天的材料整理成稳定 Item。生活、接梗、故事、经验和技术更新走同一条链，
+不再按兴趣分数决定是否保留知识。兴趣设置影响阅读和简报选材；claims 保留时间、案例与条件，
+晚到回复、更正和终于补上的资源可以重新打开对应 Episode。
+
+阅读与控制都在 Obsidian：Item 正文、主题视图、`检索.md`、`管理.md`、可编辑的关注／静音／等待／查询属性，
+以及每天一版、可以修订的简报。生成正文保留细节和证据；手改冲突会保留原样备份并显式提示。
+捕获时的成员名字用于清楚归属，稳定来源身份、显示名与被谈论的人物分别处理；同名不能推定同人。
+正文按材料选用条件对照表、步骤列表、要点和带归属的原话引用，不要求每篇套用同一格式。
+可选的[本地 Obsidian 插件](integrations/obsidian/README.md)只为确实可见的页面记录打开事件；
+未装插件时使用手动读过／已知动作。仓库提供插件源码，不自动安装或启用。
+
+SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务或 Cloudflare BGE-M3，
+派生索引可以选本地 cosine 或 Cloudflare Vectorize。完整本地路线要求文本、判断和 embedding
+都使用本地服务，并配本地索引；只选本地索引不会改变其他模型的数据边界。
+文本生成、结构化判断与 embedding 分开配置。Provider ledger 保存 usage、reservation、明确预算证据和
+未知结果；程序不会自行建账户、建索引或获得消费授权。
+
+已有安装按[首次迁移 runbook](docs/semantic-rebuild.md)执行：保全旧知识、读者状态和原始历史，
+两次完整观察来源、验证有限 cutover horizon，再切换唯一 generation pin 并检查恢复后的增量 runtime。
+拉取代码本身不会迁移或激活数据。日常操作见[语义阅读指南](docs/semantic-workflow.md)，
+数据流见[provider contract](docs/semantic-providers.md)，准确阶段见[候选状态](docs/current-state.md)。
+专用 archive producer、profile 与菜单已移至外部 adapter；公共 WGO 保留通用 source/capture、
+显式 context capture、CAS 和 mounted backup。
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![macOS](https://img.shields.io/badge/macOS-only-lightgrey)
 ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## Obsidian 输出预览
+
+以下截图记录保留的**迁移前 topic/event 输出**，不是上述语义候选界面的截图。
 
 下面的画面由真实 exporter Markdown 的临时脱敏副本，按 Obsidian light reading view
 的排版生成。为了让 README 里的正文清楚可读，画面只保留 note body，不包含侧栏、
@@ -106,6 +126,21 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
 
 ## 架构
 
+![语义 generation、状态归属与阅读流程](docs/assets/architecture/semantic-core.zh-CN.svg)
+
+active generation 选择唯一知识链：raw capture 落库后才提交 captured vector，
+整批语义完成后才提交 applied vector；索引、Obsidian 和通知消费持久 outbox／receipt。
+全量迁移和增量处理复用同一 engine，source inventory、密钥恢复、长驻进程授权和资源备份保持既有 owner。
+迁移 journal 留在 generation 外，半切换失败仍有独立恢复证据。
+
+可编辑源：[semantic core](docs/architecture/semantic-core.zh-CN.excalidraw)。
+详细契约：[store](docs/semantic-store-contract.md)、[engine](docs/semantic-engine.md)、
+[v3 进度](docs/monitor-state-v3.md)、[阅读](docs/semantic-reading.md)、[迁移](docs/semantic-rebuild.md)。
+
+<details>
+<summary>迁移前架构与继续复用的 source/resource 基础</summary>
+
+
 ![we-groupchat-obsidian 架构图](docs/assets/architecture/we-groupchat-obsidian-architecture.zh-CN.svg)
 
 这张图沿着主数据路径展开：从微信本地加密数据库出发，经过来源规范化、增量监控和可替换的 AI
@@ -144,7 +179,7 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
   durable queue 和 archive-owned provider-neutral CAS catalog；每个 digest 只上传一次，>5 MiB upload 按
   server-confirmed offset resumable，再按群聊/月份创建可读 shortcut。Remote identity 由 Drive file ID
   持有，不由可见名称或路径持有。
-- 远程 AI 调用会跨出 Mac 本地边界；Ollama 可以让 AI 解释留在本机。内置远程 URL preview
+- 远程 AI 调用会跨出 Mac 本地边界；Ollama 可以让旧文本解释留在本机；语义 embedding 有独立外联边界。内置远程 URL preview
   已停用；链接进入 AI prompt 或人类可读 projection 前会脱敏 credential，exact URL identity
   只留在 private local ledger。
 - 保存知识、立刻发通知、进入 Review Queue 供以后行动，是三个独立判断。MCP 只保留可选的
@@ -154,7 +189,12 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
 [中文主版 Excalidraw](docs/architecture/we-groupchat-obsidian-architecture.zh-CN.excalidraw) ·
 [English-first Excalidraw](docs/architecture/we-groupchat-obsidian-architecture.en.excalidraw)。
 
+</details>
+
 ## 现在能做什么
+
+迁移后新增上述语义工作流。下面的菜单总结、来源与资源能力继续保留；旧 topic/event 笔记、Review Queue
+和 Digest 版式只适用于迁移前。
 
 - 菜单栏总结：按群聊总结新消息、自定义最近 N 条/分钟、按天回顾、复制和打开历史总结。
 - 群聊管理：读取最近活跃群聊，给群聊分组，批量总结多个群聊。
@@ -168,12 +208,17 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
 - 可选、运行在长驻菜单栏 runtime 内的微信 source guard：grace、pause、restart budget、exponential backoff 与 content-free receipts。
 - Provider-neutral filesystem snapshot：支持 attachment archive 的 plan、run、verify 和只读 restore plan。
 - 默认 no-OAuth selected-resource mounted backup：把 exact links 与共享 CAS files 交给现有 Google Drive for Desktop 等挂载目录，同时生成轻量 Obsidian index、catalog snapshot 和诚实的 `sync_delegated` receipt。
+- 机器快照独立封存，不以 Obsidian 或挂载目录索引渲染成功为前提。任一投影失败时，完整 catalog 仍可被消费；本轮结果分别报告两个投影状态，CLI 对尚需处理的整体更新仍返回未完成。
 - 可选 advanced Google Drive API lane：拥有独立 selection/control plane、durable queue、群聊/月 shortcut 与 retry/reconcile，不自动删除。
 - 链接和转发展开：保留 exact URL extraction，并对 display/export 做 credential-safe redaction；内置远程链接预览已停用且零网络请求。本地微信 XML 里可见的转发聊天记录会尽量解析。
 - MCP Server：面向支持本地 MCP stdio server 的 client 的可选 legacy read-only compatibility surface；需要额外显式安装（`requirements-mcp.txt`），菜单栏 app 既不内嵌也不管理它。可查询、搜索、总结、查看图片与已有 metadata，但不能发送消息或修改本地状态。
 - 运维命令：即使菜单栏图标被隐藏，也可以用 `.command` 文件配置关注推送、健康检查、刷新数据源、历史回填和安装自启动。
 
 ## 隐私和风险边界
+
+所选 embedding 服务接收脱敏检索文本：可以是明确配置的 loopback 服务，也可以是 Cloudflare。
+选用 Vectorize 时，远端接收派生向量及有限身份 metadata。本地 adapter 拒绝外网 endpoint 和重定向，
+服务本身仍须配置为使用本地模型。详见[provider 数据流](docs/semantic-providers.md)。
 
 这个项目适合个人本地使用。它涉及微信本地数据库和进程内 key 提取，所以公开使用前请先理解这些边界：
 
@@ -183,7 +228,7 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
   worker 反复消耗这个 process-lifetime consent；附件 bytes 解析是仅存在于内存、本次 app 会话有效的
   显式授权，重启后必定归零，也不会从 config 恢复；关闭后，in-flight resolver 会在下一次读取附件
   bytes 之前取消。Links-only backfill 不读取附件 cache。
-- 聊天内容会发送给你自己配置的 AI provider。使用 Ollama 本地模型时，内容可以完全不离开本机；使用云端 provider 时，请按对应服务的隐私规则自行判断。
+- 聊天内容会发送给你自己配置的 AI provider。Ollama 可让旧文本总结留在本机；语义 embedding 与 Vectorize 的数据流单独配置，不能由文本模型的位置推断。
 - API Key 使用系统受保护凭据服务（当前 Mac app 使用 Keychain）；config 不作为 API key 的 fallback。
 - 本地配置、书签、monitor state、数据库 key、日志、SQLite DB 和 Markdown 导出默认在 `~/.we-groupchat-obsidian/` 或你的 Obsidian vault 中，不应该提交到 git。旧 `~/.wechat-summary/` 只作为本机 migration/compatibility 路径保留。
 - Attachment catalog、本地 archive、source-guard state/receipts 和 backup snapshot manifest/catalog 都是私有 runtime data。
@@ -261,6 +306,9 @@ gateway 或上游 model 已执行它。
 
 ### 快速开始
 
+普通启动保留既有 monitor。使用语义 Item 与简报须单独完成[迁移](docs/semantic-rebuild.md)；
+打开 app 或安装插件不会自行激活 generation。
+
 ```bash
 git clone https://github.com/IndelibleVivi/we-groupchat-obsidian.git
 cd we-groupchat-obsidian
@@ -335,8 +383,8 @@ Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 comm
   occurrence、selection、projection、handoff、coverage 与 failure semantics。
 - [恢复验收](docs/recovery-acceptance.md)与[可靠性收口](docs/reliability-closure.md)：
   持续维护的恢复/失败 contract；历史 canary 与最初 authoring 限制单独标明范围。
-- [Quiet Archive handoff](docs/quiet-archive-handoff.md)：本机私有 machine export、
-  可选可见消息正文留存，以及独立的 coverage contract。
+- [语义阅读](docs/semantic-workflow.md)、[重建迁移](docs/semantic-rebuild.md)与
+  [当前候选状态](docs/current-state.md)：日常控制、迁移与激活边界。
 - [CONTRIBUTING](CONTRIBUTING.md) 与 [AGENTS](AGENTS.md)：贡献与 source ownership；
   [Windows 开发说明](docs/WINDOWS-DEVELOPMENT.md)负责阶段顺序，
   [port map](docs/WINDOWS-PORT-MAP.md)负责模块状态。
@@ -344,6 +392,9 @@ Digest 后才 ACK journal。如果 event 已 commit、monitor cursor 尚未 comm
   `群友使用说明.md` 的唯一来源。
 
 ### 监控响应接受与待处理批次
+
+本节描述迁移前的兼容 monitor。语义 generation 使用[accepted jobs 与整批 disposition](docs/semantic-engine.md)，
+并分别维护[captured/applied vectors](docs/monitor-state-v3.md)。
 
 监控响应必须有真正的布尔 `match` 和 0–100 的整数 `score`；命中候选还必须有非空正文。
 无效、空白或截断 JSON 返回 `ai_invalid_response`，不会被当成正常“不保留”。
@@ -360,6 +411,11 @@ context/provider 工作前直接认领。来源或策略变化时明确暂停，
 本项不改变资源权限、附件授权、通知筛选或部署状态。
 
 ## 常用命令
+
+语义 generation 激活后，旧 configure/backfill/catch-up/digest/review/整理命令会在创建旧 writer 前停止。
+日常使用菜单 app 与 Obsidian controls，迁移状态用 `scripts/rebuild_knowledge.py status RUN_ID`，
+内容无关健康状态用 `scripts/health_check.py --semantic-json`。下列旧知识命令用于迁移前或明确 rollback 后；
+source、resource、health 和 autostart 命令继续按各自范围工作。
 
 Canonical Finder helper 统一放在 `launchers/`，都可以双击运行或在 Terminal
 执行。根目录只保留一个极薄的 `启动.command` compatibility entrypoint，供已有
@@ -398,7 +454,7 @@ source install 与 LaunchAgent 继续使用。
 | `Monitor operational status` | 把 enabled 开关与 healthy、blocked、stale、unknown 分开；检查/成功时间与消息 watermark 分别报告。已验证 EOF 的安静检查仍是成功，不因消息时间旧而判停滞。 |
 | `Monitor raw cursor progress` | 只输出 checkpointed chat 数和 generation-bound shard cursor 数，不输出 chat/cursor value。 |
 | `Source inventory` | 区分 complete、degraded 与 uninitialized，并分别统计 present、missing、cache-only、key-missing、unreadable。只有 expected inventory 完整、current generations 稳定且 required reads 全部成功，才能叫 source complete。 |
-| `Mounted resource handoff` | 只读检查现有 destination binding 与 latest snapshot handoff；即使是 `sync_delegated`，也明确保留 `provider_side_sync=unknown`、`remote_verified=False`。 |
+| `Mounted resource handoff` | 只读检查现有 destination binding 与 latest snapshot handoff；即使是 `sync_delegated`，也明确保留 `provider_side_sync=unknown`、`remote_verified=False`。Obsidian 与 target 投影均为 `not_probed`，不据此宣称可读页面已更新。 |
 | `Google Drive API remote verification` | 可选 Direct Drive API ledger 中经过 remote verification 的 object 数；它与 source completeness、mounted delivery 都是不同事实。 |
 | `Link preview` / `MCP compatibility` / `Windows` | Preview 停用且零请求；MCP 为 legacy read-only、send retired；存储/凭据中间层已接入源码，Windows 产品支持仍未声明。 |
 
@@ -609,6 +665,8 @@ io.github.indeliblevivi.we-groupchat-obsidian
 
 ## 关注推送工作流
 
+本节及后面的旧 Obsidian 输出描述保留的**迁移前工作流**。已激活的语义 generation 使用[阅读指南](docs/semantic-workflow.md)。
+
 关注推送适合盯“不是每条都重要，但错过会可惜”的群聊信息。
 
 1. 运行 `./launchers/配置关注推送.command`。
@@ -806,7 +864,8 @@ core/
   attachment_backup.py          # archive filesystem snapshot / verify / restore plan
   resource_capture.py           # selected-chat exact occurrence capture/backfill
   resource_backup.py            # mounted target projection、handoff 与 receipts
-  quiet_archive_handoff.py      # opt-in 本机私有 JSON/context handoff，无 AI/Markdown/Drive
+  semantic/                     # generation、store、engine、阅读与迁移
+  provider_usage.py               # provider reservation / usage / budget evidence
   wechat_source_guard.py        # 长驻 app 内的 optional source guard
   google_drive_*.py             # 独立 advanced Drive API queue/OAuth/projection
 ui/                      # 可复用 macOS UI 组件
@@ -816,7 +875,8 @@ scripts/
   attachment_archive.py / attachment_backup.py / resource_backup.py
   google_drive_file_sync.py / wechat_source_guard.py
   daily_digest.py / review_queue.py / repair_relations.py
-  autostart.py / build_share_package.py
+  autostart.py / build_share_package.py / rebuild_knowledge.py
+integrations/obsidian/   # 可选 visible-open 插件源码
 launchers/               # canonical Finder 双击 .command entrypoints
 tests/                   # 可 import 的 unittest package
 c_src/                   # key scanner C 代码

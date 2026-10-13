@@ -228,8 +228,8 @@ class HealthCheckTests(unittest.TestCase):
 
         patchers = (
             patch("scripts.health_check.load_config", return_value=config),
-            patch("scripts.health_check.get_cached_keys", return_value={}),
-            patch("scripts.health_check.load_key", return_value=""),
+            patch("core.key_extractor.get_cached_keys", side_effect=AssertionError("health must not read keys")),
+            patch("core.keychain.load_key", side_effect=AssertionError("health must not read credentials")),
             patch("scripts.health_check.recent_autostart_ai_success", return_value=False),
             patch("scripts.health_check.is_wechat_signed", return_value=False),
             patch("scripts.health_check.process_lookup_available", return_value=False),
@@ -315,7 +315,7 @@ class HealthCheckTests(unittest.TestCase):
         self.assertIn("Attachment backup target: not configured (optional)", text)
         self.assertIn(
             "Google Drive selected-chat files: disabled / active; "
-            "auth=auth_required; selected=0; queue=waiting_cache=2;",
+            "auth=not_probed; selected=0; queue=waiting_cache=2;",
             text,
         )
         self.assertIn("root=unknown; objects=1; shortcuts=3; last_error=-", text)
@@ -574,8 +574,8 @@ gui/501/com.example.wechat-summary = {
                 return real_isdir(path)
 
             with patch("scripts.health_check.load_config", return_value=config), \
-                 patch("scripts.health_check.get_cached_keys", return_value={"message/message_0.db": {"enc_key": "x"}}), \
-                 patch("scripts.health_check.load_key", return_value="api-key"), \
+                 patch("core.key_extractor.get_cached_keys", side_effect=AssertionError("health must not read keys")), \
+                 patch("core.keychain.load_key", side_effect=AssertionError("health must not read credentials")), \
                  patch("scripts.health_check.is_wechat_signed", return_value=True), \
                  patch("scripts.health_check.process_lookup_available", return_value=True), \
                  patch("scripts.health_check.is_wechat_running", return_value=True), \
@@ -688,6 +688,7 @@ gui/501/com.example.wechat-summary = {
             self.assertIn(
                 "Mounted resource handoff: runtime=ready; "
                 "handoff=sync_delegated; target=configured; delegated_objects=7; "
+                "obsidian_projection=not_probed; target_projection=not_probed; "
                 "provider_side_sync=unknown; remote_verified=False",
                 text,
             )
@@ -767,8 +768,8 @@ gui/501/com.example.wechat-summary = {
             )()
 
             with patch("scripts.health_check.load_config", return_value=config), \
-                 patch("scripts.health_check.get_cached_keys", return_value={}), \
-                 patch("scripts.health_check.load_key", return_value="api-key"), \
+                 patch("core.key_extractor.get_cached_keys", side_effect=AssertionError("health must not read keys")), \
+                 patch("core.keychain.load_key", side_effect=AssertionError("health must not read credentials")), \
                  patch("scripts.health_check.is_wechat_signed", return_value=True), \
                  patch("scripts.health_check.process_lookup_available", return_value=True), \
                  patch("scripts.health_check.is_wechat_running", return_value=True), \
@@ -852,8 +853,8 @@ gui/501/com.example.wechat-summary = {
             key_log.write_text("raw key material", encoding="utf-8")
 
             with patch("scripts.health_check.load_config", return_value={}), \
-                 patch("scripts.health_check.get_cached_keys", return_value={}), \
-                 patch("scripts.health_check.load_key", return_value="api-key"), \
+                 patch("core.key_extractor.get_cached_keys", side_effect=AssertionError("health must not read keys")), \
+                 patch("core.keychain.load_key", side_effect=AssertionError("health must not read credentials")), \
                  patch("scripts.health_check.is_wechat_signed", return_value=False), \
                  patch("scripts.health_check.process_lookup_available", return_value=False), \
                  patch("scripts.health_check.launch_agent_report") as report, \

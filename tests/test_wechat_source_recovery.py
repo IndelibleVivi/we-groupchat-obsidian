@@ -1,5 +1,9 @@
 """Synthetic menu-app identity recovery; no live source, keys or API."""
 import json
+import hashlib
+import os
+import sqlite3
+from contextlib import closing, contextmanager
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,8 +18,78 @@ from core.source_inventory import SourceInventoryStore
 from core.wechat_db import WeChatDB, WeChatSourceDegraded
 from core.wechat_source_recovery import SourceRecoveryError, recover_source_device
 from scripts import recover_source_device as cli
-from tests.test_quiet_archive_producer import _synthetic_profile_value, _write_synthetic_source
-from tests.test_quiet_archive_source_device import renumbered_device
+def _shift_stat(value, delta):
+    fields = list(value)
+    fields[2] = int(fields[2]) + int(delta)
+    return os.stat_result(tuple(fields))
+
+@contextmanager
+def renumbered_device(root, delta):
+    """Report ``st_dev`` shifted by ``delta`` for paths under ``root``.
+
+    ``st_dev`` is a whole-volume property, so every entry below the root (and
+    every open descriptor to one of those files) reports the shifted number.
+    Real path, inode, size and the stable volume UUID are untouched.
+    """
+    root = os.path.realpath(root)
+    inodes = set()
+
+    def collect(path):
+        try:
+            inodes.add(int(os.lstat(path).st_ino))
+        except OSError:
+            pass
+
+    collect(root)
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            collect(os.path.join(base, name))
+
+    real_stat, real_lstat, real_fstat = os.stat, os.lstat, os.fstat
+
+    def _resolve(path):
+        # Realpath that only uses os.readlink/os.path, so comparing a path never
+        # re-enters the patched stat/lstat functions.
+        parts = os.path.abspath(os.fspath(path)).split(os.sep)
+        resolved = os.sep
+        for part in parts:
+            if not part:
+                continue
+            resolved = os.path.join(resolved, part)
+            target = ""
+            try:
+                target = os.readlink(resolved)
+            except OSError:
+                target = ""
+            if target:
+                resolved = target if os.path.isabs(target) else os.path.join(
+                    os.path.dirname(resolved), target)
+                resolved = os.path.normpath(resolved)
+        return os.path.normpath(resolved)
+
+    def under(path):
+        try:
+            candidate = _resolve(path)
+        except (TypeError, OSError):
+            return False
+        return candidate == root or candidate.startswith(root + os.sep)
+
+    def fake_stat(path, *args, **kwargs):
+        value = real_stat(path, *args, **kwargs)
+        return _shift_stat(value, delta) if under(path) else value
+
+    def fake_lstat(path, *args, **kwargs):
+        value = real_lstat(path, *args, **kwargs)
+        return _shift_stat(value, delta) if under(path) else value
+
+    def fake_fstat(fd):
+        value = real_fstat(fd)
+        return _shift_stat(value, delta) if int(value.st_ino) in inodes else value
+
+    with (patch("os.stat", side_effect=fake_stat),
+          patch("os.lstat", side_effect=fake_lstat),
+          patch("os.fstat", side_effect=fake_fstat)):
+        yield
 
 
 class RuntimeSourceRecoveryTests(unittest.TestCase):
@@ -26,9 +100,16 @@ class RuntimeSourceRecoveryTests(unittest.TestCase):
         capture_root = patch("core.resource_capture.DATA_DIR", str(self.root))
         capture_root.start()
         self.addCleanup(capture_root.stop)
-        value = _synthetic_profile_value(self.root)
-        _write_synthetic_source(value)
-        self.db_dir = value["source"]["db_dir"]
+        self.db_dir = str(self.root / "wechat/db_storage")
+        path = Path(self.db_dir) / "message/message_0.db"
+        path.parent.mkdir(parents=True)
+        table = "Msg_" + hashlib.md5(b"synthetic@chatroom").hexdigest()
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute(f"CREATE TABLE [{table}] (local_type INTEGER, create_time INTEGER, "
+                         "message_content TEXT, WCDB_CT_message_content INTEGER, status INTEGER)")
+            for index in range(3):
+                conn.execute(f"INSERT INTO [{table}] VALUES (1,100,?,0,0)",
+                             (f"sender:\nSynthetic message {index}",))
         self.states = str(self.root / "states")
         self.config = ConfigStore(str(self.root / "config.json"))
         # A missing custom store normally imports legacy app config. Seed an

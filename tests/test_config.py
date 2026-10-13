@@ -29,6 +29,23 @@ def _config_patch_worker(path, field, value, start_event, iterations=1):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_semantic_config_survives_locked_unrelated_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(os.path.join(tmp, "config.json"))
+            store.replace({"semantic_runtime_root": os.path.join(tmp, "semantic"),
+                           "semantic_reader_properties": {"follow": "阅读关注", "query": "查询"},
+                           "monitor_chats": [{"username": "fixture@chatroom", "name": "Fixture", "selected_since": 20}]})
+            store.update(lambda config: {**config, "monitor_enabled": True})
+            actual = store.inspect()
+            self.assertEqual(actual["semantic_runtime_root"], os.path.join(tmp, "semantic"))
+            self.assertEqual(actual["semantic_reader_properties"]["follow"], "阅读关注")
+            self.assertEqual(active_monitor_chats(actual)[0]["selected_since"], 20)
+
+    def test_semantic_properties_reject_reserved_or_duplicate_names(self):
+        for mapping in ({"follow": "wgo_id"}, {"follow": "Same", "mute": "Same"}, {"other": "Unknown"}):
+            with self.subTest(mapping=mapping), self.assertRaises(ConfigError):
+                _sanitize_config({"semantic_reader_properties": mapping})
+
     def test_monitor_ai_timeout_defaults_and_is_sanitized(self):
         self.assertEqual(DEFAULT_CONFIG["monitor_ai_timeout_seconds"], 90)
         self.assertEqual(

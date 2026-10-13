@@ -19,6 +19,7 @@ from core.config import (
     normalize_path_value,
     update_config,
 )
+from core.semantic.runtime import legacy_command_blocked
 from core.key_extractor import get_cached_keys
 from core.keychain import load_key, save_key
 from core.knowledge import (
@@ -191,6 +192,8 @@ def list_groups(db: WeChatDB, search: str = "") -> list[dict]:
 
 
 def configure(args: argparse.Namespace) -> int:
+    if legacy_command_blocked():
+        return 2
     config = load_config()
     original_config = dict(config)
     keys = get_cached_keys()

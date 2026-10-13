@@ -51,6 +51,75 @@ class StatsDB(RefreshingDB):
 
 
 class AppMonitorResilienceTests(unittest.TestCase):
+    def test_semantic_resume_without_preference_preserves_progress(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app.config = {"monitor_enabled": False, "monitor_topic": "",
+                      "monitor_chats": [{"username": "synthetic", "name": "Synthetic"}]}
+        app._update_config = unittest.mock.Mock(side_effect=lambda *, patch: app.config.update(patch))
+        app._configure_monitor_timer = unittest.mock.Mock()
+        app._rebuild_monitor_menu = unittest.mock.Mock()
+        with (patch("app._semantic_pin", return_value=object()),
+              patch("app.initialize_state_if_needed") as initialize,
+              patch("app.reset_state_to_now") as reset,
+              patch("app._notify") as notify):
+            app._toggle_monitor(None)
+        self.assertTrue(app.config["monitor_enabled"])
+        initialize.assert_not_called()
+        reset.assert_not_called()
+        self.assertIn("继续已保存进度", notify.call_args.args[2])
+
+    def test_semantic_blank_preference_keeps_enabled_and_does_not_reset(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app.config = {"monitor_enabled": True, "monitor_topic": "old preference"}
+        app._bring_to_front = unittest.mock.Mock()
+        app._release_front = unittest.mock.Mock()
+        app._input_dialog = unittest.mock.Mock(return_value=(True, "  "))
+        app._update_config = unittest.mock.Mock(side_effect=lambda *, mutator: mutator(app.config))
+        app._configure_monitor_timer = unittest.mock.Mock()
+        app._rebuild_monitor_menu = unittest.mock.Mock()
+        app._reset_monitor_states_to_now = unittest.mock.Mock()
+        with patch("app._semantic_pin", return_value=object()), patch("app._notify"):
+            app._show_monitor_topic_dialog()
+        self.assertEqual(app.config["monitor_topic"], "")
+        self.assertTrue(app.config["monitor_enabled"])
+        app._reset_monitor_states_to_now.assert_not_called()
+        app._configure_monitor_timer.assert_called_once()
+
+    def test_semantic_reader_runs_without_source_and_coalesces_reentry(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app.config = {"monitor_enabled": False}
+        app.db = None
+        app._semantic_reader_lock = threading.Lock()
+        runtime, reader = unittest.mock.Mock(), unittest.mock.Mock()
+        app._semantic_reader = unittest.mock.Mock(return_value=reader)
+        reader.poll.side_effect = app._run_semantic_reader
+        with patch("core.semantic.runtime.SemanticRuntime.active", return_value=runtime) as active:
+            app._run_semantic_reader()
+        active.assert_called_once_with(app.config)
+        reader.poll.assert_called_once()
+        runtime.index_all.assert_called_once_with(max_rounds=1)
+        runtime.publish_all.assert_called_once()
+        self.assertFalse(app._semantic_reader_lock.locked())
+
+    def test_semantic_daily_brief_does_not_enter_legacy_digest(self):
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app.config = {"daily_digest_notify": True}
+        app._daily_digest_lock = threading.Lock()
+        runtime, reader = unittest.mock.Mock(), unittest.mock.Mock()
+        receipt = unittest.mock.Mock(status="success")
+        runtime.brief_if_due.return_value = receipt
+        app._semantic_reader = unittest.mock.Mock(return_value=reader)
+        with (patch("core.semantic.runtime.SemanticRuntime.active", return_value=runtime),
+              patch("app.should_run_daily_digest") as due,
+              patch("app.write_daily_digest") as old_write,
+              patch("app.refresh_pending_daily_digests") as old_repair):
+            app._run_daily_digest()
+        reader.deliver_brief.assert_called_once_with(receipt)
+        due.assert_not_called()
+        old_write.assert_not_called()
+        old_repair.assert_not_called()
+        self.assertFalse(app._daily_digest_lock.locked())
+
     def test_one_chat_failure_does_not_skip_later_chats(self):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
         app._monitor_lock = threading.Lock()

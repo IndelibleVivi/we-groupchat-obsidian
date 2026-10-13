@@ -30,6 +30,7 @@ from core.resource_backup import (
     _redact_url,
     _safe_month,
     classify_file_occurrence,
+    evaluate_link_backfill_outcome,
     evaluate_resource_backup_outcome,
     inspect_mounted_resource_backup,
     load_resource_backup_settings,
@@ -104,6 +105,7 @@ def _hold_backup_capture_operation(
             "copied": 0,
             "failed": 0,
             "obsidian": {"state": "written"},
+            "target_projection": {"state": "written"},
         }
 
     backup._run_owned = paused_run
@@ -2668,6 +2670,7 @@ class ResourceBackupTests(unittest.TestCase):
             {
                 "state": "sync_delegated",
                 "obsidian": {"state": "written"},
+                "target_projection": {"state": "written"},
             },
         )
 
@@ -2691,6 +2694,7 @@ class ResourceBackupTests(unittest.TestCase):
             {
                 "state": "pending_resources",
                 "obsidian": {"state": "written"},
+                "target_projection": {"state": "written"},
                 "coverage": coverage,
                 "coverage_complete": False,
             },
@@ -3198,13 +3202,191 @@ class ResourceBackupTests(unittest.TestCase):
 
         result = backup.run()
 
-        self.assertEqual(result["state"], "projection_failed")
+        self.assertEqual(result["state"], "sync_delegated")
+        self.assertTrue(result["catalog_complete"])
+        self.assertEqual(result["obsidian"]["state"], "projection_failed")
         self.assertEqual(
             result["obsidian"]["error_code"],
             "projection_directory_conflict",
         )
         self.assertEqual(os.listdir(outside), [])
-        self.assertFalse(os.path.exists(backup.backup_root))
+        self.assertIsNotNone(backup._load_snapshot())
+        self.assertEqual(backup.verify()["state"], "target_verified")
+
+    def test_readonly_obsidian_cannot_gate_complete_and_retry_reuses_handoff(self):
+        backup = self._backup(self._ready_capture())
+        attempts = []
+
+        def readonly_projection(*args, **kwargs):
+            # The actual snapshot reader must accept COMPLETE before the first
+            # failing Markdown publication, not merely after run() returns.
+            self.assertIsNotNone(backup._load_snapshot())
+            attempts.append(True)
+            raise PermissionError("synthetic readonly projection")
+
+        with patch.object(backup, "_projection_atomic_bytes", side_effect=readonly_projection):
+            first = backup.run()
+
+        self.assertTrue(attempts)
+        self.assertEqual(first["state"], "sync_delegated")
+        self.assertTrue(first["catalog_complete"])
+        self.assertEqual(first["copied"], 2)
+        self.assertEqual(first["obsidian"]["state"], "projection_failed")
+        self.assertEqual(first["obsidian"]["error_code"], "PermissionError")
+        self.assertEqual(first["target_projection"]["state"], "written")
+        self.assertEqual(backup.verify()["verified"], 2)
+
+        second = backup.run()
+        self.assertEqual(second["state"], "idle")
+        self.assertEqual(second["copied"], 0)
+        self.assertEqual(second["reused"], 2)
+        self.assertEqual(second["snapshot"]["state"], "unchanged")
+        self.assertEqual(second["snapshot"]["snapshot_id"], first["snapshot"]["snapshot_id"])
+        self.assertEqual(second["obsidian"]["state"], "written")
+        self.assertEqual(second["target_projection"]["state"], "unchanged")
+
+    def test_busy_obsidian_root_does_not_gate_machine_or_target_views(self):
+        backup = self._backup(self._ready_capture())
+        with backup._projection_worker_lock():
+            result = backup.run()
+
+        self.assertEqual(result["state"], "sync_delegated")
+        self.assertTrue(result["catalog_complete"])
+        self.assertEqual(result["obsidian"]["state"], "worker_busy")
+        self.assertEqual(result["target_projection"]["state"], "written")
+        self.assertIsNotNone(backup._load_snapshot())
+        self.assertFalse(os.path.exists(backup.obsidian_projection_root))
+
+    def test_target_view_write_failure_happens_after_complete_and_is_repairable(self):
+        backup = self._backup(self._ready_capture())
+        publish = backup._target_atomic_bytes
+        views = os.path.join(backup.backup_root, "views") + os.sep
+        attempts = []
+
+        def readonly_view(path, data, **kwargs):
+            if os.fspath(path).startswith(views):
+                self.assertIsNotNone(backup._load_snapshot())
+                attempts.append(True)
+                raise PermissionError("synthetic readonly target views")
+            return publish(path, data, **kwargs)
+
+        with patch.object(backup, "_target_atomic_bytes", side_effect=readonly_view):
+            first = backup.run()
+
+        self.assertTrue(attempts)
+        self.assertEqual(first["state"], "sync_delegated")
+        self.assertTrue(first["catalog_complete"])
+        self.assertEqual(first["target_projection"]["state"], "projection_failed")
+        self.assertEqual(first["target_projection"]["error_code"], "PermissionError")
+        self.assertEqual(first["obsidian"]["state"], "written")
+        self.assertEqual(backup.verify()["verified"], 2)
+
+        second = backup.run()
+        self.assertEqual(second["state"], "idle")
+        self.assertEqual(second["copied"], 0)
+        self.assertEqual(second["snapshot"]["state"], "unchanged")
+        self.assertEqual(second["snapshot"]["snapshot_id"], first["snapshot"]["snapshot_id"])
+        self.assertEqual(second["target_projection"]["state"], "written")
+
+    def test_empty_selection_target_gc_survives_local_projection_failure(self):
+        capture = self._ready_capture()
+        canonical = dict(self.config)
+        capture.config_loader = lambda: dict(canonical)
+        backup = self._backup(capture)
+        first = backup.run()
+        target_chat = Path(backup.backup_root, "views", "猫猫研究群")
+        personal = target_chat / "personal.md"
+        personal.write_bytes(b"not generated")
+        objects = list(Path(backup.backup_root, "objects").rglob("*.pdf"))
+        self.assertEqual(len(objects), 2)
+        canonical["resource_backup_selected_chats"] = []
+
+        with patch.object(backup, "_projection_atomic_bytes", side_effect=PermissionError):
+            result = backup.run()
+
+        self.assertEqual(result["state"], "no_selected_chats")
+        self.assertFalse(result["catalog_complete"])
+        self.assertEqual(result["obsidian"]["state"], "projection_failed")
+        self.assertEqual(result["target_projection"]["state"], "written")
+        self.assertFalse((target_chat / "00-资源索引.md").exists())
+        self.assertEqual(personal.read_bytes(), b"not generated")
+        self.assertTrue(all(path.is_file() for path in objects))
+        self.assertIn("当前没有已选群聊资源", Path(
+            backup.backup_root, "views", "00-资源索引.md"
+        ).read_text())
+        self.assertEqual(backup._load_snapshot()["manifest"]["snapshot_id"], first["snapshot"]["snapshot_id"])
+
+    def test_actual_cli_app_and_health_keep_machine_and_target_projection_separate(self):
+        from app import WeGroupchatObsidianApp
+
+        capture = self._ready_capture()
+        backup = self._backup(capture)
+        backup._ensure_target_dir(backup.backup_root)
+        Path(backup.backup_root, "views").write_bytes(b"user-owned conflict")
+        output = io.StringIO()
+        with (
+            patch.object(resource_backup_cli, "load_config", return_value=self.config),
+            patch.object(resource_backup_cli, "_capture", return_value=capture),
+            patch.object(resource_backup_cli, "_backup", return_value=backup),
+            redirect_stdout(output),
+        ):
+            exit_code = resource_backup_cli.main(["run"])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["state"], "projection_failed")
+        self.assertFalse(payload["completed"])
+        self.assertFalse(payload["operational_success"])
+        self.assertTrue(payload["catalog_complete"])
+        self.assertEqual(payload["handoff_state"], "sync_delegated")
+        self.assertEqual(payload["obsidian_projection_state"], "written")
+        self.assertEqual(payload["target_projection_state"], "projection_failed")
+        self.assertIsNotNone(backup._load_snapshot())
+        self.assertEqual(backup.verify()["state"], "target_verified")
+
+        app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)
+        app._rebuild_resource_backup_menu = Mock()
+        with patch("app.load_config", return_value=self.config), patch("app._notify") as notify:
+            app._finish_resource_backup_run(payload, True)
+        self.assertEqual(notify.call_args.args[1], "本轮未完成")
+        self.assertIn("target_projection=projection_failed", notify.call_args.args[2])
+        self.assertIn("handoff=sync_delegated", notify.call_args.args[2])
+
+        reader = MountedResourceBackup._read_regular_bytes
+
+        def control_only(path, **kwargs):
+            self.assertNotEqual(os.path.basename(path), "resources.jsonl")
+            self.assertNotIn(os.sep + "objects" + os.sep, os.fspath(path))
+            return reader(path, **kwargs)
+
+        with patch.object(MountedResourceBackup, "_read_regular_bytes", side_effect=control_only):
+            health = inspect_mounted_resource_backup({
+                **self.config, "resource_backup_enabled": True,
+            }, settings_path=os.path.join(self.root, "absent-settings.json"))
+        self.assertEqual(health["handoff_semantics"], "sync_delegated")
+        self.assertTrue(health["latest_snapshot"])
+        self.assertEqual(health["obsidian_projection_state"], "not_probed")
+        self.assertEqual(health["target_projection_state"], "not_probed")
+        self.assertEqual(health["provider_side_sync"], "unknown")
+        self.assertFalse(health["remote_verified"])
+
+        backfill = evaluate_link_backfill_outcome(
+            {"state": "applied", "source_complete": True}, payload["backup"]
+        )
+        self.assertFalse(backfill["completed"])
+        self.assertEqual(backfill["state"], "projection_failed")
+        self.assertEqual(backfill["handoff_state"], "sync_delegated")
+        self.assertTrue(backfill["catalog_complete"])
+
+    def test_unreported_target_projection_cannot_claim_complete_cycle(self):
+        outcome = evaluate_resource_backup_outcome({
+            "state": "healthy", "scan": {"state": "healthy"},
+            "resolve": {"state": "skipped"},
+        }, {"state": "sync_delegated", "obsidian": {"state": "written"}})
+        self.assertFalse(outcome["completed"])
+        self.assertFalse(outcome["operational_success"])
+        self.assertEqual(outcome["target_projection_state"], "unknown")
+        self.assertEqual(outcome["handoff_state"], "sync_delegated")
 
     def test_utf8_component_budget_preserves_extension_and_stable_hash_suffix(self):
         capture = self._capture()
@@ -3402,7 +3584,7 @@ class ResourceBackupTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "target_directory_conflict")
         self.assertFalse(os.path.exists(os.path.join(outside, "v3")))
 
-    def test_plan_rejects_symlink_at_objects_snapshots_and_views(self):
+    def test_machine_subtrees_reject_symlinks_but_views_fail_independently(self):
         capture = self._ready_capture()
         for relative in ("objects", "snapshots", "views"):
             with self.subTest(relative=relative):
@@ -3419,9 +3601,21 @@ class ResourceBackupTests(unittest.TestCase):
                 backup = MountedResourceBackup(config, capture=capture)
 
                 plan = backup.plan()
+                result = backup.run()
 
-                self.assertEqual(plan["state"], "invalid_target")
-                self.assertEqual(plan["error_code"], "target_subtree_conflict")
+                if relative == "views":
+                    self.assertEqual(plan["state"], "ready")
+                    self.assertEqual(result["state"], "sync_delegated")
+                    self.assertTrue(result["catalog_complete"])
+                    self.assertEqual(result["target_projection"]["state"], "projection_failed")
+                    self.assertIsNotNone(backup._load_snapshot())
+                else:
+                    self.assertEqual(plan["state"], "invalid_target")
+                    self.assertEqual(plan["error_code"], "target_subtree_conflict")
+                    self.assertEqual(result["state"], "target_failed")
+                    self.assertFalse(result["catalog_complete"])
+                    self.assertIsNone(backup._load_snapshot())
+                self.assertEqual(os.listdir(outside), [])
 
     def test_file_backup_view_rejects_a_nested_symlink_before_external_write(self):
         capture = self._ready_capture()
@@ -3439,10 +3633,11 @@ class ResourceBackupTests(unittest.TestCase):
         plan = backup.plan()
         result = backup.run()
 
-        self.assertEqual(plan["state"], "invalid_target")
-        self.assertEqual(plan["error_code"], "target_subtree_conflict")
-        self.assertEqual(result["state"], "target_failed")
-        self.assertIn("target_subtree_conflict", result["error_codes"])
+        self.assertEqual(plan["state"], "ready")
+        self.assertEqual(result["state"], "sync_delegated")
+        self.assertEqual(result["target_projection"]["state"], "projection_failed")
+        self.assertEqual(result["target_projection"]["error_code"], "target_subtree_conflict")
+        self.assertIsNotNone(backup._load_snapshot())
         self.assertEqual(os.listdir(outside), [])
 
     def test_run_returns_target_failed_for_snapshot_directory_conflict(self):
@@ -3458,7 +3653,7 @@ class ResourceBackupTests(unittest.TestCase):
         self.assertIn("target_subtree_conflict", result["error_codes"])
         self.assertIsNone(backup._state_row())
 
-    def test_run_returns_target_failed_for_target_view_conflict(self):
+    def test_run_preserves_machine_snapshot_for_target_view_conflict(self):
         capture = self._ready_capture()
         backup = self._backup(capture)
         backup._ensure_target_dir(backup.backup_root)
@@ -3467,9 +3662,13 @@ class ResourceBackupTests(unittest.TestCase):
 
         result = backup.run()
 
-        self.assertEqual(result["state"], "target_failed")
-        self.assertIn("target_subtree_conflict", result["error_codes"])
-        self.assertIsNone(backup._state_row())
+        self.assertEqual(result["state"], "sync_delegated")
+        self.assertTrue(result["catalog_complete"])
+        self.assertEqual(result["target_projection"]["state"], "projection_failed")
+        self.assertEqual(result["target_projection"]["error_code"], "target_subtree_conflict")
+        self.assertIsNotNone(backup._load_snapshot())
+        self.assertEqual(backup.verify()["state"], "target_verified")
+        self.assertEqual(Path(backup.backup_root, "views").read_bytes(), b"conflict")
 
     def test_status_handoff_semantics_are_derived_from_current_evidence(self):
         capture = self._ready_capture()
@@ -3865,6 +4064,7 @@ class ResourceBackupCliTests(unittest.TestCase):
         backup.run.return_value = {
             "state": "idle",
             "obsidian": {"state": "written"},
+            "target_projection": {"state": "written"},
         }
         with (
             patch.object(resource_backup_cli, "load_config", return_value=self.config),
@@ -3898,6 +4098,7 @@ class ResourceBackupCliTests(unittest.TestCase):
         backup.run.return_value = {
             "state": "pending_resources",
             "obsidian": {"state": "written"},
+            "target_projection": {"state": "written"},
             "coverage": coverage,
             "coverage_complete": False,
         }

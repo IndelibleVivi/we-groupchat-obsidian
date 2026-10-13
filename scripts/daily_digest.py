@@ -12,6 +12,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 from core.config import load_config
 from core.daily_digest import refresh_pending_daily_digests, write_daily_digest
+from core.semantic.runtime import legacy_command_blocked
 
 
 def main() -> int:
@@ -22,6 +23,8 @@ def main() -> int:
         help="Digest source date in YYYY-MM-DD; defaults to today.",
     )
     args = parser.parse_args()
+    if legacy_command_blocked():
+        return 2
     config = load_config()
     digest = write_daily_digest(config, target_date=args.date or None)
     repair = refresh_pending_daily_digests(config)

@@ -27,6 +27,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from core.config import DATA_DIR, active_monitor_chats, ensure_private_dir, ensure_private_file, load_config
+from core.semantic.runtime import legacy_command_blocked
 from core.app_runtime import AppAlreadyRunning, AppInstanceLock
 from core.daily_digest import _timezone, digest_output_path, write_daily_digest
 from core.key_extractor import get_cached_keys
@@ -857,6 +858,8 @@ def main(argv: list[str] | None = None) -> int:
             "--allow-transient-wechat-source-read。",
             file=sys.stderr,
         )
+        return 2
+    if legacy_command_blocked():
         return 2
     try:
         config, chats, db = _load_runtime()

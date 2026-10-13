@@ -2,15 +2,14 @@
 
 这是现行 operator guide；[文档与历史入口](README.md)区分持续维护的 contract 与有日期的开发证据。
 
-这一层故意拆成六项互不冒充的责任：
+这一层故意拆成五项互不冒充的责任：
 
 1. 可选 WeChat source guard：只负责在安全状态下请求 macOS 正常打开微信；
 2. Attachment catalog 与本机私有 content-addressed archive；
 3. 默认 no-OAuth selected-resource mounted handoff；
 4. 可选 advanced selected-chat Drive API sync；
 5. 面向更广 attachment archive 的 provider-neutral filesystem snapshot target。
-6. 默认关闭的 [Quiet Archive 本机私有交接](quiet-archive-handoff.md)：复用 selected-resource scanner，
-   明确开启后保存全部可见消息正文，独立输出 resources、contexts 与 coverage，不调用 AI 或 Markdown/Drive projection。
+
 
 它们仍是彼此独立的 domain responsibility，只是需要 protected-data access 的 timer 共享一个长驻菜单 app
 进程。`TopicMonitor` 负责读消息，通过唯一 checkpoint 写者 `MonitorStateStore` 提交进度，
@@ -19,11 +18,11 @@ commit 之后的 worker 才负责找 bytes 和复制。Mounted backup 只读本�
 并且只写自己的 configured filesystem target。两条 selected-chat scanner 各有独立 cursor/selection；
 即使消息没有 Knowledge hit，也可以复用同一个本地 CAS。
 
-Quiet Archive 不另建 source scanner。context、resource occurrence、cursor 与逐页 receipt 同事务提交；
-inventory complete 只表示来源 shard 集齐，raw EOF 还要求读完每个选中 shard 并在结尾重新确认 inventory。
-旧版本或关闭 context capture 期间丢失的正文有独立历史缺口；context-only backfill 复用 staged plan/apply，
-不会推进 live cursor，也不授予附件 byte 权限。新 source CLI 必须带 `--allow-transient-wechat-source-read`，
-export/status 只读本机 ledger/CAS。命令与机器契约见交接 runbook。
+通用 selected-resource scanner 保留给外部 adapter 显式注入的 context-capture 选项，默认关闭。
+启用时 context、resource occurrence、cursor 与逐页 receipt 同事务提交；inventory complete、raw EOF、
+历史正文缺口和附件可用性分别报告。context-only staged backfill 不推进 live cursor，也不授予附件读取许可。
+专用 producer、profile、菜单与命令由外部 consumer 维护；新知识 runtime 与独立迁移过程见
+[语义阅读工作流](semantic-workflow.md)。
 
 ## 1. 可选 WeChat source guard
 
@@ -166,7 +165,7 @@ macOS 重新挂载或重启后，设备号变化可能让来源 namespace 与旧
 才允许把 `wechat_source_identity` 写进主 config。缓存仍使用当前 physical identity，既有 message ID
 保留原 namespace；旧 checkpoint、
 pending intent、resource ledger 和 source inventory 不被改写。正常 runtime reader 显式消费该 config
-binding；独立 Quiet Archive producer 仍由自己的 marker 管理。真正的 DB replacement、rekey、
+binding；独立注入的 reader 保持自己的显式 source identity 契约。真正的 DB replacement、rekey、
 新 shard、不同 volume/inode 都会 fail closed，不能使用本命令跳过一般 generation admission。
 
 使用已记录的旧 device 与 namespace，不要猜值。先从 `scripts/autostart.py status` 核对 exact

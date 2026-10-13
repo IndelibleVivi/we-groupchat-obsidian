@@ -22,10 +22,10 @@
 - `core/monitor_state.py::MonitorStateStore` is the sole monitor-checkpoint
   write authority. Existing state migrates only after a valid parse; corrupt,
   symlink or non-regular state fails closed. TopicMonitor commits one expected
-  revision after successful work and never advances source state after an AI
-  failure. A retryable AI failure may CAS-patch only content-free failure
+  revision after successful work. The legacy runtime never advances source
+  state after an AI failure; the v3 capture/applied split is specified below. A retryable AI failure may CAS-patch only content-free failure
   count/code/timestamps and the bounded backoff deadline against the revision
-  that was read; source cursors, inventory bindings and checkpoints must remain
+  that was read; legacy source cursors, inventory bindings and checkpoints remain
   byte-for-byte unchanged, and a run inside that backoff makes no provider call.
   `core/monitor_source.py` owns the bounded raw-row reader. Canonical progress
   is per chat x logical-shard generation in `source_cursors`; `last_checked_ts`
@@ -126,45 +126,87 @@
   path. The plan binds `inventory_digest`; apply must reopen the source,
   re-read the exact inventory digest, and fail closed before consuming staged
   rows if the inventory is unavailable, incomplete, or changed.
-- `core/resource_capture.py` also owns opt-in private visible-message contexts
-  for Quiet Archive. Default-off resource scans do not retain full text; consuming
-  text while disabled marks the context history gap. Enabled capture commits
-  contexts, occurrences, cursor and page receipt together. Inventory completeness,
-  raw EOF, historical context coverage and attachment delivery remain separate.
-  Context-only history uses the existing staged backfill and does not move live
-  cursors. `core/quiet_archive_handoff.py` consumes this ledger and the shared v3
-  copy/snapshot transport without Markdown, AI or Drive projections; its separate
-  local destination purpose must not reuse a mounted-backup destination.
-  `scripts/quiet_archive_handoff.py` owns the thin configure/export/status and
-  explicit bounded capture/drain/refresh/backfill CLI. Protected source commands
-  require `--allow-transient-wechat-source-read` before config/key/source access.
-  A fresh `source_degraded` scan may export committed data as `pending` only when
-  the export coverage matches that scan's exact capture_run_id; failed shards stay
-  explicit. Unknown/exception/busy capture cannot reuse old coverage as a fresh run.
-  Coverage gap counts use a single set difference, never a per-occurrence full
-  context-table scan.
-  Export/status never construct a message source; legacy app-config initialization
-  may still discover an unset source path. The machine contract and operator commands
-  live in `docs/quiet-archive-handoff.md`; maintain it with the producer schema.
-- `core/quiet_archive_producer.py` owns the explicit standalone profile, isolated
-  state identity and frozen adoption plan/apply. `--profile` must not call the app
-  config loader, default cached-key lookup, monitor/AI state, or source discovery.
-  Reuse `WeChatDB` with explicit cache/inventory injection, `SelectedResourceCapture`
-  and `QuietArchiveHandoff`; do not add a second scanner or ledger protocol.
-  A new archive requires explicit `init`; adoption preserves the existing archive,
-  selection and cursor identities and reads only named ledger/CAS/inventory inputs.
-  Standalone plan/status/export do not read WeChat or keys.
-  macOS device-renumber recovery extends only `producer-state.json` with
-  `source_identity`; `core/source_device_binding.py` reads the stable volume UUID
-  and checks root inode. Recovery requires the existing namespace and every
-  recorded non-retired generation to match under the capture/state locks. Keep
-  cache identity physical; normalize the device only for durable namespace and
-  generation. Never reset ledger/cursors or add a recovery sidecar. Attachment resolution
-  requires both per-invocation source and attachment grants; never persist consent
-  or enable it implicitly in refresh. Explicit `refresh --allow-attachment-read`
-  resolves selected pending files after capture and before export under the same
-  operation lock, within `--file-limit`; missing bytes remain pending. Real adoption/source reads remain separate
-  operator actions from synthetic source verification.
+- `core/resource_capture.py` retains the generic, explicitly injected
+  `capture_contexts` extension. It defaults off; consuming text while disabled
+  marks a history gap. Enabled contexts, occurrences, cursor and page receipt
+  commit together. Context-only history uses staged backfill without moving
+  live cursors. Inventory completeness, raw EOF, historical context coverage
+  and attachment delivery remain distinct. Consumer-specific producers,
+  profiles, menus and handoff CLIs live outside this public repository; do not
+  restore their app-config switches or use a mounted-backup destination for a
+  different purpose. External adapters reuse the source/capture/v3 transport
+  owners and preserve archive, source, selection and occurrence identities.
+- `core/resource_backup.py` seals v3 machine snapshots before independently
+  attempting mounted views and Obsidian indexes. Projection errors or a busy
+  local output-root lock must not gate `COMPLETE`; object/snapshot/identity
+  safety failures still fail closed. Preserve capture/selection, backup-DB,
+  target and projection-root lock ownership and manifest-bound generated GC.
+  Machine handoff, each projection, and remote sync have separate status;
+  content-free health leaves uninspected projections `not_probed`.
+- `core/semantic/rebuild.py::GenerationRegistry` selects the sole active
+  knowledge generation. Before activation (and after an explicit rollback),
+  the legacy topic/event implementation remains the real compatibility path.
+  Once pinned, app, monitor and reader use `core/semantic/runtime.py`; the old
+  configuration/backfill/catch-up/digest/review/reorganization CLIs must stop
+  before constructing their legacy writers. An in-progress cutover fails
+  closed; no caller may infer an active generation from directory contents.
+- `core/semantic/store.py` owns immutable source versions, Observations, Items,
+  typed claims, relations, Views, canonical change events and derived outboxes.
+  `jobs.py` persists validated model artifacts before canonical or projection
+  writes. Unknown provider outcomes stay unknown; never manufacture a successful
+  replay. `engine.py` shares extraction/resolution/consolidation between full
+  rebuild and live work. Whole-capture membership and every unclassified page
+  must be resolved before semantic ACK. `watches.py` maintains exact temporal
+  witnesses and Episodes; time proximity or a shared URL alone is not identity.
+- `core/semantic/attribution.py` derives captured speaker identity and display
+  name for extraction and reading from the same private source payload. Display
+  names never establish identity. Speaker, quoted author and claim subject stay
+  distinct; only cited evidence can bind a claim to its supplied subject/speaker.
+  Unresolved raw account identifiers must not become display labels. No contact
+  discovery or inferred person profile belongs in this presentation seam.
+- `core/semantic/scheduling.py` owns process-local shared provider admission and
+  bounded parallel preparation. Canonical identity commits and index publication
+  retain their existing owners. Waiting on a provider must not hold a database
+  transaction or projection lock. Only trusted pre-dispatch evidence may defer a
+  claimed job back to pending; unknown dispatched work remains unknown.
+- `core/semantic/source.py` bridges bounded source reads to durable captures and
+  MonitorStateStore v3. Captured vectors advance only after raw storage; applied
+  vectors advance only with a complete processing receipt. Provider failure may
+  leave captured progress ahead of applied progress. Both vectors remain bound
+  to exact shard generation and inventory digest; inventory revision is monotonic
+  observation evidence, not a replacement for checkpoint CAS. Legacy v1/v2
+  cursor semantics below remain applicable only to the compatibility runtime.
+- `core/semantic/retrieval.py` combines lexical, dense and structural candidates
+  with the unindexed canonical tail. Local cosine and remote Vectorize are
+  selectable derived indexes; neither decides canonical merges. Embedding model,
+  dimension, profile and generation identities cannot mix. `ai/local_embedding_provider.py`
+  owns explicit loopback OpenAI-compatible/Ollama embedding without proxy, redirects
+  or fallback; its endpoint/API/context limits are profile identity. Cloudflare
+  embedding remains a network route even with a local index. Only selected
+  Cloudflare roles require `core/provider_usage.py` reservations and bounded budget
+  evidence; local roles do not fabricate Cloudflare accounts or usage.
+- `projections.py`, `controls.py`, `briefing.py`, `delivery.py` and
+  `reader_runtime.py` under `core/semantic/` own the Obsidian reading surface.
+  BodyPlan has a unique home for each retained detail; accepted pages are
+  durable before publishing. Markdown tables, lists and attributed quotations
+  retain exact evidence links, unit homes and original words. Manual conflicts retain exact bytes and require
+  visible resolution. Properties/actions/query use canonical revisions.
+  Only the optional `integrations/obsidian/` plugin provides a verified visible
+  open event; no plugin means manual known/read controls, not assumed reading.
+  Historical rebuild does not notify. Brief opening, item reading, knowing and
+  notification acceptance remain separate facts. Delivery requires its explicit
+  change floor and stable device identity.
+- Full legacy-to-first-semantic rebuild uses `scripts/rebuild_knowledge.py`
+  and the coordinator in `core/semantic/rebuild.py`: frozen plan, exact managed
+  app stop, AppInstanceLock/capture locks, Online Backup, independent C0/C1
+  full-source observations, conservation verification and durable cutover journal.
+  Publish the fixed projection, install v3 via CAS, activate the pin, record the
+  provisional receipt, release locks, restore the exact app and verify live
+  incremental acceptance in that order. Failed provisional evidence remains
+  sticky. Rollback preserves new captures/reading/delivery evidence. An already
+  active different semantic generation is not an admissible new rebuild plan.
+  Source/model grants, budget/account setup, installation and activation are
+  separate from source tests; see `docs/semantic-rebuild.md`.
 - `launchers/` owns the canonical Finder-friendly `.command` entrypoints. The
   root `启动.command` is a compatibility stub for deployed source-mode
   LaunchAgents and must not grow a second implementation.
@@ -369,7 +411,12 @@ The share-package builder may emit it as `群友使用说明.md` inside an exact
 artifact; do not recreate root `使用说明.txt` or `功能说明.txt` as competing
 documentation surfaces.
 
-## Recovery hardening boundary
+## Legacy recovery hardening boundary
+
+These frozen-batch/topic-event rules govern the pre-migration runtime and its
+explicit rollback path. Active semantic generations use the v3/canonical job
+contracts above and the semantic runbook; source key/signature and decoder
+requirements below apply to both runtimes.
 
 - Production monitor work freezes a content-free `pending_source_batch` in
   the existing MonitorStateStore before provider invocation. It binds the

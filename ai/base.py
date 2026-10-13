@@ -2,6 +2,12 @@
 from abc import ABC, abstractmethod
 
 
+class OutputTruncatedError(RuntimeError):
+    """The provider returned a known, incomplete response at its output limit."""
+    def __init__(self):
+        super().__init__("text_output_truncated")
+
+
 SUMMARY_PROMPT = """你是一个专业的群聊消息筛选与知识整理助手。请把以下群聊消息整理成适合快速回看的知识笔记。
 
 ## 群聊信息

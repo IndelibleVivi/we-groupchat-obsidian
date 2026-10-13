@@ -63,6 +63,7 @@ if _HAS_APPKIT:
                     threading.Thread(target=app._do_silent_refresh, daemon=True).start()
 
 from core.config import (
+    ConfigStore,
     active_monitor_chats,
     selected_drive_sync_chats,
     load_config,
@@ -121,7 +122,6 @@ from core.resource_capture import (
     resource_backup_chat_candidates,
     update_resource_backup_selection,
 )
-from core.quiet_archive_handoff import QuietArchiveHandoff
 from core.google_drive_auth import GoogleDriveAuthError, GoogleDriveOAuth
 from core.google_drive_client import GoogleDriveClient
 from core.google_drive_file_sync import GoogleDriveFileSync
@@ -256,9 +256,49 @@ def _notify(title, subtitle, message, data=None):
     print(f"[{title}] {subtitle}: {message}")
 
 
+def _semantic_pin(config):
+    from core.semantic.rebuild import GenerationRegistry
+    return GenerationRegistry(config.get("semantic_runtime_root") or os.path.join(DATA_DIR, "semantic")).pin()
+
+
+class _SemanticNotifier:
+    def __init__(self, generation_id):
+        self.generation_id = generation_id
+
+    def send(self, envelope):
+        from core.semantic.delivery import NotifyResult
+        try:
+            rumps.notification("WGO", _notification_text(envelope.title, 180),
+                               _notification_text(envelope.body, 700),
+                               data={"semantic_generation_id": self.generation_id,
+                                     "semantic_event_id": envelope.event_id})
+        except Exception:
+            return NotifyResult("unknown", envelope.receipt_id)
+        return NotifyResult("accepted", envelope.receipt_id)
+
+
+def _open_semantic_notification(data):
+    """Click requests navigation; only the Obsidian visible-open bridge records reading."""
+    from core.semantic.runtime import SemanticRuntime
+    try:
+        runtime = SemanticRuntime.active(ConfigStore().inspect() or {})
+        if runtime is None or runtime.store.generation_id != data.get("semantic_generation_id"):
+            return
+        path = runtime.delivery.resolve_click(data["semantic_event_id"])
+        for command in notification_open_commands_for_path(path):
+            if subprocess.run(command, check=False).returncode == 0:
+                return
+    except Exception as exc:
+        print("[semantic] click unavailable:", getattr(exc, "code", "semantic_click_unavailable"))
+
+
 @rumps.notifications
 def _on_notification_click(notification):
-    path = target_path_from_notification(getattr(notification, "data", None))
+    data = getattr(notification, "data", None)
+    if isinstance(data, dict) and isinstance(data.get("semantic_event_id"), str):
+        threading.Thread(target=_open_semantic_notification, args=(data,), daemon=True).start()
+        return
+    path = target_path_from_notification(data)
     if not path:
         print("[notify] clicked without openable target")
         return
@@ -296,6 +336,8 @@ class WeGroupchatObsidianApp(rumps.App):
                     NSApplication.sharedApplication().setApplicationIconImage_(ns_icon)
             except Exception:
                 pass
+        # Refuse a half-activated generation before background source discovery.
+        _semantic_pin(ConfigStore().inspect() or {})
         self.config = load_config()
         self._resource_file_resolution_session_enabled = False
         self._resource_file_resolution_session_epoch = 0
@@ -309,6 +351,8 @@ class WeGroupchatObsidianApp(rumps.App):
         self._monitor_timer = None
         self._monitor_wakeup_timer = None
         self._monitor_lock = threading.Lock()
+        self._semantic_reader_lock = threading.Lock()
+        self._semantic_reader_timer = None
         self._monitor_last_error = ""
         self._monitor_last_dispatch_ts = 0
         # Content-free diagnostic observation of the newest monitor attempt.
@@ -366,6 +410,7 @@ class WeGroupchatObsidianApp(rumps.App):
 
         self._configure_monitor_timer()
         self._configure_daily_digest_timer()
+        self._configure_semantic_reader_timer()
         self._configure_resource_backup_timer()
         self._configure_drive_sync_timer()
         self._configure_source_guard_timer()
@@ -432,8 +477,7 @@ class WeGroupchatObsidianApp(rumps.App):
                 self._configure_daily_digest_timer,
             ),
             (
-                ("resource_backup_enabled", "resource_backup_interval_seconds",
-                 "quiet_archive_handoff_enabled"),
+                ("resource_backup_enabled", "resource_backup_interval_seconds"),
                 self._configure_resource_backup_timer,
             ),
             (
@@ -662,11 +706,6 @@ class WeGroupchatObsidianApp(rumps.App):
         menu.add(rumps.MenuItem(
             f"状态: {'后台更新已开启' if enabled else '后台更新已关闭'}"
         ))
-        if self.config.get("quiet_archive_handoff_target"):
-            menu.add(rumps.MenuItem(
-                "档案馆交接: 后台已开启" if self.config.get("quiet_archive_handoff_enabled")
-                else "档案馆交接: 后台未开启"
-            ))
         menu.add(rumps.MenuItem(
             f"群聊: {selected} · 链接: {links} · 附件记录: {files}"
         ))
@@ -720,8 +759,7 @@ class WeGroupchatObsidianApp(rumps.App):
             except Exception:
                 pass
             self._resource_backup_timer = None
-        if not (self.config.get("resource_backup_enabled", False)
-                or self.config.get("quiet_archive_handoff_enabled", False)):
+        if not self.config.get("resource_backup_enabled", False):
             return
         interval = max(
             60,
@@ -820,8 +858,7 @@ class WeGroupchatObsidianApp(rumps.App):
         result = {}
         try:
             config = load_config()
-            if not manual and not (config.get("resource_backup_enabled", False)
-                                   or config.get("quiet_archive_handoff_enabled", False)):
+            if not manual and not config.get("resource_backup_enabled", False):
                 result = {
                     "capture": {
                         "state": "disabled",
@@ -854,29 +891,20 @@ class WeGroupchatObsidianApp(rumps.App):
                     )) == consent_epoch
                 )
             capture_result = capture.run(**capture_run_kwargs)
-            handoff_result = {"state": "disabled"}
             if capture_result.get("state") == "worker_busy":
                 backup_result = {"state": "not_run_worker_busy"}
-                handoff_result = {"state": "not_run_worker_busy"}
             else:
-                if config.get("quiet_archive_handoff_enabled", False):
-                    try:
-                        handoff_result = QuietArchiveHandoff.from_config(config, capture=capture).run()
-                    except Exception as exc:
-                        handoff_result = {"state": "failed", "error_code": type(exc).__name__}
                 backup_result = {"state": "disabled"}
                 if manual or config.get("resource_backup_enabled", False):
                     try:
                         backup_result = MountedResourceBackup.from_config(config, capture=capture).run()
                     except Exception as exc:
                         backup_result = {"state": "failed", "error_code": type(exc).__name__}
-            result = {"capture": capture_result, "backup": backup_result,
-                      "quiet_archive": handoff_result}
+            result = {"capture": capture_result, "backup": backup_result}
             print(
                 "[resource-backup] "
                 f"capture={capture_result.get('state')} "
                 f"backup={backup_result.get('state')} "
-                f"quiet_archive={handoff_result.get('state')} "
                 f"resolve={capture_result.get('resolve', {}).get('state')}"
             )
         except Exception as exc:
@@ -915,11 +943,8 @@ class WeGroupchatObsidianApp(rumps.App):
         scan = capture.get("scan") or {}
         resolve = capture.get("resolve") or {}
         capture_state = str(capture.get("state") or "unknown")
-        projection_state = str(
-            (backup.get("obsidian") or {}).get("state") or "unknown"
-        )
-        handoff_state = str(backup.get("state") or "unknown")
         outcome = evaluate_resource_backup_outcome(capture, backup)
+        handoff_state = outcome["handoff_state"]
         coverage = outcome.get("coverage") or {}
         backlog = int(coverage.get("non_delivered_occurrences") or 0)
         if not outcome["operational_success"]:
@@ -939,7 +964,9 @@ class WeGroupchatObsidianApp(rumps.App):
             f"已备份 {int(coverage.get('delivered_objects') or 0)} 个文件 / "
             f"{int(coverage.get('delivered_occurrences') or 0)} 次出现 · "
             f"待补齐 {backlog} 条 · "
-            f"capture={capture_state} · projection={projection_state} · "
+            f"capture={capture_state} · "
+            f"obsidian={outcome['obsidian_projection_state']} · "
+            f"target_projection={outcome['target_projection_state']} · "
             f"handoff={handoff_state}",
         )
 
@@ -1572,6 +1599,7 @@ class WeGroupchatObsidianApp(rumps.App):
     def _build_monitor_menu(self):
         """Build macOS notification monitor submenu."""
         monitor = rumps.MenuItem("🔔 关注推送")
+        semantic = _semantic_pin(self.config) is not None
 
         enabled = self.config.get("monitor_enabled", False)
         interval = self.config.get("monitor_interval_minutes", 3)
@@ -1586,7 +1614,7 @@ class WeGroupchatObsidianApp(rumps.App):
         monitor.add(rumps.MenuItem(f"状态: {status}{detail} · 每 {interval} 分钟"))
         monitor.add(rumps.MenuItem(f"群聊: {chat_name}"))
         monitor.add(rumps.MenuItem(f"AI: {provider_name}"))
-        monitor.add(rumps.MenuItem(f"关注: {topic_label or '未设置'}"))
+        monitor.add(rumps.MenuItem(f"{'阅读偏好' if semantic else '关注'}: {topic_label or ('全部内容' if semantic else '未设置')}"))
         for evidence in self._monitor_ops_evidence_lines():
             monitor.add(rumps.MenuItem(evidence))
         monitor.add(rumps.separator)
@@ -1594,7 +1622,7 @@ class WeGroupchatObsidianApp(rumps.App):
         toggle_label = "⏸ 暂停监控" if enabled else "▶️ 启用监控"
         monitor.add(rumps.MenuItem(toggle_label, callback=self._toggle_monitor))
         monitor.add(rumps.MenuItem("🎯 选择监控群聊...", callback=self._set_monitor_chat))
-        monitor.add(rumps.MenuItem("📝 设置关注描述...", callback=self._set_monitor_topic))
+        monitor.add(rumps.MenuItem("📝 设置阅读偏好..." if semantic else "📝 设置关注描述...", callback=self._set_monitor_topic))
         monitor.add(rumps.MenuItem("⏱ 设置检查间隔...", callback=self._set_monitor_interval))
         monitor.add(rumps.separator)
         notifications_enabled = self.config.get("background_notifications_enabled", True)
@@ -1607,11 +1635,16 @@ class WeGroupchatObsidianApp(rumps.App):
         monitor.add(rumps.MenuItem("🧪 测试系统通知", callback=self._test_monitor_notification))
         checkin_label = "✅ 心跳通知：开" if self.config.get("monitor_notify_checkins") else "☑️ 心跳通知：关"
         monitor.add(rumps.MenuItem(checkin_label, callback=self._toggle_monitor_checkins))
-        monitor.add(rumps.MenuItem("📁 打开命中记录目录", callback=self._open_monitor_hits_dir))
-        monitor.add(rumps.MenuItem("📂 设置 Obsidian 仓库位置...", callback=self._set_monitor_obsidian_root))
-        monitor.add(rumps.MenuItem("🧭 设置 Obsidian 子目录...", callback=self._set_monitor_obsidian_subdir))
+        if semantic:
+            monitor.add(rumps.MenuItem("🔎 打开检索", callback=self._open_semantic_query))
+            monitor.add(rumps.MenuItem("📝 打开阅读管理", callback=self._open_semantic_management))
+        else:
+            monitor.add(rumps.MenuItem("📁 打开命中记录目录", callback=self._open_monitor_hits_dir))
+            monitor.add(rumps.MenuItem("📂 设置 Obsidian 仓库位置...", callback=self._set_monitor_obsidian_root))
+            monitor.add(rumps.MenuItem("🧭 设置 Obsidian 子目录...", callback=self._set_monitor_obsidian_subdir))
         monitor.add(rumps.MenuItem("🗂 打开知识库目录", callback=self._open_monitor_knowledge_dir))
-        monitor.add(rumps.MenuItem("🧹 整理去重 + 重导出...", callback=self._run_monitor_maintenance))
+        if not semantic:
+            monitor.add(rumps.MenuItem("🧹 整理去重 + 重导出...", callback=self._run_monitor_maintenance))
         return monitor
 
     def _configure_monitor_timer(self):
@@ -1626,7 +1659,7 @@ class WeGroupchatObsidianApp(rumps.App):
         if not self.config.get("monitor_enabled", False):
             self._stop_monitor_wakeup_timer()
             return
-        if not self.config.get("monitor_topic", "").strip():
+        if not self.config.get("monitor_topic", "").strip() and _semantic_pin(self.config) is None:
             self._stop_monitor_wakeup_timer()
             return
         if not self._monitor_chats():
@@ -1717,7 +1750,7 @@ class WeGroupchatObsidianApp(rumps.App):
             self._rebuild_monitor_menu()
             return
 
-        if not self.config.get("monitor_topic", "").strip():
+        if not self.config.get("monitor_topic", "").strip() and _semantic_pin(self.config) is None:
             _notify("关注推送", "先设置关注描述", "写下你想盯什么内容后再开启")
             self._delayed_run(self._show_monitor_topic_dialog, True)
             return
@@ -1733,7 +1766,9 @@ class WeGroupchatObsidianApp(rumps.App):
             return
         self._update_config(patch={"monitor_enabled": True})
         self._configure_monitor_timer()
-        _notify("关注推送", "已开启", "从当前时间开始，只检查新增消息")
+        message = ("继续已保存进度；新选群聊从选择时间开始" if _semantic_pin(self.config)
+                   else "从当前时间开始，只检查新增消息")
+        _notify("关注推送", "已开启", message)
         self._rebuild_monitor_menu()
 
     def _set_monitor_topic(self, _):
@@ -1759,6 +1794,10 @@ class WeGroupchatObsidianApp(rumps.App):
         return names
 
     def _reset_monitor_states_to_now(self):
+        if _semantic_pin(self.config) is not None:
+            # New selections carry their own timestamp; existing v3 progress
+            # belongs to MonitorStateStore and is never reset by this dialog.
+            return
         chats = self._monitor_chats()
         if not chats:
             reset_state_to_now()
@@ -1767,6 +1806,10 @@ class WeGroupchatObsidianApp(rumps.App):
             reset_state_to_now(state_file_for_chat(chat["username"]))
 
     def _initialize_monitor_states_if_needed(self):
+        if _semantic_pin(self.config) is not None:
+            # The daemon monitor binds a durable from-now receipt after a
+            # complete inventory observation. The AppKit thread reads no source.
+            return
         chats = self._monitor_chats()
         if not chats:
             initialize_state_if_needed()
@@ -1861,9 +1904,14 @@ class WeGroupchatObsidianApp(rumps.App):
             selected_groups = [groups[idx - 1] for idx in selected]
             first = selected_groups[0]
             def mutate(config):
+                previous = {chat["username"]: chat for chat in active_monitor_chats(config)}
+                now = int(time.time())
                 updated = merge_monitor_chat_preferences(config, selected_groups)
                 updated["monitor_chats"] = [
-                    {"username": group["username"], "name": group["name"]}
+                    {"username": group["username"], "name": group["name"],
+                     **({"selected_since": previous[group["username"]]["selected_since"]}
+                        if group["username"] in previous and "selected_since" in previous[group["username"]]
+                        else {"selected_since": now} if group["username"] not in previous else {})}
                     for group in selected_groups
                 ]
                 updated["monitor_chat_username"] = first["username"]
@@ -1873,7 +1921,8 @@ class WeGroupchatObsidianApp(rumps.App):
             self._update_config(mutator=mutate)
             self._reset_monitor_states_to_now()
             self._configure_monitor_timer()
-            _notify("关注推送", "监控群聊已更新", f"从现在开始监控：{self._monitor_chat_label()}")
+            detail = "新选群聊从现在开始，已选群聊保留进度" if _semantic_pin(self.config) else "从现在开始监控"
+            _notify("关注推送", "监控群聊已更新", f"{detail}：{self._monitor_chat_label()}")
             self._rebuild_monitor_menu()
         finally:
             self._release_front()
@@ -1881,9 +1930,11 @@ class WeGroupchatObsidianApp(rumps.App):
     def _show_monitor_topic_dialog(self, enable_after=False):
         self._bring_to_front()
         try:
+            semantic = _semantic_pin(self.config) is not None
             clicked, text = self._input_dialog(
-                "设置关注描述",
-                "描述你想被提醒的内容。\n例如：工作项目的新进展、AI 工具或模型的重要更新、生活安排中的时间提醒。",
+                "设置阅读偏好" if semantic else "设置关注描述",
+                ("描述你想优先读到的内容。留空表示不设偏好。\n偏好用于简报编辑；所选群聊的生活、故事和其他内容仍完整整理。" if semantic
+                 else "描述你想被提醒的内容。\n例如：工作项目的新进展、AI 工具或模型的重要更新、生活安排中的时间提醒。"),
                 default_text=self.config.get("monitor_topic", ""),
                 ok="保存",
                 width=460,
@@ -1901,12 +1952,14 @@ class WeGroupchatObsidianApp(rumps.App):
                 return config
 
             self._update_config(mutator=mutate)
-            if any(topic_changed):
+            if any(topic_changed) and _semantic_pin(self.config) is None:
                 self._reset_monitor_states_to_now()
             if enable_after and topic and self._monitor_chats():
                 self._initialize_monitor_states_if_needed()
             self._configure_monitor_timer()
-            if topic:
+            if semantic:
+                _notify("WGO", "阅读偏好已保存", "下一次简报会使用新的偏好，现有内容和进度保留")
+            elif topic:
                 if self._monitor_chats():
                     _notify("关注推送", "关注描述已保存", "已按新描述监控新增消息")
                 else:
@@ -1954,7 +2007,7 @@ class WeGroupchatObsidianApp(rumps.App):
         if not self.db:
             _notify("关注推送", "还没初始化", "请等微信数据加载完成后再测试")
             return
-        if not self.config.get("monitor_topic", "").strip():
+        if not self.config.get("monitor_topic", "").strip() and _semantic_pin(self.config) is None:
             _notify("关注推送", "先设置关注描述", "测试前需要知道你想盯什么")
             self._delayed_run(self._show_monitor_topic_dialog, False)
             return
@@ -2011,6 +2064,7 @@ class WeGroupchatObsidianApp(rumps.App):
                     chat_config = dict(self.config)
                     chat_config["monitor_chat_username"] = chat["username"]
                     chat_config["monitor_chat_display_name"] = chat["name"]
+                    chat_config["semantic_selection_started_at"] = chat.get("selected_since")
                     monitor = TopicMonitor(
                         self.db,
                         chat_config,
@@ -2055,6 +2109,13 @@ class WeGroupchatObsidianApp(rumps.App):
 
     def _handle_monitor_result(self, result, manual=False, dry_run=False):
         status = result.get("status")
+        if status in {"semantic_applied", "semantic_dry_run"}:
+            if manual:
+                _notify("WGO", "语义检查完成", result.get("message", "进度已确认"))
+            return True
+        if isinstance(status, str) and status.startswith(("semantic_", "cutover_", "active_", "provider_", "usage_", "external_budget_")):
+            self._handle_monitor_error(status, manual)
+            return False
         blocked_messages = {
             "monitor_state_corrupt": "进度记录损坏或版本不兼容，已暂停；请检查状态备份",
             "monitor_state_conflict": "进度被另一个写入者改变，当前批次未确认；稍后重新核对",
@@ -2227,6 +2288,55 @@ class WeGroupchatObsidianApp(rumps.App):
             f"{self.config.get('daily_digest_timezone', 'Asia/Shanghai')} 检查"
         )
 
+    def _configure_semantic_reader_timer(self):
+        """Controls and reading receipts work independently of source activity."""
+        if self._semantic_reader_timer:
+            self._semantic_reader_timer.stop()
+        self._semantic_reader_timer = rumps.Timer(self._on_semantic_reader_timer, 5)
+        self._semantic_reader_timer.start()
+
+    def _on_semantic_reader_timer(self, _):
+        if self._semantic_reader_lock.locked():
+            return
+        threading.Thread(target=self._run_semantic_reader, daemon=True).start()
+
+    def _semantic_reader(self, runtime):
+        from core.semantic.reader_runtime import ReaderRuntime
+        from core.semantic.rebuild import read_json, write_json
+        from core.platform import LockMode, create_platform_services
+        root = self.config.get("semantic_runtime_root") or os.path.join(DATA_DIR, "semantic")
+        services = create_platform_services()
+        services.require("private_storage").ensure_directory(root)
+        with services.require("locks").acquire(os.path.join(root, "device.lock"), mode=LockMode.EXCLUSIVE, blocking=True):
+            path = os.path.join(root, "device.json")
+            device = read_json(path)
+            if device is None:
+                device = {"schema": "we-groupchat-obsidian.semantic-device.v1", "device_id": str(uuid.uuid4())}
+                write_json(path, device)
+            if (device.get("schema") != "we-groupchat-obsidian.semantic-device.v1"
+                    or not isinstance(device.get("device_id"), str) or not device["device_id"]):
+                raise ValueError("semantic_device_invalid")
+        return ReaderRuntime(runtime, notifier=_SemanticNotifier(runtime.store.generation_id),
+                             device_id=device["device_id"],
+                             live=bool(self.config.get("background_notifications_enabled", True)))
+
+    def _run_semantic_reader(self):
+        if not self._semantic_reader_lock.acquire(blocking=False):
+            return
+        try:
+            from core.semantic.runtime import SemanticRuntime
+            runtime = SemanticRuntime.active(self.config)
+            if runtime is None:
+                return
+            reader = self._semantic_reader(runtime)
+            reader.poll()
+            runtime.index_all(max_rounds=1)
+            runtime.publish_all()
+        except Exception as exc:
+            print("[semantic] reader deferred:", getattr(exc, "code", "semantic_reader_unavailable"))
+        finally:
+            self._semantic_reader_lock.release()
+
     def _on_daily_digest_timer(self, _):
         if not self.config.get("daily_digest_enabled", True):
             return
@@ -2236,6 +2346,13 @@ class WeGroupchatObsidianApp(rumps.App):
         if not self._daily_digest_lock.acquire(blocking=False):
             return
         try:
+            from core.semantic.runtime import SemanticRuntime
+            semantic = SemanticRuntime.active(self.config)
+            if semantic is not None:
+                receipt = semantic.brief_if_due()
+                if receipt and receipt.status == "success" and self.config.get("daily_digest_notify", True):
+                    self._semantic_reader(semantic).deliver_brief(receipt)
+                return
             due = should_run_daily_digest(DAILY_DIGEST_STATE_FILE, self.config)
             digest = write_daily_digest(self.config) if due else None
             repair = refresh_pending_daily_digests(self.config)
@@ -2275,10 +2392,24 @@ class WeGroupchatObsidianApp(rumps.App):
         subprocess.run(["open", HITS_DIR])
 
     def _open_monitor_knowledge_dir(self, _):
+        pin = _semantic_pin(self.config)
+        if pin:
+            subprocess.run(["open", str(pin.projection_root)])
+            return
         root = self.config.get("monitor_obsidian_root") or OBSIDIAN_ROOT
         subdir = self.config.get("monitor_obsidian_subdir")
         ensure_obsidian_vault(root, obsidian_subdir=subdir)
         subprocess.run(["open", os.path.join(os.path.expanduser(root), safe_obsidian_subdir(subdir))])
+
+    def _open_semantic_query(self, _):
+        pin = _semantic_pin(self.config)
+        if pin:
+            subprocess.run(["open", os.path.join(pin.projection_root, "检索.md")])
+
+    def _open_semantic_management(self, _):
+        pin = _semantic_pin(self.config)
+        if pin:
+            subprocess.run(["open", os.path.join(pin.projection_root, "管理.md")])
 
     def _set_monitor_obsidian_root(self, _):
         self._delayed_run(self._show_monitor_obsidian_root_dialog)

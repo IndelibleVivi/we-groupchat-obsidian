@@ -12,6 +12,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from core.config import load_config
+from core.semantic.runtime import legacy_command_blocked
 from core.knowledge import KnowledgeStore
 from core.source_metadata_plan import (
     SourceMetadataPlanError,
@@ -298,6 +299,8 @@ def main() -> int:
     parser.add_argument("--knowledge-audit-output", default="", help="Optional Markdown output path for --knowledge-audit.")
     args = parser.parse_args()
 
+    if legacy_command_blocked():
+        return 2
     config = load_config()
     root = os.path.join(
         os.path.expanduser(config.get("monitor_obsidian_root", "")),

@@ -1,8 +1,9 @@
 # we-groupchat-obsidian
 
-Local-first WeChat group chat summaries, monitor review, and Obsidian knowledge output.
+Local-first WeChat knowledge, stories, resources, and reading in Obsidian.
 
-Status: functional, source-distributed macOS application. It has a menu-bar app,
+Status: source-distributed macOS application with a semantic-rebuild candidate.
+Existing installations keep their legacy monitor until an explicit migration activates a generation. It has a menu-bar app,
 an optional legacy read-only MCP compatibility server, operator CLIs, durable
 local state, recovery/backup workers and a full regression suite; review the data-flow and account-safety notes before
 using it on real chat data. A bundled Python runtime or signed installer is not
@@ -23,7 +24,7 @@ unsupported. The current Mac source seam and bounded reading rules are shared
 for the next adapter. See the [port map](docs/WINDOWS-PORT-MAP.md) and
 [Windows contributor handoff](docs/WINDOWS-DEVELOPMENT.md).
 
-A local-first macOS tool for reading your own WeChat desktop database, summarizing group chats, searching messages, and turning high-value group-chat updates into an Obsidian-friendly Markdown knowledge base.
+A local-first macOS tool for reading your own WeChat desktop database, summarizing group chats, searching messages, and keeping evolving group-chat knowledge and life stories in an Obsidian-friendly Markdown knowledge base.
 
 This is not official WeChat/Tencent software, not a WeChat bot, not employee-monitoring software, and not fully offline when you enable cloud AI. It does not use a WeChat API, does not run a remote service, and does not send your chat history to this project. The app reads local database files on your Mac and calls the AI provider you configure. Built-in remote link preview is disabled and makes zero network requests. Optional MCP read tools separately expose selected local chat-derived data to the MCP client you configure.
 
@@ -31,28 +32,47 @@ Project lineage: this standalone derivative builds on [Qizhan7/mac-wechat-summar
 
 [完整中文版 README](README.zh-CN.md) · [Documentation and history](docs/README.md)
 
-An optional [private Quiet Archive handoff](docs/quiet-archive-handoff.md) exports
-selected resources plus complete visible message context as local JSON/CAS
-snapshots, independently of AI notes, Obsidian and Drive. It defaults off; enabling
-it explicitly permits selected-message text retention. Existing backups remain.
-Raw EOF, historical context gaps and missing attachments are reported separately.
-A fresh degraded scan exports its committed portion as `pending`, keeping failed
-shards explicit so the consumer can continue without claiming complete coverage.
-The dedicated CLI supports app-config operation and an explicit standalone
-`--profile` with independent source/key references, selection, ledger and cache.
-Standalone plan/status/export do not read WeChat or its keys; bounded
-refresh/backfill requires the protected-source permission flag. Identity-preserving
-adoption and separately authorized attachment resolution let it run without the
-menu app or a summary job. See the guide for profile and migration commands.
-Explicitly granting `refresh --allow-attachment-read` also resolves selected
-local cached files before export, within `--file-limit`; ordinary refresh keeps
-attachment reads off. Message EOF and missing-file coverage remain separate.
-On macOS, an explicit one-time `recover-source-device` can preserve an existing
-standalone archive after filesystem device renumbering. It verifies every recorded
-shard and extends the existing producer marker with the volume UUID/root inode;
-later renumbering needs no repeat recovery. See the handoff guide for the command.
+## Semantic knowledge candidate
+
+The new runtime keeps immutable source versions, extracts zero or more
+Observations, and maintains stable Items across chats and days. Life stories,
+quotations, practical experience and technical updates share the same pipeline;
+there is no interest-score gate for retaining source knowledge. Interest settings
+shape reading and brief selection. Claims retain their time, case and conditions;
+late replies, corrections and promised resources can reopen the relevant Episode.
+
+Read and control it in Obsidian: Item pages, views, `检索.md`, `管理.md`, editable
+follow/mute/wait/query properties, and one revisable daily brief. Generated bodies
+preserve detail and evidence; manual edits produce a visible conflict with exact
+backup bytes. Captured member names remain available for attribution, with stable
+source identities kept separate from display names and people being discussed.
+Bodies can use comparison tables, ordered steps, lists and attributed quotations
+where the material calls for them. The optional [local Obsidian plugin](integrations/obsidian/README.md)
+records only a verified visible open. Without it, use explicit read/known actions.
+The plugin is source-only and is not installed or enabled automatically.
+
+SQLite remains the canonical store. Embeddings can use an explicitly configured
+loopback model service or Cloudflare BGE-M3; derived retrieval can use the local
+cosine index or Cloudflare Vectorize. Text generation and typed decisions have
+separate routes. A fully local pipeline requires local services for all model
+roles and the local index; choosing a local index alone does not make a cloud
+embedding route local. Cloudflare usage has reservations, explicit budget
+evidence and unknown-outcome recovery.
+The app does not create a Cloudflare account, provision an index or grant spending.
+
+Existing installations use the [first-migration runbook](docs/semantic-rebuild.md).
+It preserves old knowledge, reader state and raw history, verifies two complete
+source observations and a finite cutover horizon, then switches one generation
+pin and checks the restored runtime. A source checkout does not migrate or
+activate data. Start with the [reading guide](docs/semantic-workflow.md),
+[provider contract](docs/semantic-providers.md), and [candidate status](docs/current-state.md).
+Consumer-specific archive producers now belong to external adapters; generic
+resource capture, explicit context capture, CAS and mounted backup remain here.
 
 ## Obsidian output preview
+
+These screenshots document the retained **pre-migration topic/event output**.
+They are not screenshots of the semantic candidate described above.
 
 These screens use temporary redacted copies of real exporter Markdown, laid
 out as an Obsidian light reading view. To keep the note content crisp and
@@ -115,8 +135,10 @@ promise for another installation.
 
 DeepSeek bills actual token usage and distinguishes cached input, uncached
 input, and output tokens. Cost also varies with the model, prompt and output
-length, cache hits, and current official rates. This project does not maintain
-its own cost ledger; the figures above come from DeepSeek Platform:
+length, cache hits, and current official rates. This historical monitor did not maintain
+a billing ledger; the figures above come from DeepSeek Platform. The semantic
+provider ledger now records local usage and reservations, but it does not replace
+an account bill:
 
 - [View your actual account usage](https://platform.deepseek.com/usage) (sign-in required)
 - [View current official pricing](https://api-docs.deepseek.com/quick_start/pricing/)
@@ -129,6 +151,25 @@ README links to the live pricing page instead of copying a price table that can
 become stale.
 
 ## Architecture
+
+![Semantic generation, state owners and reading flow](docs/assets/architecture/semantic-core.en.svg)
+
+The active generation selects one canonical pipeline. Raw capture commits before
+its captured cursor; accepted semantic work commits before its applied cursor.
+Indexes, Obsidian files and notifications follow durable outboxes and receipts.
+The same engine serves migration and live increments. Source inventory, key
+recovery, process-lifetime access and selected-resource backup keep their existing
+owners. The migration journal lives outside the candidate generation so a partial
+cutover cannot disappear with a failed candidate.
+
+Editable source: [semantic core](docs/architecture/semantic-core.en.excalidraw).
+Detailed contracts: [store](docs/semantic-store-contract.md),
+[engine](docs/semantic-engine.md), [v3 progress](docs/monitor-state-v3.md),
+[reading](docs/semantic-reading.md), and [migration](docs/semantic-rebuild.md).
+
+<details>
+<summary>Pre-migration architecture and retained source/resource foundation</summary>
+
 
 ![we-groupchat-obsidian architecture](docs/assets/architecture/we-groupchat-obsidian-architecture.en.svg)
 
@@ -188,8 +229,8 @@ Its most important boundaries are:
   transfers larger than 5 MiB resume from server-confirmed offsets, and
   human-readable chat/month shortcuts provide the visible projection. Google
   Drive file IDs, not visible names or paths, own remote identity.
-- Remote AI calls cross the Mac-local boundary. Ollama can keep AI
-  interpretation local. Built-in remote URL preview is disabled; URL
+- Remote AI calls cross the Mac-local boundary. Ollama can keep text
+  interpretation local; embedding and index routes have separate data boundaries. Built-in remote URL preview is disabled; URL
   credentials are redacted before links enter AI prompts or human-readable
   projections while exact URL identity stays in the private local ledger.
 - Saving knowledge, interrupting with a notification, and creating later action
@@ -201,7 +242,13 @@ independently deployed microservices. Editable sources:
 [English-first Excalidraw](docs/architecture/we-groupchat-obsidian-architecture.en.excalidraw) ·
 [Chinese-first Excalidraw](docs/architecture/we-groupchat-obsidian-architecture.zh-CN.excalidraw).
 
+</details>
+
 ## Features
+
+The semantic generation adds the workflow above after migration. The following
+menu summaries, source and resource capabilities remain available; topic/event
+notes, the old Review Queue and old digest layout apply only before migration.
 
 - Menu bar summaries for new messages, custom ranges, and day-based reviews.
 - Group chat organization and batch summaries.
@@ -215,6 +262,10 @@ independently deployed microservices. Editable sources:
 - Optional WeChat source guard inside the long-lived menu-bar runtime, with grace, pause, restart budget, exponential backoff, and content-free receipts.
 - Provider-neutral filesystem snapshots for the attachment archive, including plan, run, verify, and read-only restore planning.
 - Default no-OAuth selected-resource backup through an existing mounted filesystem such as Google Drive for Desktop, with exact link occurrences, shared-CAS files, lightweight Obsidian indexes, catalog snapshots, and honest `sync_delegated` receipts.
+- Machine snapshots seal independently of Obsidian and mounted-view rendering.
+  A complete catalog remains usable when either projection fails; run results
+  report each projection separately, and the CLI still exits with attention
+  required when the overall update is incomplete.
 - Optional advanced selected-chat file sync through the Google Drive API, with a separate selection/control plane, durable queue, chat/month shortcuts, retry/reconcile, and no automatic deletion.
 - Exact URL extraction with credential-safe display/export redaction; built-in remote link preview is disabled and performs zero network requests.
 - CLI and `.command` maintenance entrypoints for users whose menu bar icon is hidden.
@@ -222,6 +273,11 @@ independently deployed microservices. Editable sources:
 
 ## Privacy and Safety
 
+- The selected embedding route receives redacted retrieval text: a configured
+  loopback service or Cloudflare. Vectorize receives derived vectors and bounded
+  identity metadata when selected. The local adapter rejects external endpoints
+  and redirects; the operator must also configure the service to use local models.
+  See [provider boundaries](docs/semantic-providers.md).
 - Runtime data is local by default: `~/.we-groupchat-obsidian/`.
 - API keys use the native protected credential service (macOS Keychain in the current app); config files are not an API-key fallback.
 - WeChat database keys, logs, SQLite files, Markdown exports, and `.venv/` should never be committed.
@@ -250,7 +306,7 @@ independently deployed microservices. Editable sources:
   restored from config. Turning it off also cancels the in-flight resolver
   before its next attachment-byte operation. Link-only backfill never reads the
   attachment cache.
-- Cloud AI providers receive the text you ask them to summarize. Use Ollama if you want the AI step to stay local.
+- Cloud AI providers receive the text you ask them to summarize. Ollama can keep text generation local; the embedding and index routes follow their separately selected local or remote boundaries.
 - Built-in remote link preview is retired from normal runtime and performs zero network requests. A legacy saved `monitor_fetch_links: true` value is accepted only for compatibility and is forced off; there is no menu or CLI path that re-enables it. Exact observed URLs remain in the private local ledger for deterministic identity. Human-readable projections, snapshots/exports, Review Queue, Daily Digest, AI prompts, and error text use one canonical display form that redacts credential-bearing query and fragment fields, including common AWS, GCS, and Azure signed-URL parameters. This repository does not claim to provide a hardened crawler.
 - MCP read tools expose local chat-derived data to the configured MCP client and may pass it to the configured AI provider for summaries. MCP is read-only: it does not advance bookmarks or mutate group metadata.
 - MCP message sending is retired, not merely disabled. The legacy `prepare_send_message`, `confirm_send_message`, and `send_message` tool names return the stable content-free code `mcp_send_retired` and never touch WeChat UI. Legacy send config keys remain loadable but are inert.
@@ -313,6 +369,10 @@ When DeepSeek is selected without an explicit `ai_model`, the current default
 is `deepseek-v4-flash`; a different compatible model can still be configured.
 
 ## Quick Start
+
+Ordinary startup preserves the existing monitor. To adopt semantic Items and
+briefs, complete the separate [migration procedure](docs/semantic-rebuild.md);
+opening the app or installing the optional plugin does not activate a generation.
 
 ```bash
 git clone https://github.com/IndelibleVivi/we-groupchat-obsidian.git
@@ -411,8 +471,8 @@ contracts, retained compatibility paths and dated acceptance evidence.
 - [Recovery acceptance](docs/recovery-acceptance.md) and
   [reliability closure](docs/reliability-closure.md): maintained recovery/failure
   contracts, with historical canaries and authoring limits explicitly scoped.
-- [Quiet Archive handoff](docs/quiet-archive-handoff.md): private local machine
-  export, optional visible-message retention and its separate coverage contract.
+- [Semantic workflow](docs/semantic-workflow.md), [rebuild](docs/semantic-rebuild.md)
+  and [current status](docs/current-state.md): reading, migration and candidate boundaries.
 - [CONTRIBUTING](CONTRIBUTING.md) and [AGENTS](AGENTS.md): contribution and source
   ownership; [Windows development](docs/WINDOWS-DEVELOPMENT.md) owns sequencing,
   while the [port map](docs/WINDOWS-PORT-MAP.md) owns module status.
@@ -420,6 +480,10 @@ contracts, retained compatibility paths and dated acceptance evidence.
   builder's sole source for `群友使用说明.md`.
 
 ### Monitor decision acceptance and pending work
+
+This section describes the retained legacy monitor. Active semantic generations
+use [accepted jobs and whole-batch dispositions](docs/semantic-engine.md) and
+[separate captured/applied vectors](docs/monitor-state-v3.md).
 
 Monitor responses require an explicit boolean `match` and integer `score` in
 0–100; retained candidates also need a non-empty body. Invalid, empty or
@@ -441,6 +505,14 @@ for recovery limits, policy changes and verification. This does not change
 resource permissions, attachment consent, notification selection or deployment.
 
 ## Useful Commands
+
+After semantic activation, legacy configure/backfill/catch-up/digest/review and
+reorganization commands stop before opening old writers. Use the menu app and
+Obsidian controls for current work, `scripts/rebuild_knowledge.py status RUN_ID` for
+migration state, and `scripts/health_check.py --semantic-json` for content-free
+health. The following legacy commands remain available before migration or after
+an explicit rollback; source, resource, health and autostart commands retain their
+own scopes.
 
 The canonical Finder helpers live in `launchers/` and can be double-clicked or
 run from Terminal. The root `启动.command` remains as the single compatibility
@@ -480,7 +552,7 @@ operational facts that were previously easy to collapse:
 | `Monitor operational status` | Distinguishes enabled, healthy, blocked, stale and unknown; reports recorded attempt/success times separately from the source-message watermark. A verified EOF check stays healthy even with no new messages. |
 | `Monitor raw cursor progress` | Counts of checkpointed chats and generation-bound shard cursors; no chat or cursor value is printed. |
 | `Source inventory` | Complete versus degraded/uninitialized inventory plus present, missing, cache-only, key-missing, and unreadable counts. “Complete” requires a complete expected-shard inventory, stable current generations, and successful reads. |
-| `Mounted resource handoff` | Existing destination binding and latest snapshot handoff evidence. `provider_side_sync=unknown` and `remote_verified=False` remain explicit even after `sync_delegated`. |
+| `Mounted resource handoff` | Existing destination binding and latest snapshot handoff evidence. `provider_side_sync=unknown` and `remote_verified=False` remain explicit even after `sync_delegated`; Obsidian and target projections are `not_probed` by this read-only check. |
 | `Google Drive API remote verification` | Count of objects verified through the optional Direct Drive API ledger. It is separate from source completeness and mounted-folder delivery. |
 | `Link preview` / `MCP compatibility` / `Windows` | Preview is disabled with zero requests; MCP is legacy read-only and send-retired; the storage/credential foundation is source-level support; Windows product support remains unclaimed. |
 
@@ -712,6 +784,9 @@ To opt in to a label migration after reviewing the impact:
 
 ## Monitor, Digest, and Obsidian Workflow
 
+The rest of this section documents the retained **pre-migration** workflow.
+For active semantic generations use [the reading guide](docs/semantic-workflow.md).
+
 The topic monitor is designed to preserve useful signal without turning every interesting message into an alert.
 
 If WeChat or the provider was unavailable and the monitor has a checkpointed backlog, use the guarded catch-up entry instead of advancing state by hand:
@@ -821,7 +896,9 @@ app.py                   # macOS menu-bar application entrypoint
 mcp_server.py            # FastMCP server entrypoint
 setup.py                 # py2app packaging entrypoint
 ai/                      # replaceable AI provider adapters
-core/                    # domain logic, durable state, privacy and reliability contracts
+core/                    # source, state, privacy and reliability contracts
+core/semantic/           # active-generation store, engine, reading and rebuild
+integrations/obsidian/   # optional visible-open plugin source
 ui/                      # reusable UI components
 scripts/                 # thin operator entrypoints and legacy-agent cleanup
 launchers/               # canonical Finder-friendly .command entrypoints
