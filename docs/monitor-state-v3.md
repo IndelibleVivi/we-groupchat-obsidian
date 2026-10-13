@@ -304,3 +304,8 @@ publication failure. A subprocess executes the immutable pre-v3 reader against
 a synthetic v3 file to demonstrate the old-reader failure boundary. These tests
 are source evidence only and do not claim a real migration, database receipt
 validation, native Windows activation or live macOS acceptance.
+
+来源中的 `resources` 是 WeChat 文件/图片元数据，source bridge 显式转换成
+semantic resource references。引用身份绑定 source namespace、message ID 与资源位置，
+status 为 `ready_metadata`、location 为空；声明的 hash 不用于跨消息合并或证明
+附件已下载。原始 resource metadata 仍原样保存在 source payload，这条路径不读取附件 bytes。

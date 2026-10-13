@@ -11,6 +11,26 @@ from core.monitor_state import monitor_state_fingerprint
 from .contracts import SemanticStoreError, digest
 
 
+def message_resources(row, namespace):
+    """Bind source metadata without claiming attachment bytes or another ledger's IDs."""
+    resources = row.get("resources", [])
+    if not isinstance(resources, list):
+        raise SemanticStoreError("capture_invalid_resources")
+    result = []
+    for index, metadata in enumerate(resources):
+        if (not isinstance(metadata, dict) or metadata.get("kind") not in {"file", "image"} or
+                type(metadata.get("resource_index", index)) is not int or
+                metadata.get("resource_index", index) != index or
+                metadata.get("source_message_id", row["source_message_id"]) != row["source_message_id"]):
+            raise SemanticStoreError("capture_invalid_resources")
+        identity = digest([namespace, row["source_message_id"], index])
+        result.append({"resource_id": "source-resource:" + identity,
+                       "occurrence_id": "source-occurrence:" + identity,
+                       "purpose": metadata["kind"], "status": "ready_metadata",
+                       "location": None, "metadata": metadata})
+    return result
+
+
 class SemanticCapture:
     def __init__(self, store, source, *, page_size=200):
         if type(page_size) is not int or not 1 <= page_size <= 2000:
@@ -30,6 +50,7 @@ class SemanticCapture:
                             "logical_shard_id": generations[generation], "physical_generation": generation,
                             "source_cursor_token": encode_cursor_token(envelope["create_time"], envelope["rowid"]),
                             "source_sent_at": row["timestamp"], "text": row.get("text", ""),
+                            "resources": message_resources(row, inventory["source_namespace"]),
                             "payload": row, "kind": "message", "provenance_grade": "raw_exact", "core": True})
         return records
 

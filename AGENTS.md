@@ -176,6 +176,9 @@
   to exact shard generation and inventory digest; inventory revision is monotonic
   observation evidence, not a replacement for checkpoint CAS. Legacy v1/v2
   cursor semantics below remain applicable only to the compatibility runtime.
+  Source resource metadata is explicitly bound to semantic resource/occurrence
+  IDs by namespace, message and position; raw payloads stay exact. Declared hashes
+  are not verified byte identity, and this bridge grants no attachment-byte IO.
 - `core/semantic/retrieval.py` combines lexical, dense and structural candidates
   with the unindexed canonical tail. Local cosine and remote Vectorize are
   selectable derived indexes; neither decides canonical merges. Embedding model,
