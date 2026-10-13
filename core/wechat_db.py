@@ -370,6 +370,11 @@ class WeChatDB:
         "snapshot_count": 0,
         "snapshot_bytes": 0,
         "snapshot_seconds": 0.0,
+        "page_index_builds": 0,
+        "page_index_bytes": 0,
+        "page_index_seconds": 0.0,
+        "page_index_hits": 0,
+        "page_index_invalidations": 0,
         "source_workers": 0,
         "active_source_workers": 0,
         "peak_source_workers": 0,
@@ -623,6 +628,9 @@ class WeChatDB:
         if outermost:
             state["paths"].clear()
             state["generations"].clear()
+            state["page_index_paths"].clear()
+            state["page_index_seen"].clear()
+            state["page_index_plain"].clear()
             state["inventory_snapshot"] = None
             state["inventory_specs"] = None
         state["depth"] += 1
@@ -632,8 +640,12 @@ class WeChatDB:
             state["depth"] -= 1
             if state["depth"] == 0:
                 paths = list(state["paths"].values())
+                paths.extend(state["page_index_paths"].values())
                 state["paths"].clear()
                 state["generations"].clear()
+                state["page_index_paths"].clear()
+                state["page_index_seen"].clear()
+                state["page_index_plain"].clear()
                 state["inventory_snapshot"] = None
                 state["inventory_specs"] = None
                 for path in paths:
@@ -649,6 +661,9 @@ class WeChatDB:
                 "depth": 0,
                 "paths": {},
                 "generations": {},
+                "page_index_paths": {},
+                "page_index_seen": {},
+                "page_index_plain": set(),
                 "inventory_snapshot": None,
                 "inventory_specs": None,
             }
@@ -663,6 +678,145 @@ class WeChatDB:
             return
         with self.source_snapshot():
             yield self
+
+    PAGE_INDEX_SCHEMA = "wgopage"
+    PAGE_INDEX_TABLE = "page_keys"
+
+    def _page_index_dir(self):
+        return os.path.join(os.path.realpath(self.cache_dir), "page-index")
+
+    @staticmethod
+    def _attach_page_index(conn, index_path):
+        """Attach one private key-only index read-only.
+
+        A failure here is non-fatal: the caller falls back to the legacy
+        full-scan keyset query rather than fail the whole read.
+        """
+        try:
+            conn.execute(
+                f"ATTACH DATABASE ? AS {WeChatDB.PAGE_INDEX_SCHEMA}",
+                (f"file:{quote(os.path.abspath(index_path))}?mode=ro",),
+            )
+        except sqlite3.Error:
+            return False
+        return True
+
+    @staticmethod
+    def _detach_page_index(conn):
+        try:
+            conn.execute(f"DETACH DATABASE {WeChatDB.PAGE_INDEX_SCHEMA}")
+        except sqlite3.Error:
+            pass
+
+    def _build_page_index(self, db_path, table_name, index_path):
+        """Derive a bounded key-only ``(create_time, rowid)`` index for one shard.
+
+        The source shard has no ``create_time`` index, so the plain keyset
+        ``WHERE create_time > ? OR (create_time = ? AND rowid > ?)`` degrades to
+        a full ``SCAN`` plus a temporary B-tree on every page. This builds one
+        private, key-only index file for the frozen traversal so each later page
+        seeks in O(log n) instead of rescanning the whole history. The source
+        database itself is only opened read-only and is never modified.
+        """
+        started = time.perf_counter()
+        builder = None
+        written = 0
+        try:
+            builder = sqlite3.connect(index_path, uri=True)
+            builder.execute("PRAGMA journal_mode=OFF")
+            builder.execute("PRAGMA synchronous=OFF")
+            # Keep the transient sort small enough for a bounded-memory build;
+            # the index itself is stored to the private temp file.
+            builder.execute("PRAGMA temp_store=FILE")
+            builder.execute("PRAGMA cache_size=-8192")
+            builder.execute(
+                "ATTACH DATABASE ? AS src",
+                (f"file:{quote(os.path.abspath(db_path))}?mode=ro",),
+            )
+            builder.execute(f"CREATE TABLE {self.PAGE_INDEX_TABLE} (ct INTEGER, rid INTEGER, PRIMARY KEY(ct,rid)) WITHOUT ROWID")
+            builder.execute(
+                f"INSERT INTO {self.PAGE_INDEX_TABLE} (ct, rid) "
+                f"SELECT create_time, rowid FROM src.[{table_name}] "
+                f"WHERE create_time IS NOT NULL AND rowid IS NOT NULL"
+            )
+            builder.commit()
+            written = int(os.path.getsize(index_path))
+        except sqlite3.Error:
+            return ""
+        finally:
+            if builder is not None:
+                builder.close()
+        self._add_source_stage_stats(
+            page_index_builds=1,
+            page_index_bytes=written,
+            page_index_seconds=max(0.0, time.perf_counter() - started),
+        )
+        return index_path
+
+    def _ensure_page_index(self, db_path, table_name, conn):
+        """Return a usable private page index path for the current snapshot.
+
+        Building is idempotent within one snapshot; outside a snapshot no index
+        is built because there is no owner that could clean it up. The index is
+        only derived once a shard's second keyset page is requested in the same
+        snapshot: a traversal that reads a single page keeps the legacy query,
+        so the build (itself one full scan) never costs more than the page it
+        replaces.
+        """
+        if getattr(self, "_source_snapshot_local", None) is None:
+            return ""
+        state = self._source_snapshot_state()
+        if state["depth"] <= 0:
+            return ""
+        pinned = os.path.abspath(db_path)
+        # The same shard contains many independent chat tables. Sharing keys
+        # by database alone can falsely report EOF for a different chat.
+        key = (pinned, table_name)
+        existing = state["page_index_paths"].get(key)
+        if existing and os.path.isfile(existing):
+            self._add_source_stage_stats(page_index_hits=1)
+            return existing
+        if key in state["page_index_plain"]:
+            return ""
+        seen = state["page_index_seen"].get(key, 0) + 1
+        state["page_index_seen"][key] = seen
+        if seen < 2:
+            return ""
+        columns = conn.execute(f"PRAGMA table_info([{table_name}])").fetchall()
+        integer_time = any(row[1] == "create_time" and "INT" in row[2].upper() for row in columns)
+        native_plan = conn.execute(f"EXPLAIN QUERY PLAN SELECT rowid FROM [{table_name}] WHERE (create_time,rowid) > (?,?) ORDER BY create_time,rowid LIMIT 1", (0, 0)).fetchall()
+        if not integer_time or any("SEARCH " in row[3] and "INDEX" in row[3] for row in native_plan):
+            # Existing native seek support needs no derived copy. Unknown time
+            # affinity stays on the source's own comparison semantics.
+            state["page_index_plain"].add(key)
+            return ""
+        # One uniquely named private file per build keeps concurrent traversals
+        # (separate threads, separate snapshots) from sharing or clobbering an
+        # index. The owning thread unlinks it when its snapshot ends.
+        from core.platform import create_platform_services
+        create_platform_services().require("private_storage").ensure_directory(self._page_index_dir())
+        fd, path = tempfile.mkstemp(
+            prefix=".pageidx-", suffix=".idx", dir=self._page_index_dir()
+        )
+        os.close(fd)
+        built = ""
+        try:
+            built = self._build_page_index(pinned, table_name, path)
+        finally:
+            if not built:
+                # The builder has closed its handle, including on interruption.
+                # Never leave an unregistered index outside snapshot cleanup.
+                for suffix in ("", "-journal", "-wal", "-shm"):
+                    try:
+                        os.unlink(path + suffix)
+                    except FileNotFoundError:
+                        pass
+        if not built:
+            state["page_index_plain"].add(key)
+            self._add_source_stage_stats(page_index_invalidations=1)
+            return ""
+        state["page_index_paths"][key] = built
+        return built
 
     def _pin_source_snapshot(self, rel_path, path):
         state = self._source_snapshot_state()
@@ -1279,17 +1433,43 @@ class WeChatDB:
                 select_sql = ", ".join(select_fields)
                 if after_cursor is not None and page_forward:
                     after_timestamp, after_rowid = after_cursor
-                    rows = conn.execute(f"""
-                        SELECT {select_sql}
-                        FROM [{table_name}]
-                        WHERE create_time > ?
-                           OR (create_time = ? AND rowid > ?)
-                        ORDER BY create_time ASC, rowid ASC
-                        LIMIT ?
-                    """, (
-                        int(after_timestamp), int(after_timestamp),
-                        int(after_rowid), max(1, int(limit)),
-                    )).fetchall()
+                    page_limit = max(1, int(limit))
+                    index_path = self._ensure_page_index(db_path, table_name, conn)
+                    indexed = bool(index_path) and self._attach_page_index(
+                        conn, index_path
+                    )
+                    try:
+                        if indexed:
+                            # Seek the bounded key-only index for this page's
+                            # exact (create_time, rowid) window, then fetch the
+                            # rows by primary key, avoiding a full-table scan.
+                            rows = conn.execute(f"""
+                                SELECT {select_sql}
+                                FROM [{table_name}]
+                                WHERE rowid IN (
+                                    SELECT rid
+                                    FROM [{self.PAGE_INDEX_SCHEMA}].[{self.PAGE_INDEX_TABLE}]
+                                    WHERE (ct, rid) > (?, ?)
+                                    ORDER BY ct ASC, rid ASC
+                                    LIMIT ?
+                                )
+                                ORDER BY create_time ASC, rowid ASC
+                            """, (
+                                int(after_timestamp), int(after_rowid), page_limit,
+                            )).fetchall()
+                        else:
+                            rows = conn.execute(f"""
+                                SELECT {select_sql}
+                                FROM [{table_name}]
+                                WHERE (create_time, rowid) > (?, ?)
+                                ORDER BY create_time ASC, rowid ASC
+                                LIMIT ?
+                            """, (
+                                int(after_timestamp), int(after_rowid), page_limit,
+                            )).fetchall()
+                    finally:
+                        if indexed:
+                            self._detach_page_index(conn)
                 elif since_ts > 0:
                     order = "ASC" if page_forward else "DESC"
                     comparison = ">=" if since_inclusive else ">"
@@ -1495,6 +1675,16 @@ class WeChatDB:
         pinned = state["paths"].pop(rel_key, "")
         state["generations"].pop(rel_key, None)
         if pinned:
+            for key in tuple(state["page_index_seen"]):
+                if key[0] == os.path.abspath(pinned):
+                    index_path = state["page_index_paths"].pop(key, None)
+                    state["page_index_seen"].pop(key, None)
+                    state["page_index_plain"].discard(key)
+                    if index_path:
+                        try:
+                            os.unlink(index_path)
+                        except FileNotFoundError:
+                            pass
             try:
                 os.unlink(pinned)
             except OSError:

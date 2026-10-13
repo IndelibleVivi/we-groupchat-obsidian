@@ -153,6 +153,21 @@ concurrency；per-cycle delta 按当前 worker 归属，不会把另一条重叠
 monitor/resource cycle 最多输出一条 path-free、content-free summary。Resource summary 还会报告本轮
 真正 atomic publish 的本地 projection file 数量与 encoded bytes；内容不变时两项都为零。
 
+### 无 create_time 索引 shard 的 keyset page index
+
+部分 message table 没有可用于 `(create_time, rowid)` 的索引，逐页查询会反复扫描和排序。
+同一 snapshot 内第二次读取该表时，reader 先检查 SQLite 能否使用现有 native index seek；
+若不能且时间列为 integer affinity，则在私有 cache 派生 key-only index，后续连接只读 attach。
+每页先 seek 有界的 key window，再按主键取原始行。未知时间类型保持源表原有比较语义；
+只取一页时不构建索引。
+
+缓存绑定 **snapshot × shard path × chat table**，同一 shard 中不同群不能共用 keys。
+原始数据库和已 pin 的来源都保持只读，不修改 source schema。每次构建使用独立临时文件；
+snapshot 退出、generation pin 丢弃或构建中断都会清理它。SQLite build/attach 失败退回原有界查询，
+私有目录验证失败则在写入前停止。key-only cache 不保存消息正文。`source_stage_stats()` 提供
+`page_index_builds`、`page_index_bytes`、`page_index_seconds`、`page_index_hits` 和
+`page_index_invalidations`。
+
 macOS menu app 会在 daemon worker 上准备依赖来源的群聊列表与 update count，再把已经准备完整的
 menu/dialog 数据交回 AppKit main thread。重复的 chat-menu refresh trigger 会合并成一轮正在运行的
 pass 加至多一轮 pending pass，因此 UI 操作不会堆出无界 source-reader queue。

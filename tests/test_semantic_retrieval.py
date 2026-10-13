@@ -1,11 +1,15 @@
 import unittest
+from unittest.mock import patch
 import tempfile
+import json
+import tracemalloc
+import uuid
 from pathlib import Path
 from dataclasses import replace
 from contextlib import closing
 
 from ai.semantic_provider import EmbeddingProfile, EmbeddingResult, ProviderError, ProviderRoute
-from ai.vector_index import LocalCosineIndex
+from ai.vector_index import IndexReceipt, LocalCosineIndex, VectorRecord
 from core.semantic.store import SemanticStore
 from core.semantic.retrieval import HybridRetriever
 from tests.test_semantic_engine import FakeDecision, FakeText, SemanticEngine, capture
@@ -129,6 +133,48 @@ class HybridIntegrationTests(unittest.TestCase):
         self.assertEqual(result.hits[0].text, "需要找到的隐藏细节")
         self.assertIn("dense", result.hits[0].channels)
         self.assertEqual(len([call for call in embeddings.calls if call[0] == "document"]), 1)
+        with patch.object(reopened, "_receipt", side_effect=AssertionError("confirmed payload rehydrated twice")):
+            self.assertEqual(reopened.search("synonym").hits[0].text, "需要找到的隐藏细节")
+
+    def test_index_metadata_and_confirmed_prefix_do_not_materialize_all_vectors(self):
+        profile = EmbeddingProfile("synthetic", "large-fixture", 1024)
+        index = LocalCosineIndex()
+        self.addCleanup(index.close)
+        search = HybridRetriever(self.store, vector_index=index, profile=profile)
+        values = tuple((offset + 1) / 1025 for offset in range(1024))
+        artifact = json.dumps({"vector": values})
+        expected = set()
+        with search._db() as db:
+            for i in range(2048):
+                identity = str(uuid.UUID(int=i + 1))
+                expected.add(identity)
+                record = VectorRecord(identity, values)
+                receipt = IndexReceipt("local", profile.profile_id, self.store.generation_id,
+                                       str(uuid.uuid4()), (record,), True, index.index_identity)
+                db.execute("INSERT INTO embedding_records VALUES(?,?,?,?,?,?,?,?)",
+                           (identity, profile.profile_id, self.store.generation_id, "doc:" + identity, 1,
+                            "f" * 64, artifact, "synthetic-job"))
+                db.execute("INSERT INTO semantic_index_receipts(intent_id,profile_id,generation_id,index_identity,status,records_json,receipt_json) VALUES(?,?,?,?,?,?,?)",
+                           (str(uuid.uuid4()), profile.profile_id, self.store.generation_id, index.index_identity,
+                            "indexed", json.dumps([{"id": identity, "values": values}]), json.dumps(receipt.to_dict())))
+            db.commit()
+        tracemalloc.start()
+        try:
+            metadata = search._embeddings()
+            self.assertEqual(set(metadata), expected)
+            self.assertEqual(search._confirmed_ids(), expected)
+            self.assertLess(tracemalloc.get_traced_memory()[1], 16 * 1024 * 1024)
+        finally:
+            tracemalloc.stop()
+        with search._db() as db:
+            # A later malformed vector cannot be read by an earlier bounded
+            # publication page. The canonical owner will reject that later page.
+            last = str(uuid.UUID(int=2048))
+            db.execute("UPDATE embedding_records SET artifact_json='invalid' WHERE vector_id=?", (last,))
+            db.commit()
+        first = tuple(search._vectors(sorted(expected)[:3]))
+        self.assertEqual(len(first), 3)
+        self.assertTrue(all(row.values == values for row in first))
 
     def test_unknown_mutation_is_not_resent_but_local_evidence_remains(self):
         class UncertainIndex(LocalCosineIndex):

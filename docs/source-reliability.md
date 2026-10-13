@@ -194,6 +194,26 @@ resource summary also reports the count and encoded byte size of local
 projection files that were actually atomically published; unchanged output
 contributes zero.
 
+### Keyset page index for unindexed source shards
+
+Some message tables have no usable index for `(create_time, rowid)`, so each
+keyset page would scan and sort the table again. On a table's second page within
+one snapshot, the reader checks whether SQLite already supports a native seek.
+Otherwise, for an integer-time table, it builds one private key-only index and
+attaches it read-only to subsequent page connections. Each page seeks a bounded
+key window and fetches source rows by primary key. Unknown time affinities keep
+the source's own query semantics; single-page reads do not build an index.
+
+The cache is bound to **snapshot, shard path and chat table**. Separate tables
+in the same shard cannot share keys. The original and pinned source databases
+remain read-only, with no source schema migration. The temporary file is unique
+per build and is removed on snapshot exit, generation-pin discard or interrupted
+construction. SQLite build/attach failures fall back to the bounded source
+query; private-directory validation failures stop before writing. No whole
+message bodies enter the key-only cache. `source_stage_stats()` exposes
+`page_index_builds`, `page_index_bytes`, `page_index_seconds`, `page_index_hits`
+and `page_index_invalidations`.
+
 The macOS menu app prepares source-backed chat lists and update counts on daemon
 workers, then sends only prepared menu/dialog data to the AppKit main thread.
 Repeated chat-menu refresh triggers coalesce into one running pass plus at most

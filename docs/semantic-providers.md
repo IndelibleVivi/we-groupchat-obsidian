@@ -261,9 +261,19 @@ requirement. There is no automatic fallback or same-phase retry.
   `confirm(receipt, *, profile, request_id)` returns a new receipt;
   `query(vector, *, profile, generation_id, top_k=10, request_id)` returns
   matches. Receipts must be durably saved by the caller before confirmation.
-- `LocalCosineIndex()` is a standard-library, rebuildable in-memory index.
-  Upsert is immediately indexed. It isolates generation and profile and does
-  not claim durability; hydrate it from canonical SQLite when needed.
+- `LocalCosineIndex()` is a standard-library, rebuildable disk cache in a
+  platform-verified private temporary directory. It stores exact float64
+  values, caps each upsert at 1,000 records, and scans one vector at a time
+  with a bounded top-k heap and a 2 MiB SQLite page cache. Upsert is immediately
+  indexed. It isolates generation and profile and does not claim durability;
+  hydrate it from canonical SQLite receipts after restart. `close()` and
+  ordinary object cleanup remove the owned cache; forced process termination
+  may leave a private disposable temporary directory. Its disk use grows with
+  vector count and dimension; vectors are not retained as a full Python graph.
+  The retriever retains embedding metadata, reads vector payloads in pages of
+  at most 100, and hydrates each confirmed receipt once per retriever lifetime.
+  Provider calls never hold those read connections. Metadata/document memory
+  still grows with corpus size; this is not a fixed RAM cap for the whole app.
 - `CloudflareVectorizeIndex(client, index_name, *, pending_receipt_check=None)`
   uses Vectorize v2. Upsert requires a callback
   `pending_receipt_check(index_identity) -> bool`: `True` means a durable
@@ -280,7 +290,8 @@ requirement. There is no automatic fallback or same-phase retry.
   isolate reused object IDs. Query results must match both bindings and be
   known to this index's confirmed receipts before entering downstream work.
   `restore_receipt(receipt)` restores that verification map or pending guard
-  after restart.
+  after restart. The confirmed map retains opaque IDs and exact-value digests,
+  rather than copies of every confirmed vector.
   Each confirmation poll or repeated query is a new HTTP operation and needs
   a fresh `request_id`; persist the upsert's original request/receipt identity.
   The adapter never polls or resends automatically.

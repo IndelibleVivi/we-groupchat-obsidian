@@ -3,12 +3,17 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 import hashlib
+import heapq
 import math
+from pathlib import Path
 import re
+import sqlite3
 import struct
+import tempfile
 import threading
 from typing import Protocol, Sequence
 import uuid
+import weakref
 
 from .semantic_provider import EmbeddingProfile, ProviderError, finite_number, json_bytes, validate_vector
 
@@ -137,21 +142,83 @@ class VectorIndex(Protocol):
 
 
 class LocalCosineIndex:
-    """Standard-library exact cosine scan, hydrated from canonical SQLite."""
+    """Disk-backed exact cosine scan, hydrated from canonical SQLite receipts.
+
+    This private process-local cache is disposable. It never owns canonical
+    progress, and holds at most one vector plus top-k scores during a query.
+    """
 
     def __init__(self):
-        self._vectors = {}
         self._lock = threading.RLock()
         self.index_identity = hashlib.sha256(b"wgo-local-cosine-v1").hexdigest()
+        self._cache_directory = None
+        self._connection = self._cleanup = None
+        self._closed = False
+
+    def prepare_cache(self, directory):
+        """Use the canonical store's private area before creating derived bytes."""
+        with self._lock:
+            if self._connection is None:
+                self._cache_directory = Path(directory).resolve()
+
+    def _ensure_cache(self):
+        if self._closed:
+            raise ProviderError("vector_index_closed")
+        if self._connection is not None:
+            return
+        from core.platform import create_platform_services
+        temporary = tempfile.TemporaryDirectory(prefix="wgo-vectors-", dir=self._cache_directory)
+        connection = None
+        try:
+            directory = Path(temporary.name).resolve()
+            services = create_platform_services()
+            services.require("private_storage").ensure_directory(directory)
+            path = directory / "vectors.sqlite"
+            services.require("atomic_publisher").write_bytes(path, b"")
+            connection = sqlite3.connect(path, check_same_thread=False)
+            connection.execute("PRAGMA cache_size=-2048")
+            connection.execute("PRAGMA mmap_size=0")
+            connection.execute("CREATE TABLE vectors(profile TEXT,generation TEXT,id TEXT,values_blob BLOB NOT NULL,PRIMARY KEY(profile,generation,id)) WITHOUT ROWID")
+            connection.commit()
+        except BaseException:
+            if connection is not None:
+                connection.close()
+            temporary.cleanup()
+            raise
+        self._connection = connection
+        self._cleanup = weakref.finalize(self, self._dispose, connection, temporary)
+
+    @staticmethod
+    def _dispose(connection, temporary):
+        try:
+            connection.close()
+        finally:
+            temporary.cleanup()
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            if self._cleanup is not None:
+                self._cleanup()
+
+    @staticmethod
+    def _packed(values):
+        return struct.pack("!" + "d" * len(values), *(0. if value == 0 else value for value in values))
 
     def upsert(self, records, *, profile, generation_id, request_id):
+        if isinstance(records, (tuple, list)) and len(records) > 1000:
+            raise ProviderError("vector_batch_limit")
         records = _records(records, profile, generation_id)
-        key = (profile.profile_id, generation_id)
         with self._lock:
-            existing = self._vectors.get(key, {})
-            if any(row.id in existing and existing[row.id] != row.values for row in records):
-                raise ProviderError("vector_immutable_id_conflict")
-            self._vectors.setdefault(key, {}).update({row.id: row.values for row in records})
+            self._ensure_cache()
+            with self._connection as db:
+                for row in records:
+                    key = (profile.profile_id, generation_id, row.id)
+                    previous = db.execute("SELECT values_blob FROM vectors WHERE profile=? AND generation=? AND id=?", key).fetchone()
+                    packed = self._packed(row.values)
+                    if previous and previous[0] != packed:
+                        raise ProviderError("vector_immutable_id_conflict")
+                    db.execute("INSERT OR IGNORE INTO vectors VALUES(?,?,?,?)", (*key, packed))
         return IndexReceipt("local", profile.profile_id, generation_id, str(uuid.uuid4()),
                             records, True, self.index_identity)
 
@@ -162,8 +229,11 @@ class LocalCosineIndex:
             raise ProviderError("vector_receipt_binding_mismatch")
         records = _records(receipt.records, profile, receipt.generation_id)
         with self._lock:
-            current = self._vectors.get((profile.profile_id, receipt.generation_id), {})
-            complete = all(current.get(row.id) == row.values for row in records)
+            self._ensure_cache()
+            complete = all(self._connection.execute(
+                "SELECT values_blob FROM vectors WHERE profile=? AND generation=? AND id=?",
+                (profile.profile_id, receipt.generation_id, row.id)).fetchone() == (self._packed(row.values),)
+                for row in records)
         return replace(receipt, indexed=complete)
 
     def query(self, vector, *, profile, generation_id, top_k=10, request_id):
@@ -171,14 +241,17 @@ class LocalCosineIndex:
         _generation(generation_id)
         vector = validate_vector(vector, profile)
         norm = math.hypot(*vector)
+        def scores():
+            for identifier, packed in self._connection.execute(
+                    "SELECT id,values_blob FROM vectors WHERE profile=? AND generation=?",
+                    (profile.profile_id, generation_id)):
+                values = struct.unpack("!" + "d" * profile.dimensions, packed)
+                other_norm = math.hypot(*values)
+                score = math.fsum((left / norm) * (right / other_norm) for left, right in zip(vector, values))
+                yield VectorMatch(identifier, max(-1., min(1., score)))
         with self._lock:
-            rows = tuple(self._vectors.get((profile.profile_id, generation_id), {}).items())
-        scores = []
-        for identifier, values in rows:
-            other_norm = math.hypot(*values)
-            score = math.fsum((left / norm) * (right / other_norm) for left, right in zip(vector, values))
-            scores.append(VectorMatch(identifier, max(-1., min(1., score))))
-        return tuple(sorted(scores, key=lambda row: (-row.score, row.id))[:top_k])
+            self._ensure_cache()
+            return tuple(heapq.nsmallest(top_k, scores(), key=lambda row: (-row.score, row.id)))
 
 
 class CloudflareVectorizeIndex:
@@ -205,6 +278,10 @@ class CloudflareVectorizeIndex:
     @staticmethod
     def _remote_id(profile_id, generation_id, identifier):
         return hashlib.sha256((profile_id + ":" + generation_id + ":" + _opaque_id(identifier)).encode()).hexdigest()
+
+    @staticmethod
+    def _record_identity(record):
+        return record.id, hashlib.sha256(LocalCosineIndex._packed(record.values)).digest()
 
     @staticmethod
     def _request_id(request_id, operation):
@@ -268,7 +345,7 @@ class CloudflareVectorizeIndex:
         with self._lock:
             for row, payload in zip(records, rows):
                 old = self._confirmed.get(payload["id"])
-                if old is not None and old.values != row.values:
+                if old is not None and old != self._record_identity(row):
                     raise ProviderError("vector_immutable_id_conflict")
         self._verify_index(profile, generation_id, request_id)
         # Match Cloudflare's maintained Wrangler client: multipart `vectors`,
@@ -342,7 +419,8 @@ class CloudflareVectorizeIndex:
                     raise ProviderError("vector_mutation_pending")
                 self._pending_mutation = receipt.mutation_id
             return
-        pending = {self._remote_id(receipt.profile_id, receipt.generation_id, row.id): row for row in receipt.records}
+        pending = {self._remote_id(receipt.profile_id, receipt.generation_id, row.id): self._record_identity(row)
+                   for row in receipt.records}
         with self._lock:
             if any(key in self._confirmed and self._confirmed[key] != row for key, row in pending.items()):
                 raise ProviderError("vector_immutable_id_conflict")
@@ -364,19 +442,19 @@ class CloudflareVectorizeIndex:
         if type(result.get("count")) is not int or result["count"] != len(rows) or len(rows) > top_k:
             raise ProviderError("vector_query_count_mismatch")
         output, seen = [], set()
-        with self._lock:
-            confirmed = dict(self._confirmed)
         for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("id"), str) or row["id"] in seen:
                 raise ProviderError("vector_query_ids_mismatch")
             if row.get("namespace") != namespace or row.get("metadata") != metadata:
                 raise ProviderError("vector_query_binding_mismatch")
-            if row["id"] not in confirmed:
+            with self._lock:
+                confirmed = self._confirmed.get(row["id"])
+            if confirmed is None:
                 raise ProviderError("vector_query_unconfirmed")
-            record = confirmed[row["id"]]
-            if self._remote_id(profile.profile_id, generation_id, record.id) != row["id"]:
+            identifier, _fingerprint = confirmed
+            if self._remote_id(profile.profile_id, generation_id, identifier) != row["id"]:
                 raise ProviderError("vector_query_binding_mismatch")
             score = finite_number(row.get("score"), low=-1.000001, high=1.000001, code="vector_invalid_score")
             seen.add(row["id"])
-            output.append(VectorMatch(record.id, max(-1., min(1., score))))
+            output.append(VectorMatch(identifier, max(-1., min(1., score))))
         return tuple(sorted(output, key=lambda row: (-row.score, row.id)))

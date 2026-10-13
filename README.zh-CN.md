@@ -46,6 +46,8 @@ SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务
 都使用本地服务，并配本地索引；只选本地索引不会改变其他模型的数据边界。
 也可由操作员用 SSH tunnel 将 loopback embedding adapter 接到已授权的自托管服务器；
 此时文本会离开 Mac，索引仍可留在 Mac，详见 [provider 数据边界](docs/semantic-providers.md)。
+本地 cosine 使用可从 SQLite receipts 重建的私有临时磁盘缓存，分批读取向量，
+查询只保留 top-k；需要预留本机磁盘空间，不将全部向量常驻 Python 内存。
 文本生成、结构化判断与 embedding 分开配置。Provider ledger 保存 usage、reservation、明确预算证据和
 未知结果；程序不会自行建账户、建索引或获得消费授权。
 

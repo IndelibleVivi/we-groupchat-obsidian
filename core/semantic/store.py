@@ -128,7 +128,19 @@ class SemanticStore:
             conn.execute("PRAGMA synchronous=FULL")
         except sqlite3.DatabaseError as exc:
             conn.close()
-            raise SemanticStoreError("semantic_database_invalid") from exc
+            # Busy, full and I/O failures do not prove corruption. Preserve the
+            # SQLite result class without exposing its path-bearing message.
+            result = getattr(exc, "sqlite_errorcode", None)
+            primary = result & 0xff if type(result) is int else None
+            code = {
+                sqlite3.SQLITE_BUSY: "semantic_database_busy",
+                sqlite3.SQLITE_LOCKED: "semantic_database_busy",
+                sqlite3.SQLITE_FULL: "semantic_storage_full",
+                sqlite3.SQLITE_IOERR: "semantic_database_io_error",
+                sqlite3.SQLITE_CORRUPT: "semantic_database_invalid",
+                sqlite3.SQLITE_NOTADB: "semantic_database_invalid",
+            }.get(primary, "semantic_database_unavailable")
+            raise SemanticStoreError(code) from exc
         return conn
 
     @contextmanager

@@ -5,6 +5,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 import hashlib
+from itertools import islice
 import json
 import math
 import re
@@ -254,7 +255,10 @@ class HybridRetriever:
         self.jobs = jobs or JobStore(store)
         self.worker_id = worker_id or str(uuid.uuid4())
         self._active_intent = None
+        self._hydrated_intents = set()
         database_parent = Path(store.path).parent
+        if isinstance(self.index, LocalCosineIndex):
+            self.index.prepare_cache(database_parent)
         if shared_lock_root is None:
             shared_lock_root = (database_parent.parent.parent / "index-locks"
                                 if database_parent.parent.name == "generations" else database_parent / "index-locks")
@@ -363,24 +367,47 @@ class HybridRetriever:
 
     def _receipts(self):
         if self.profile is None or self.index is None:
-            return []
-        with self._db() as db:
-            return [dict(row) for row in db.execute(
-                "SELECT * FROM semantic_index_receipts WHERE profile_id=? AND generation_id=? AND index_identity=? ORDER BY sequence",
-                (self.profile.profile_id, self.store.generation_id, self.index.index_identity))]
+            return
+        # Close each bounded read before callers perform provider/index work.
+        # Metadata consumers must not load every receipt's vector arrays.
+        fields = ("sequence,intent_id,status,receipt_json IS NOT NULL AS has_receipt,"
+                  "(SELECT json_group_array(json_extract(value,'$.id')) FROM json_each(records_json)) AS record_ids_json")
+        sequence = 0
+        while True:
+            with self._db() as db:
+                page = [dict(row) for row in db.execute(
+                    f"SELECT {fields} FROM semantic_index_receipts WHERE profile_id=? AND generation_id=? AND index_identity=? AND sequence>? ORDER BY sequence LIMIT 100",
+                    (self.profile.profile_id, self.store.generation_id, self.index.index_identity, sequence))]
+            if not page:
+                return
+            for row in page:
+                sequence = row["sequence"]
+                yield row
 
     def _hydrate(self):
         if self.profile is None or self.index is None:
             return
         for row in self._receipts():
-            if row["receipt_json"] is None:
+            if not row["has_receipt"]:
                 continue
-            receipt = IndexReceipt.from_dict(json.loads(row["receipt_json"]))
+            if row["intent_id"] in self._hydrated_intents:
+                continue
+            receipt = self._receipt(row["intent_id"])
             if isinstance(self.index, LocalCosineIndex) and receipt.indexed:
                 self.index.upsert(receipt.records, profile=self.profile, generation_id=self.store.generation_id,
                                   request_id="hydrate:" + row["intent_id"])
             elif hasattr(self.index, "restore_receipt"):
                 self.index.restore_receipt(receipt)
+            if receipt.indexed:
+                self._hydrated_intents.add(row["intent_id"])
+
+    def _receipt(self, intent_id):
+        with self._db() as db:
+            row = db.execute("SELECT receipt_json FROM semantic_index_receipts WHERE intent_id=? AND profile_id=? AND generation_id=? AND index_identity=?",
+                             (intent_id, self.profile.profile_id, self.store.generation_id, self.index.index_identity)).fetchone()
+        if row is None or row[0] is None:
+            raise SemanticValidationError("search_pending_guard_receipt_missing")
+        return IndexReceipt.from_dict(json.loads(row[0]))
 
     def documents(self):
         documents = []
@@ -461,8 +488,21 @@ class HybridRetriever:
             return {}
         with self._db() as db:
             return {row["vector_id"]: dict(row) for row in db.execute(
-                "SELECT * FROM embedding_records WHERE profile_id=? AND generation_id=?",
+                "SELECT vector_id,profile_id,generation_id,document_id,document_revision,fingerprint,job_id FROM embedding_records WHERE profile_id=? AND generation_id=?",
                 (self.profile.profile_id, self.store.generation_id))}
+
+    def _vectors(self, identities):
+        """Hydrate only a bounded publication/query page, never the whole index."""
+        iterator = iter(identities)
+        while page := tuple(islice(iterator, 100)):
+            with self._db() as db:
+                rows = {row["vector_id"]: row["artifact_json"] for row in db.execute(
+                    "SELECT vector_id,artifact_json FROM embedding_records WHERE profile_id=? AND generation_id=? AND vector_id IN (" + ",".join("?" for _ in page) + ")",
+                    (self.profile.profile_id, self.store.generation_id, *page))}
+            for identity in page:
+                if identity not in rows:
+                    raise SemanticValidationError("search_embedding_missing")
+                yield VectorRecord(identity, tuple(json.loads(rows.pop(identity))["vector"]))
 
     def _provider_artifact(self, kind, texts, purpose):
         if self.embedding_provider is None or self.profile is None:
@@ -539,7 +579,7 @@ class HybridRetriever:
                           "artifact_json": _json({"vector": artifact["vectors"][0], "route": artifact["route"]}),
                           "job_id": job["job_id"]}
                 db.execute("INSERT OR IGNORE INTO embedding_records VALUES(?,?,?,?,?,?,?,?)", tuple(record.values()))
-                inserted[vector_id] = record
+                inserted[vector_id] = {key: value for key, value in record.items() if key != "artifact_json"}
             db.commit()
         with prepared.lock:
             prepared.rows.update(inserted)
@@ -567,12 +607,12 @@ class HybridRetriever:
             if self._has_pending_receipt(self.index.index_identity):
                 return {"embedded": len(pending), "indexed": 0, "pending": self._index_remaining(preparation)}
             rows = preparation.rows
-            already_submitted = {record["id"] for row in self._receipts() if row["status"] != "cancelled"
-                                 for record in json.loads(row["records_json"])}
+            already_submitted = {identity for row in self._receipts() if row["status"] != "cancelled"
+                                 for identity in json.loads(row["record_ids_json"])}
             current = preparation.current
-            records = tuple(VectorRecord(vector_id, tuple(json.loads(row["artifact_json"])["vector"]))
-                            for vector_id, row in rows.items()
-                            if vector_id not in already_submitted and current.get(row["document_id"]) == row["fingerprint"])[:limit]
+            identities = islice((vector_id for vector_id, row in rows.items()
+                                 if vector_id not in already_submitted and current.get(row["document_id"]) == row["fingerprint"]), limit)
+            records = tuple(self._vectors(identities))
             if not records:
                 return {"embedded": len(pending), "indexed": 0, "pending": self._index_remaining(preparation)}
             intent = str(uuid.uuid4())
@@ -624,9 +664,9 @@ class HybridRetriever:
         result = []
         with self._index_lock():
             for row in self._receipts():
-                if row["status"] != "pending" or row["receipt_json"] is None:
+                if row["status"] != "pending" or not row["has_receipt"]:
                     continue
-                receipt = IndexReceipt.from_dict(json.loads(row["receipt_json"]))
+                receipt = self._receipt(row["intent_id"])
                 confirmed = self.index.confirm(receipt, profile=self.profile, request_id=str(uuid.uuid4()))
                 self._validate_receipt(confirmed, receipt.records)
                 if confirmed.mutation_id != receipt.mutation_id:
@@ -645,9 +685,9 @@ class HybridRetriever:
         for row in self._receipts():
             if row["status"] == "cancelled":
                 continue
-            if row["status"] != "indexed" or row["receipt_json"] is None:
+            if row["status"] != "indexed" or not row["has_receipt"]:
                 break
-            confirmed.update(record["id"] for record in json.loads(row["records_json"]))
+            confirmed.update(json.loads(row["record_ids_json"]))
         return confirmed
 
     def _coverage(self, documents, *, unknown=()):
@@ -767,9 +807,8 @@ class HybridRetriever:
                                 if match.id in confirmed and match.id in current}
                 # Every current canonical embedding outside the confirmed prefix
                 # is scored locally, including pending remote mutations.
-                for identity, row in current.items():
-                    if identity not in confirmed or self.index is None:
-                        dense_scores[row["document_id"]] = _cosine(query_vector, json.loads(row["artifact_json"])["vector"])
+                for record in self._vectors(identity for identity in current if identity not in confirmed or self.index is None):
+                    dense_scores[current[record.id]["document_id"]] = _cosine(query_vector, record.values)
                 dense = sorted(dense_scores.items(), key=lambda pair: (-pair[1], pair[0]))[:dense_limit]
             except (ProviderError, SemanticValidationError) as exc:
                 reasons.append(exc.code)

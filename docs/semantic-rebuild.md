@@ -199,6 +199,10 @@ receipt、source capture receipt 和 verification manifest 保存在同一私有
 正文时再 decode。此优化不降低冻结、来源完整性或 canonical conservation 验证。
 Legacy inventory 的身份校验也按 canonical JSON chunks 计算，保持既有 digest；
 单次 backup/navigation 操作复用其已算身份，不在每个旧页面上重算全库。
+本地 cosine 的向量保存在私有临时 SQLite 磁盘缓存；索引准备只保留 metadata，
+发布／未索引尾部检索分批读取至多 100 个向量，查询只保留 top-k。
+Canonical embedding 与确认 receipt 仍是恢复依据；普通关闭清理临时缓存，
+强制终止可能留下私有临时目录。需为缓存预留磁盘，不能把减少 RAM 理解为零磁盘成本。
 
 旧内联 journal 必须在 run lock 内逐块转换。可先独立执行以下操作；它只升级
 本地 journal 存储，不读微信、不调用 provider、不停止或激活 app：
@@ -338,6 +342,8 @@ Rollback 只在 current bytes 仍等于已发布 candidate 时恢复原 WGO byte
 | --- | --- |
 | budget unconfirmed/expired、额度或 unknown reservation 阻断 | 核对账户和原 request evidence；不盲目创建新 request 绕过账本。 |
 | source inventory/pending proof 不一致 | 保留旧 checkpoint/intent，按既有 source recovery 契约处理；不能 reset。 |
+| semantic_database_busy / semantic_storage_full / semantic_database_io_error | 分别检查竞争连接、可用磁盘或存储 I/O；它们不代表数据库已损坏。保留同一 run 和已提交 captures，排除原因后恢复。 |
+| semantic_database_invalid / semantic_database_unavailable | 前者是 SQLite 明确的 corrupt/not-a-database 分类，后者表示尚未分类的连接失败；先对精确 generation 做只读完整性检查，不能删除数据库重建来掩盖失败。旧版本将所有连接初始化错误都标为 invalid，历史记录本身不能证明损坏。 |
 | semantic pending、unclassified 或 Brief review/deferred | 检查私有 accepted job/attempt 证据，在同一 run 恢复；不得改成 noise/silent。 |
 | index confirmation pending | 保留 mutation receipt，下一次恢复确认精确 mutation；不重复 upsert。 |
 | projection conflict 或个人编辑 | 使用 reader owner 的明确冲突处置；原 bytes、backup 和 draft 都保留。 |

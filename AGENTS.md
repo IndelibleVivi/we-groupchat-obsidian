@@ -182,7 +182,11 @@
 - `core/semantic/retrieval.py` combines lexical, dense and structural candidates
   with the unindexed canonical tail. Local cosine and remote Vectorize are
   selectable derived indexes; neither decides canonical merges. Embedding model,
-  dimension, profile and generation identities cannot mix. `ai/local_embedding_provider.py`
+  dimension, profile and generation identities cannot mix. Local cosine uses a
+  private disposable disk cache hydrated from canonical receipts, with bounded
+  vector reads and top-k query memory. Preparation keeps vector metadata only;
+  never restore a whole-corpus vector/receipt payload cache in Python.
+  `ai/local_embedding_provider.py`
   owns explicit loopback OpenAI-compatible/Ollama embedding without proxy, redirects
   or fallback; its endpoint/API/context limits are profile identity. Cloudflare
   embedding remains a network route even with a local index. Only selected
@@ -300,8 +304,13 @@
   records; DB/WAL/key/published-payload identity changes still invalidate them.
   One bounded traversal reuses its thread-local inventory/spec snapshot, while
   explicit final inventory verification remains a fresh observation. Traversals
-  may interleave only at public-page boundaries. Same-source inventory, decrypt,
-  snapshot and page work share one reentrant in-process gate that must cover each
+  may interleave only at public-page boundaries.
+  Snapshot keyset acceleration uses private, disposable key-only indexes bound
+  to the exact pinned shard and chat table. Native index seeks stay direct;
+  snapshot exit, pin discard and interrupted construction clean derived files.
+  Never add indexes to original or hard-linked published source databases.
+  Same-source inventory, decrypt, snapshot and page work share one reentrant
+  in-process gate that must cover each
   public page's first-pin generation binding plus read-only query/decode body and
   be released before provider/network, attachment resolution or projection work.
   Validate the live DB/key generation before and after the first pin; a mismatch

@@ -61,6 +61,9 @@ evidence and unknown-outcome recovery.
 An operator-managed SSH tunnel can connect the loopback embedding adapter to an
 authorized self-hosted server; text then leaves the Mac, while the local index
 stays on it. See the [provider data boundary](docs/semantic-providers.md).
+The local cosine index uses a private temporary disk cache rebuilt from SQLite
+receipts, with bounded vector reads and top-k query memory. Allow local disk
+space for that cache; it does not load the full vector collection into RAM.
 The app does not create a Cloudflare account, provision an index or grant spending.
 
 Existing installations use the [first-migration runbook](docs/semantic-rebuild.md).

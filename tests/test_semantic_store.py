@@ -5,6 +5,7 @@ from contextlib import closing
 from dataclasses import asdict
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 import uuid
 from pathlib import Path
 
@@ -25,6 +26,31 @@ class SemanticStoreTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_connection_errors_do_not_mislabel_operational_failures_as_corruption(self):
+        cases = (
+            (sqlite3.SQLITE_BUSY, "semantic_database_busy"),
+            (sqlite3.SQLITE_LOCKED, "semantic_database_busy"),
+            (sqlite3.SQLITE_FULL, "semantic_storage_full"),
+            (sqlite3.SQLITE_IOERR | (2 << 8), "semantic_database_io_error"),
+            (sqlite3.SQLITE_CORRUPT, "semantic_database_invalid"),
+            (sqlite3.SQLITE_NOTADB, "semantic_database_invalid"),
+            (None, "semantic_database_unavailable"),
+        )
+        for result, expected in cases:
+            with self.subTest(result=result):
+                failure = sqlite3.DatabaseError("private path or content must not surface")
+                if result is not None:
+                    failure.sqlite_errorcode = result
+                connection = Mock()
+                connection.execute.side_effect = failure
+                with patch("core.semantic.store.sqlite3.connect", return_value=connection):
+                    with self.assertRaises(SemanticStoreError) as raised:
+                        self.store.connect()
+                self.assertEqual(raised.exception.code, expected)
+                self.assertIs(raised.exception.__cause__, failure)
+                self.assertNotIn("private", str(raised.exception))
+                connection.close.assert_called_once_with()
 
     def accept(self, artifact, kind="test", inputs=None, versions=None):
         self.number += 1

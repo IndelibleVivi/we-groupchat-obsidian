@@ -32,3 +32,8 @@ The locked `compact-journal` command upgrades interrupted inline v1 runs without
 starting source/model processing; original bytes remain available for recovery.
 This is source capability, not evidence that any private run has been converted
 or activated. See the migration runbook for limits and recovery.
+
+Local cosine now keeps vectors in a private disposable SQLite disk cache, and
+retrieval reads bounded vector payload pages instead of retaining all vectors
+and receipt payloads in Python. This candidate change does not establish a
+whole-migration RAM bound or real private-data acceptance.

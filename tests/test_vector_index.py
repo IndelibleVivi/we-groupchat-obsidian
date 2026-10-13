@@ -2,6 +2,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
+import tracemalloc
 import unittest
 import uuid
 
@@ -89,6 +90,46 @@ class VectorIndexTests(unittest.TestCase):
         index.upsert([self.record], profile=self.profile, generation_id="g1", request_id="first")
         with self.assertRaisesRegex(ProviderError, "vector_immutable_id_conflict"):
             index.upsert([replace(self.record, values=(0., 1., 0.))], profile=self.profile, generation_id="g1", request_id="second")
+
+    def test_local_cache_is_private_disposable_and_memory_does_not_scale_with_vectors(self):
+        index = LocalCosineIndex()
+        self.addCleanup(index.close)
+        profile = EmbeddingProfile("synthetic", "large-fixture", 1024, normalization="none")
+        tracemalloc.start()
+        try:
+            for start in range(0, 2048, 64):
+                records = [VectorRecord(str(uuid.UUID(int=i + 1)),
+                            tuple((i + offset + 1) / 10000 for offset in range(1024)))
+                           for i in range(start, start + 64)]
+                index.upsert(records, profile=profile, generation_id="g", request_id=str(start))
+            del records
+            retained, peak = tracemalloc.get_traced_memory()
+            self.assertLess(retained, 8 * 1024 * 1024)
+            self.assertLess(peak, 16 * 1024 * 1024)
+            result = index.query(tuple(1. for _ in range(1024)), profile=profile, generation_id="g", top_k=5, request_id="q")
+            self.assertEqual(len(result), 5)
+            self.assertEqual(result, tuple(sorted(result, key=lambda row: (-row.score, row.id))))
+            self.assertLess(tracemalloc.get_traced_memory()[1], 16 * 1024 * 1024)
+        finally:
+            tracemalloc.stop()
+        path = Path(index._connection.execute("PRAGMA database_list").fetchone()[2])
+        from core.platform import create_platform_services
+        self.assertTrue(create_platform_services().require("private_storage").verify(path))
+        index.close()
+        self.assertFalse(path.parent.exists())
+
+    def test_local_upsert_rolls_back_partial_conflict_and_preserves_numeric_zero_equality(self):
+        index = LocalCosineIndex()
+        self.addCleanup(index.close)
+        original = replace(self.record, values=(1., 0., -0.))
+        first = index.upsert([original], profile=self.profile, generation_id="g1", request_id="first")
+        index.upsert([replace(original, values=(1., -0., 0.))], profile=self.profile, generation_id="g1", request_id="equivalent")
+        self.assertTrue(index.confirm(first, profile=self.profile, request_id="confirm").indexed)
+        extra = VectorRecord(str(uuid.uuid4()), (0., 1., 0.))
+        with self.assertRaisesRegex(ProviderError, "vector_immutable_id_conflict"):
+            index.upsert([extra, replace(original, values=(0., 1., 0.))], profile=self.profile, generation_id="g1", request_id="conflict")
+        result = index.query((0., 1., 0.), profile=self.profile, generation_id="g1", request_id="q")
+        self.assertEqual([row.id for row in result], [original.id])
 
     def test_vectorize_mutation_acceptance_is_not_indexed(self):
         pending = self.upsert()
