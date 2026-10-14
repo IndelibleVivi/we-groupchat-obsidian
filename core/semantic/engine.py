@@ -416,7 +416,19 @@ class SemanticEngine:
                         # correct only formatting/grounding for the same task;
                         # unknown, unsent and provider failures never enter here.
                         correction[0] = {"policy": "known-output-correction-v1",
-                                         "validation_error": exc.code, "rejected_json": last_response[0]}
+                            "validation_error": exc.code,
+                            "constraint": {
+                                "semantic_invalid_predicates": "predicates must be a nonempty object with string keys "
+                                    "and only string, boolean, finite number or null values; never arrays or nested objects. "
+                                    "Use separate grounded claims or narrative units for multiple values. Omit a claim "
+                                    "that is not independently useful instead of inventing predicates.",
+                                "semantic_invalid_shape": "The root has only observations and optional dispositions. "
+                                    "Each observation has title, scene_kind, spans, units, topics and claims; use [] "
+                                    "for empty topics/claims. Put source-ID disposition entries inside dispositions.",
+                                "semantic_invalid_disposition": "Only uncited supplied source IDs may appear in "
+                                    "dispositions, with exactly status and reason. Never include an ID cited by an observation.",
+                            }.get(exc.code, "Follow the exact supplied schema, scoped IDs, source wording and timestamps."),
+                            "rejected_json": last_response[0]}
                 self._finish_artifact(child, artifact)
                 child_ids.append(child["job_id"])
                 routes.append(artifact["route"])
@@ -1069,6 +1081,11 @@ def extraction_prompt(sources: Sequence[CapturedSource], *, namespace="semantic"
         "Spans and their boundaries are already assigned by the program. Select only supplied IDs; "
         "do not create IDs or offsets. "
         "All units and claims need exact source spans. Quotes must preserve their source words. "
+        "claims is normally []: use typed claims only for independently checkable, comparable or watchable "
+        "propositions. Preserve complete experiences and ordinary conversation in units; do not turn every "
+        "utterance into a claim or use speaker_name/utterance as placeholder predicates. A claim's predicates "
+        "is a nonempty object whose values are strings, booleans, finite numbers or null, never arrays or "
+        "nested objects. Multiple resources belong in narrative/resource units or separate grounded claims. "
         "Use null for unknown qualifiers: unknown is not equality. Never infer person identity from a "
         "similar name or adjacent messages. speaker_name is the display label observed on that message; "
         "it may change and is never an identity key. speaker_id identifies only the message speaker or "
