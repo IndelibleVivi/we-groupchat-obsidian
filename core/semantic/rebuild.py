@@ -1493,41 +1493,45 @@ class RebuildCoordinator:
     def _process_all(self, runtime, *, run_id):
         """Every extraction precedes global retrieval and any Item resolver."""
         from core.semantic.contracts import SemanticStoreError
-        batches = runtime.store.list_batches()
-        # Independent source batches can generate concurrently. Overlapping
-        # core versions must first adopt their prior owner's exact artifacts;
-        # timing must never choose a different owner or duplicate Observations.
         with closing(runtime.store.connect()) as conn:
-            core = {}
-            for member in conn.execute("SELECT batch_id,source_version_id FROM capture_batch_members WHERE core=1"):
-                core.setdefault(member["batch_id"], []).append(member["source_version_id"])
-        waves, last_owner = {}, {}
-        for row in batches:
-            members = core.get(row["batch_id"], ())
-            wave = 1 + max((last_owner.get(source_id, -1) for source_id in members), default=-1)
-            waves.setdefault(wave, []).append(row)
-            last_owner.update({source_id: wave for source_id in members})
-        def prepare_extraction(row):
+            # Only batch identity and capture order drive wave ownership here;
+            # the full capture receipt is never needed. Read lightweight batch
+            # ids and per-batch core members so a large historical inventory
+            # never materializes every receipt or member copy at once.
+            batch_ids = [row[0] for row in conn.execute(
+                "SELECT batch_id FROM capture_batches ORDER BY captured_at,rowid")]
+            # Independent source batches can generate concurrently. Overlapping
+            # core versions must first adopt their prior owner's exact artifacts;
+            # timing must never choose a different owner or duplicate Observations.
+            waves, last_owner = {}, {}
+            for batch_id in batch_ids:
+                members = [row[0] for row in conn.execute(
+                    "SELECT source_version_id FROM capture_batch_members WHERE batch_id=? AND core=1",
+                    (batch_id,))]
+                wave = 1 + max((last_owner.get(source_id, -1) for source_id in members), default=-1)
+                waves.setdefault(wave, []).append(batch_id)
+                last_owner.update({source_id: wave for source_id in members})
+        def prepare_extraction(batch_id):
             # extract_batch durably accepts and commits its artifact. Resolution
             # reloads one batch below; retaining all returned observations in
             # scheduler.map would make a full historical wave occupy RAM.
-            runtime.engine.extract_batch(row["batch_id"])
+            runtime.engine.extract_batch(batch_id)
 
         for wave in sorted(waves):
             runtime.scheduler.map("text", waves[wave], prepare_extraction)
         index = runtime.index_all()
         if index.get("complete") is not True:
             raise RebuildError(index.get("code", "rebuild_index_pending"))
-        for row in batches:
+        for batch_id in batch_ids:
             with closing(runtime.store.connect()) as conn:
-                done = conn.execute("SELECT receipt_json FROM processing_receipts WHERE batch_id=?", (row["batch_id"],)).fetchone()
+                done = conn.execute("SELECT receipt_json FROM processing_receipts WHERE batch_id=?", (batch_id,)).fetchone()
             if done:
                 runtime.store.verify_processing_receipt(json.loads(done[0]))
                 continue
-            extracted = runtime.engine.extract_batch(row["batch_id"])
+            extracted = runtime.engine.extract_batch(batch_id)
             for revision in range(1, 4):
                 try:
-                    result = runtime.engine.resolve_batch(row["batch_id"], extracted=extracted,
+                    result = runtime.engine.resolve_batch(batch_id, extracted=extracted,
                                                           plan_revision=revision)
                 except SemanticStoreError as exc:
                     if exc.code == "semantic_stale_read_set" and revision < 3:

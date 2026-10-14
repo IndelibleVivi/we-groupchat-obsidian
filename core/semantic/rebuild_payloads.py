@@ -7,6 +7,7 @@ a time, never the entire document or inventory. It retains the exact old file.
 """
 from contextlib import contextmanager
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -156,18 +157,38 @@ class Payloads:
             return value
         path = self.path(value)
         # The explicit consumer needs this payload. Hash and decode the same fd;
-        # phase updates never enter this path. File size is checked before load.
+        # phase updates never enter this path. The raw bytes are hashed in bounded
+        # chunks, then the document is decoded one scalar at a time, so neither the
+        # whole byte string nor one wide-Unicode copy of it is ever resident.
         try:
             with opened(path) as source:
                 before = identity(os.fstat(source.fileno()))
                 if before[2] != value["bytes"]:
                     fail("rebuild_payload_changed")
-                raw = source.read()
-                if (before != identity(os.fstat(source.fileno())) or
-                        before != identity(path.stat()) or
-                        hashlib.sha256(raw).hexdigest() != value[REF_KEY]):
+                digest, length = hashlib.sha256(), 0
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    length += len(chunk)
+                if digest.hexdigest() != value[REF_KEY] or length != value["bytes"]:
                     fail("rebuild_payload_changed")
-                return json.loads(raw)
+                source.seek(0)
+                text = io.TextIOWrapper(source, encoding="utf-8")
+                try:
+                    reader = InlineReader(text, None, decode_only=True)
+                    document = reader.value()
+                    reader.whitespace()
+                    if reader.peek():
+                        fail("rebuild_corrupt_json")
+                except (ValueError, UnicodeError):
+                    # A payload is always canonical UTF-8; anything else fails
+                    # closed instead of returning a partially decoded object.
+                    fail("rebuild_corrupt_json")
+                finally:
+                    text.detach()
+                if (before != identity(os.fstat(source.fileno())) or
+                        before != identity(path.stat())):
+                    fail("rebuild_payload_changed")
+                return document
         except FileNotFoundError:
             fail("rebuild_payload_missing")
 
@@ -197,13 +218,19 @@ class Payloads:
 
 class InlineReader:
     """Canonical JSON grammar with chunked input and per-scalar memory bounds."""
-    def __init__(self, source, payloads):
+    def __init__(self, source, payloads, *, decode_only=False):
         self.source, self.payloads = source, payloads
         self.buffer, self.pos = "", 0
         self.taps, self.plan_digest = [], None
         self.metadata_bytes = 0
+        # decode_only rebuilds one consumer object from an immutable payload
+        # file: no fragmenting emits, no plan tap and no 16 MiB metadata cap,
+        # while the per-scalar bound and canonical grammar stay in force.
+        self.decode_only = decode_only
 
     def retain(self, text):
+        if self.decode_only:
+            return
         self.metadata_bytes += len(text.encode("utf-8"))
         if self.metadata_bytes > MAX_JOURNAL:
             fail("rebuild_journal_metadata_limit")
@@ -266,11 +293,11 @@ class InlineReader:
 
     def value(self, path=(), emit=None, external=True):
         # Hash the ORIGINAL plan, before compacting its inventory into a ref.
-        plan_tap = hashlib.sha256() if path == ("plan",) else None
+        plan_tap = hashlib.sha256() if path == ("plan",) and not self.decode_only else None
         if plan_tap:
             self.taps.append(plan_tap)
         try:
-            if external and external_path(path):
+            if external and not self.decode_only and external_path(path):
                 with self.payloads.writer() as (target, reference):
                     self.value(path, target, external=False)
                 if emit:
@@ -351,7 +378,6 @@ class InlineReader:
 
 def convert_inline(path, payloads):
     """Called under the run lock. Original file survives any partial conversion."""
-    import io
     from .rebuild import SCHEMA, fingerprint, write_json, safe_path
     with opened(path) as source:
         before = identity(os.fstat(source.fileno()))

@@ -900,14 +900,21 @@ class RebuildPreparationMemoryTests(unittest.TestCase):
 
         batches = [{"batch_id": str(index)} for index in range(48)]
         extracted, verified, published = [], [], []
+        # A large per-batch receipt blob must never be materialized here: the
+        # wave planner reads batch ids and core membership only. The fake store
+        # deliberately exposes no ``list_batches`` so a regression fails loudly.
+        heavy_receipt = json.dumps({"batch_id": "x", "member_version_ids": ["v" * 64] * 8192})
 
         def connect():
             conn = sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
             conn.executescript("""
+                CREATE TABLE capture_batches(batch_id TEXT, captured_at REAL, receipt_json TEXT);
                 CREATE TABLE capture_batch_members(batch_id TEXT, source_version_id TEXT, core INTEGER);
                 CREATE TABLE processing_receipts(batch_id TEXT, receipt_json TEXT);
             """)
+            conn.executemany("INSERT INTO capture_batches VALUES(?,?,?)",
+                             [(row["batch_id"], 0.0, heavy_receipt) for row in batches])
             conn.executemany("INSERT INTO processing_receipts VALUES(?,?)",
                              [(row["batch_id"], json.dumps(row)) for row in batches])
             return conn
@@ -919,8 +926,7 @@ class RebuildPreparationMemoryTests(unittest.TestCase):
             return {"observations": bytearray(512 * 1024)}
 
         runtime = SimpleNamespace(
-            store=SimpleNamespace(list_batches=lambda: batches, connect=connect,
-                                  verify_processing_receipt=verified.append),
+            store=SimpleNamespace(connect=connect, verify_processing_receipt=verified.append),
             scheduler=ProviderScheduler(),
             engine=SimpleNamespace(extract_batch=extract,
                                    consolidate=lambda _: {"status": "unchanged"},

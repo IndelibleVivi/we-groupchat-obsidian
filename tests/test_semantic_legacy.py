@@ -1,4 +1,5 @@
 """Synthetic old-schema/page conservation; no source/provider/runtime access."""
+import hashlib
 import json
 import os
 from contextlib import closing
@@ -178,6 +179,15 @@ class LegacyInventoryTests(unittest.TestCase):
             tracemalloc.stop()
         self.assertEqual(len(digest), 64)
         self.assertLess(peak, 32 * 1024 * 1024)
+
+    def test_streamed_digest_is_byte_identical_for_late_nonbmp_scalars(self):
+        # A non-BMP code point placed last widens the whole document if it is
+        # encoded as one Unicode string. The streaming digest must stay byte
+        # identical to the original canonical encoder without allocating it.
+        from core.semantic.legacy import _json, _json_digest
+        value = {"records": [{"text": "x" * 4096 + "\U0001f408"} for _ in range(8)]}
+        self.assertEqual(_json_digest((value,)),
+                         hashlib.sha256(_json((value,)).encode("utf-8")).hexdigest())
 
     def test_raw_excerpt_summary_are_distinct_and_duplicate_id_is_one_source(self):
         rows = {r.old_id: r for r in self.fixture.plan().records if r.kind == "event"}

@@ -206,9 +206,17 @@ receipt、source capture receipt 和 verification manifest 保存在同一私有
 目录的 `payloads/`，以内容 digest、byte length 和 run ID 绑定。状态推进不再
 解析、复制或重新序列化全部旧正文。同一 journal reader 对已验证且文件 identity
 未改变的 payload 复用验证；首次读取与变化后的读取仍核对完整 bytes，实际消费
-正文时再 decode。此优化不降低冻结、来源完整性或 canonical conservation 验证。
+正文时再 decode。实际消费在同一个 regular fd 上先按 1 MiB 分块核对 digest 与
+byte length，再按 64 KiB 分块、逐 scalar 重建消费对象；不会同时常驻整份原始
+bytes 与一份被 late 非 BMP 字符拓宽到四字节的整篇 Unicode 字符串。损坏、截断、
+尾部多余字节、文件变更与跨 run 引用均失败关闭，不返回未验证对象，payload
+reference/hash/plan 身份与 schema 不变。此优化不降低冻结、来源完整性或 canonical
+conservation 验证。
 Legacy inventory 的身份校验也按 canonical JSON chunks 计算，保持既有 digest；
 单次 backup/navigation 操作复用其已算身份，不在每个旧页面上重算全库。
+parallel wave 准备只读取轻量 batch metadata（`batch_id` 与 capture order），再
+逐 batch 读取 core members 计算 overlap-owner wave，不预先解出全部 capture
+receipt 或保留全部 member 副本；它仍不持有 DB 事务或 projection lock。
 本地 cosine 的向量保存在私有临时 SQLite 磁盘缓存；索引准备只保留 metadata，
 发布／未索引尾部检索分批读取至多 100 个向量，查询只保留 top-k。
 Canonical embedding 与确认 receipt 仍是恢复依据；普通关闭清理临时缓存，

@@ -153,6 +153,89 @@ class PayloadJournalTests(unittest.TestCase):
         provider.assert_not_called()
         self.assertEqual(managed.mock_calls, [])
 
+    def test_payload_get_matches_stdlib_for_escapes_and_unicode(self):
+        document = {
+            "schema": "synthetic",
+            "records": [
+                {"text": 'quote " slash \\ tab\t newline\n nbsp\u00a0', "number": -12.5e3},
+                {"text": "中文 🐈 tail", "flag": True, "nothing": None},
+                {"nested": [1, 2, {"deep": ["a", "b"]}], "empty": {}, "list": []},
+            ],
+        }
+        self.journal.run_root.mkdir(parents=True, mode=0o700)
+        reference = self.journal.payloads.put(document)
+        self.assertEqual(self.journal.payloads.get(reference),
+                         json.loads(json.dumps(document, ensure_ascii=False)))
+
+    def test_payload_get_fails_closed_on_corrupt_and_trailing_bytes(self):
+        folder = self.journal.run_root / "payloads"
+        folder.mkdir(parents=True, mode=0o700)
+        cases = ((b'{"records":[1,2', 'corrupt_json'),
+                 (b'{"records":[1]}\ntrailing', 'corrupt_json'),
+                 (b'{"a":"\xff"}', 'corrupt_json'),
+                 (b'{"a":1}', None))
+        for raw, expected in cases:
+            digest = hashlib.sha256(raw).hexdigest()
+            (folder / (digest + ".json")).write_bytes(raw)
+            reference = {REF_KEY: digest, "bytes": len(raw), "run_id": self.journal.run_id}
+            if expected is None:
+                self.assertEqual(self.journal.payloads.get(reference), {"a": 1})
+            else:
+                with self.assertRaisesRegex(RebuildError, expected):
+                    self.journal.payloads.get(reference)
+
+    def test_large_payload_get_streams_without_wide_document_or_raw_bytes(self):
+        # Mostly-ASCII canonical JSON whose final scalar carries one late
+        # non-BMP code point. The old decoder held the whole byte string plus a
+        # single Unicode copy of the document, which the late code point widens
+        # to four bytes per character; the streaming decoder must not.
+        journal = self.journal
+        journal.run_root.mkdir(parents=True, mode=0o700)
+        block = "x" * (1024 * 1024)
+        with journal.payloads.writer() as (emit, reference):
+            emit('{"records":[')
+            for index in range(64):
+                if index:
+                    emit(',')
+                emit('{"text":"' + block + '"}')
+            emit(',{"text":"' + "y" * 64 + "\U0001f408" + '"}]}')
+        size = journal.payloads.path(reference).stat().st_size
+        self.assertGreater(size, 60 * 1024 * 1024)
+        code = '''
+import hashlib, json, resource, sys
+from core.semantic.rebuild import canonical_json
+from core.semantic.rebuild_payloads import Payloads
+mode, root, reference = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+payloads = Payloads(root, "run-1")
+baseline = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+if mode == "old":
+    with open(payloads.path(reference), "rb") as handle:
+        value = json.loads(handle.read())
+else:
+    value = payloads.get(reference)
+peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+if sys.platform != "darwin":
+    peak *= 1024
+print(json.dumps({"peak_bytes": peak, "baseline_rss": baseline,
+                  "digest": hashlib.sha256(canonical_json(value)).hexdigest()}))
+'''
+        def run(mode):
+            result = subprocess.run(
+                [sys.executable, '-c', code, mode, str(journal.run_root), json.dumps(reference)],
+                capture_output=True, text=True, timeout=180, close_fds=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        old = run("old")
+        new = run("new")
+        # Both decoders produce the exact same consumer object.
+        self.assertEqual(old["digest"], new["digest"])
+        # The streaming decoder stays below three retained copies of the file,
+        # while the old one needs the raw bytes plus a widened full document.
+        self.assertLess(new["peak_bytes"], 3 * size)
+        self.assertGreater(old["peak_bytes"], 4 * size)
+        self.assertGreater(old["peak_bytes"], new["peak_bytes"])
+        print('streamed payload decode:', json.dumps(dict(old=old["peak_bytes"], new=new["peak_bytes"], input_bytes=size)))
+
     def test_large_inline_conversion_in_fresh_process_has_bounded_peak_memory(self):
         # 160 MiB on disk, generated in the parent with a reused 1 MiB scalar.
         # Child RSS excludes fixture construction and never loads the document.
