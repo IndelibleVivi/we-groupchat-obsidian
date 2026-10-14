@@ -23,6 +23,9 @@ derived consumers。协议细节分别见 [store](semantic-store-contract.md)、
 或应用已有设置界面修改，不能在执行中替换配置快照。
 显式 root 必须存在且可用；外部卷未挂载时 app、monitor、health 与旧命令都
 失败关闭为 `semantic_runtime_root_unavailable`，不会自动创建替代目录或回落到旧版。
+初次生成 legacy inventory 时，单文件 metadata 在读取期间变化可重新读取一次；
+每次都重新验证路径、fd/live identity、大小与完整稳定读取。持续变化仍停止。
+已经冻结的 inventory、备份和验收校验保持严格，不采用新的变化替换封存证据。
 
 managed LaunchAgent 必须唯一、精确绑定实际 app bundle executable、plist
 及 working directory。旧 `/bin/bash 启动.command` wrapper 不能证明 app

@@ -1,10 +1,12 @@
 """Synthetic old-schema/page conservation; no source/provider/runtime access."""
 import json
+import os
 from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from core.semantic.legacy import (
     LegacyError, LegacyInventory, build_publication_plan, iter_legacy_inputs,
@@ -70,6 +72,64 @@ class LegacyFixture:
 
 
 class LegacyInventoryTests(unittest.TestCase):
+    def test_initial_inventory_repeats_a_transient_metadata_change_then_keeps_exact_bytes(self):
+        from core.semantic import legacy
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = LegacyFixture(temporary)
+            target = fixture.tree / "life.md"
+            inode = target.stat().st_ino
+            original = os.fstat
+            changed = []
+            def touch_once(fd):
+                observed = original(fd)
+                if observed.st_ino == inode and not changed:
+                    os.utime(target, ns=(observed.st_atime_ns, observed.st_mtime_ns + 1_000_000))
+                    changed.append(True)
+                return observed
+            with patch.object(legacy.os, "fstat", side_effect=touch_once):
+                inventory = fixture.plan()
+            page = next(f for f in inventory.files if f.relative_path == "Old/life.md")
+            import base64
+            self.assertEqual(base64.b64decode(page.bytes_base64), fixture.page_bytes)
+            self.assertEqual(target.read_bytes(), fixture.page_bytes)
+            self.assertEqual(changed, [True])
+
+    def test_frozen_read_still_rejects_even_one_metadata_change(self):
+        from core.semantic import legacy
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = LegacyFixture(temporary)
+            target = fixture.tree / "life.md"
+            original = os.fstat
+            first = []
+            def change(fd):
+                observed = original(fd)
+                if not first:
+                    os.utime(target, ns=(observed.st_atime_ns, observed.st_mtime_ns + 1_000_000))
+                    first.append(True)
+                return observed
+            with patch.object(legacy.os, "fstat", side_effect=change), \
+                 self.assertRaisesRegex(LegacyError, "legacy_input_changed"):
+                legacy._read_regular(target, 32 * 1024 * 1024)
+
+    def test_initial_inventory_stops_after_two_unstable_attempts(self):
+        from core.semantic import legacy
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = LegacyFixture(temporary)
+            target = fixture.tree / "foreign.md"
+            inode = target.stat().st_ino
+            original = os.fstat
+            calls = []
+            def never_stable(fd):
+                observed = original(fd)
+                if observed.st_ino == inode:
+                    if len(calls) % 2 == 0:
+                        os.utime(target, ns=(observed.st_atime_ns, observed.st_mtime_ns + 1_000_000))
+                    calls.append(True)
+                return observed
+            with patch.object(legacy.os, "fstat", side_effect=never_stable), \
+                 self.assertRaisesRegex(LegacyError, "legacy_input_changed"):
+                fixture.plan()
+            self.assertEqual(len(calls), 4)
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

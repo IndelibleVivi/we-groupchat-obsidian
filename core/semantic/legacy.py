@@ -111,7 +111,7 @@ def _under(root: Path, relative: str) -> Path:
     return candidate
 
 
-def _read_regular(path: Path, max_bytes: int) -> bytes:
+def _read_regular_once(path: Path, max_bytes: int) -> bytes:
     _checked_path(path)
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -131,6 +131,20 @@ def _read_regular(path: Path, max_bytes: int) -> bytes:
         return data
     except OSError as exc:
         raise LegacyError("legacy_read_failed") from exc
+
+
+def _read_regular(path: Path, max_bytes: int, *, retry_changed: bool = False) -> bytes:
+    """Initial inventory may retry one unstable read; frozen checks never do.
+
+    Each attempt independently verifies path, type, size and fd/live identity.
+    Only a complete stable attempt is returned; persistent mutation fails closed.
+    """
+    for attempt in range(2 if retry_changed else 1):
+        try:
+            return _read_regular_once(path, max_bytes)
+        except LegacyError as exc:
+            if not retry_changed or attempt or exc.code != "legacy_input_changed":
+                raise
 
 
 @dataclass(frozen=True)
@@ -300,7 +314,7 @@ def include_review_queue(manifest: LegacyInventory, queue_dir: str | Path) -> Le
     path = _under(root, "pending.jsonl")
     if not path.exists():
         return manifest
-    raw = _read_regular(path, 128 * 1024 * 1024)
+    raw = _read_regular(path, 128 * 1024 * 1024, retry_changed=True)
     topics = {r.legacy_ref for r in manifest.records if r.table == "topics"}
     records = manifest.records + _queue_records(manifest.namespace, str(path), raw, topics)
     entry = {"role": "review_queue", "path": str(path), "sha256": _digest(raw), "byte_length": len(raw),
@@ -473,7 +487,7 @@ def plan_legacy(config: Mapping[str, Any] | None = None, *, db_path: str | Path 
                     raise LegacyError("legacy_symlink")
             missing.append(relative)
             continue
-        data = _read_regular(path, max_file_bytes)
+        data = _read_regular(path, max_file_bytes, retry_changed=True)
         try:
             text = data.decode("utf-8")
         except UnicodeError:
