@@ -316,8 +316,11 @@
   source root. Presentation-cache refresh must preserve validated decrypted-cache
   records; DB/WAL/key/published-payload identity changes still invalidate them.
   One bounded traversal reuses its thread-local inventory/spec snapshot, while
-  explicit final inventory verification remains a fresh observation. Traversals
-  may interleave only at public-page boundaries.
+  explicit final inventory verification remains a fresh observation. A nested
+  batch read drops its own inventory observation only when its enclosing
+  traversal owner performs the single fresh final verification; any other
+  reader keeps its own. Traversals may interleave only at public-page
+  boundaries.
   Snapshot keyset acceleration uses private, disposable key-only indexes bound
   to the exact pinned shard and chat table. Native index seeks stay direct;
   snapshot exit, pin discard and interrupted construction clean derived files.

@@ -568,9 +568,19 @@ class WeChatSource(Protocol):
     """
 
     def get_source_inventory(
-        self, *, update: bool = True, sensitive: bool = False
+        self,
+        *,
+        update: bool = True,
+        sensitive: bool = False,
+        reuse_scoped: bool = False,
     ) -> dict:
-        """Return one path-free completeness snapshot of the expected shards."""
+        """Return one path-free completeness snapshot of the expected shards.
+
+        ``reuse_scoped`` is a production ``WeChatDB`` capability: it reuses the
+        inventory frozen by the active ``source_snapshot`` traversal so a
+        bounded multi-page read does not rescan the source per page. Adapters
+        that do not implement it keep the fresh read.
+        """
 
     def get_message_shards(self, username) -> list:
         """Return the present generation ids, or fail closed."""

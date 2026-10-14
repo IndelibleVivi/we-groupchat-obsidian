@@ -1851,11 +1851,17 @@ class WeChatDB:
                 state["inventory_specs"] = dict(specs)
             return snapshot
 
-    def get_source_inventory(self, *, update=True, sensitive=False):
-        """Return one completeness snapshot without absolute source paths."""
-        return self._source_inventory_snapshot(update=update).as_dict(
-            sensitive=bool(sensitive)
-        )
+    def get_source_inventory(self, *, update=True, sensitive=False, reuse_scoped=False):
+        """Return one completeness snapshot without absolute source paths.
+
+        ``reuse_scoped`` reuses the thread-local inventory frozen by the active
+        ``source_snapshot`` traversal instead of rescanning the source on every
+        page. The independent final verification always reads fresh, i.e. with
+        the default ``reuse_scoped=False``.
+        """
+        return self._source_inventory_snapshot(
+            update=update, reuse_scoped=reuse_scoped
+        ).as_dict(sensitive=bool(sensitive))
 
     def _message_shard_specs(self):
         snapshot = self._source_inventory_snapshot(update=True, reuse_scoped=True)

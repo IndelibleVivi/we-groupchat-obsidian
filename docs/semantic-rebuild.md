@@ -26,6 +26,11 @@ derived consumers。协议细节分别见 [store](semantic-store-contract.md)、
 初次生成 legacy inventory 时，单文件 metadata 在读取期间变化可重新读取一次；
 每次都重新验证路径、fd/live identity、大小与完整稳定读取。持续变化仍停止。
 已经冻结的 inventory、备份和验收校验保持严格，不采用新的变化替换封存证据。
+一次 C0/receipt 遍历只冻结一份 thread-local source inventory 与 spec snapshot：
+每个 page 复用该冻结观察，不再逐页重新扫描来源；遍历结束时只做一次独立的
+fresh inventory 验证，changed 或 incomplete 都失败关闭，不产出完整 receipt，
+也不推进 cursor。只有执行该 fresh final 验证的遍历 owner 才显式省略每页验证；
+其它 reader（包含 standalone batch 与单独 page）各自保留 fresh 验证。
 
 managed LaunchAgent 必须唯一、精确绑定实际 app bundle executable、plist
 及 working directory。旧 `/bin/bash 启动.command` wrapper 不能证明 app

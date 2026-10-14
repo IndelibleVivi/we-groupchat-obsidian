@@ -49,9 +49,34 @@ def _checkpoint(value) -> float:
         return 0.0
 
 
-def _read_inventory(db) -> tuple[dict, tuple[dict, ...]]:
+def _observe_source_inventory(db, *, reuse_scoped: bool) -> dict:
+    """Observe the source inventory, optionally reusing the frozen traversal.
+
+    ``reuse_scoped`` reuses the thread-local inventory of the active
+    ``source_snapshot`` traversal so a bounded multi-page read does not rescan
+    the source per page; the independent final verification always stays fresh.
+    The frozen-scope reuse is a ``WeChatDB`` capability, so legacy adapters that
+    expose only ``update`` keep the fresh read instead of failing on the keyword.
+    """
+    getter = db.get_source_inventory
+    if not reuse_scoped:
+        return getter(update=True)
     try:
-        snapshot = db.get_source_inventory(update=True)
+        return getter(update=True, reuse_scoped=True)
+    except TypeError as exc:
+        if "reuse_scoped" not in str(exc):
+            raise
+        return getter(update=True)
+
+
+def _read_inventory(db, *, reuse_scoped: bool = False) -> tuple[dict, tuple[dict, ...]]:
+    """Return one complete inventory and its validated active shards.
+
+    ``reuse_scoped`` is opt-in so the caller controls whether the frozen
+    traversal snapshot is reused (page reads) or re-observed (final verify).
+    """
+    try:
+        snapshot = _observe_source_inventory(db, reuse_scoped=reuse_scoped)
     except Exception as exc:
         raise MonitorSourceError(
             normalize_source_error(exc, fallback="source_inventory_unavailable")
@@ -268,8 +293,15 @@ def read_monitor_source_batch(
     *,
     raw_limit: int,
     page_size: int = 128,
+    verify_inventory: bool = True,
 ) -> MonitorSourceBatch:
-    """Read one batch while holding only the bounded heavy-source phase."""
+    """Read one batch while holding only the bounded heavy-source phase.
+
+    The default owns one independent fresh inventory verification after the
+    pages. Only an explicit enclosing-traversal owner that performs its own
+    fresh final observation may pass ``verify_inventory=False``; a reader that
+    merely happens to run inside a traversal keeps the verification.
+    """
     with source_snapshot(db):
         return _read_monitor_source_batch_scoped(
             db,
@@ -277,6 +309,7 @@ def read_monitor_source_batch(
             state,
             raw_limit=raw_limit,
             page_size=page_size,
+            verify_inventory=verify_inventory,
         )
 
 
@@ -287,11 +320,12 @@ def _read_monitor_source_batch_scoped(
     *,
     raw_limit: int,
     page_size: int = 128,
+    verify_inventory: bool = True,
 ) -> MonitorSourceBatch:
     """Read one globally ordered raw-row batch without advancing durable state."""
     limit = max(1, int(raw_limit))
     chunk_size = max(1, min(limit, int(page_size)))
-    snapshot, shards = _read_inventory(db)
+    snapshot, shards = _read_inventory(db, reuse_scoped=True)
     inventory_digest = str(snapshot["inventory_digest"])
     inventory_revision = int(snapshot["inventory_revision"])
     previous_checkpoint = _checkpoint(state.get("last_checked_ts"))
@@ -418,7 +452,8 @@ def _read_monitor_source_batch_scoped(
         and stream["index"] >= len(stream["buffer"])
         for stream in streams.values()
     )
-    verify_monitor_source_inventory(db, inventory_digest, inventory_revision)
+    if verify_inventory:
+        verify_monitor_source_inventory(db, inventory_digest, inventory_revision)
 
     last_checked_ts = previous_checkpoint
     if consumed:

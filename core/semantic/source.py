@@ -54,12 +54,20 @@ class SemanticCapture:
                             "payload": row, "kind": "message", "provenance_grade": "raw_exact", "core": True})
         return records
 
-    def page(self, chat_id, cursors, *, snapshot_id, purpose="live"):
-        inventory, _ = _read_inventory(self.source)
+    def page(self, chat_id, cursors, *, snapshot_id, purpose="live",
+             verify_inventory=True):
+        # A page inside a pinned traversal reuses the frozen inventory; a live
+        # page outside any traversal starts a fresh read. The traversal owner
+        # that performs its own fresh final observation disables the per-page
+        # verification explicitly; a standalone page keeps it.
+        inventory, _ = _read_inventory(self.source, reuse_scoped=True)
         state = {"source_cursors": cursors, "last_checked_ts": 0,
                  "source_inventory_digest": inventory["inventory_digest"],
                  "source_inventory_revision": inventory["inventory_revision"]}
-        batch = read_monitor_source_batch(self.source, chat_id, state, raw_limit=self.page_size)
+        batch = read_monitor_source_batch(
+            self.source, chat_id, state, raw_limit=self.page_size,
+            verify_inventory=verify_inventory,
+        )
         records = self._records(batch, inventory)
         batch_id = digest([snapshot_id, chat_id, cursors, batch.source_cursors, records])
         return self.store.capture_batch(batch_id, records,
@@ -75,14 +83,15 @@ class SemanticCapture:
             raise SemanticStoreError("semantic_capture_scope_invalid")
         batches, boundaries = [], []
         with source_snapshot(self.source):
-            inventory, shards = _read_inventory(self.source)
+            inventory, shards = _read_inventory(self.source, reuse_scoped=True)
             for chat_id in chat_ids:
                 cursors = {row["logical_shard_id"]: {"generation_id": row["generation_id"],
                            "cursor_token": encode_cursor_token(0, 0), "start_cursor": encode_cursor_token(0, 0)}
                            for row in shards}
                 while True:
                     receipt = self.page(chat_id, cursors, snapshot_id=snapshot_id,
-                                        purpose="snapshot:" + snapshot_id)
+                                        purpose="snapshot:" + snapshot_id,
+                                        verify_inventory=False)
                     batches.append(receipt)
                     if receipt["source_eof"]:
                         cursors = receipt["output_cursors"]
@@ -93,6 +102,8 @@ class SemanticCapture:
                 boundaries.append({"source_namespace": inventory["source_namespace"], "chat_id": chat_id,
                                    "inventory_digest": inventory["inventory_digest"],
                                    "inventory_revision": inventory["inventory_revision"], "cursors": cursors})
+            # An explicit, independent fresh observation: never satisfied by
+            # the frozen page snapshot, so a late source change fails closed.
             verify_monitor_source_inventory(self.source, inventory["inventory_digest"],
                                             inventory["inventory_revision"])
         with closing(self.store.connect()) as conn:
