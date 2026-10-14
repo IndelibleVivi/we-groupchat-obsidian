@@ -54,4 +54,3 @@ class ExtractionOwnerLookupTests(unittest.TestCase):
                 result = engine.extract_batch('current')
             self.assertEqual(len(result['observations']), 1)
             self.assertLessEqual(len(read_rows), 1)
-
