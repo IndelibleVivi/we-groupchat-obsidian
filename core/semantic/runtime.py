@@ -151,6 +151,10 @@ class ProviderRoles:
         selected["ai_thinking"] = bool(config.get("monitor_ai_thinking", False))
         selected["ai_timeout_seconds"] = config.get("monitor_ai_timeout_seconds", 90)
         native = create_provider(selected)
+        if getattr(native, "_commandcode_gateway", False) is True:
+            # Semantic consumers all validate JSON objects. Keep ordinary
+            # prose summaries on the provider's normal text response format.
+            native.json_object_output = True
         if hasattr(native, "max_output_tokens"):
             native.max_output_tokens = config.get("semantic_text_output_tokens", 16384)
         if hasattr(getattr(native, "client", None), "max_retries"):

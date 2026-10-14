@@ -337,7 +337,17 @@ class SemanticEngine:
                                 "route": asdict(self.text_provider.route)})
         connection = self.store.connect()
         try:
-            ownership = {row[0]: row[1] for row in connection.execute("SELECT source_version_id,job_id FROM source_core_jobs")}
+            # Each parallel extraction needs only its own members' owners.
+            # Loading the complete corpus here multiplies its metadata by the
+            # number of concurrent provider preparations.
+            ownership = {}
+            source_ids = tuple(source.source_id for source in sources)
+            for offset in range(0, len(source_ids), 512):
+                selected_ids = source_ids[offset:offset + 512]
+                placeholders = ",".join("?" for _ in selected_ids)
+                ownership.update(connection.execute(
+                    "SELECT source_version_id,job_id FROM source_core_jobs "
+                    "WHERE source_version_id IN (" + placeholders + ")", selected_ids))
         finally:
             connection.close()
         sources = tuple(replace(source, core=False) if ownership.get(source.source_id) not in (None, job["job_id"]) else source
@@ -1043,9 +1053,17 @@ def extraction_prompt(sources: Sequence[CapturedSource], *, namespace="semantic"
         "observed_at must equal occurred_at of one cited source; do not invent timestamps. Preserve explicit "
         "reported historical phases in phase/condition and keep uncertain event timing unknown.\n"
         "You may also return dispositions:{source_id:{status,reason}} for uncited inputs. Status is "
-        "noise/context_only/repetition_only/unsupported_type/unclassified. Every core input needs an "
+        "noise/context_only/repetition_only/unsupported_type/unclassified. Observation source IDs and "
+        "disposition keys MUST be disjoint: if any observation cites a source, omit that source from "
+        "dispositions, even when it also provides context to another scene. The program derives observed. "
+        "Every core input needs an "
         "Observation or an explicit reasoned disposition. Never call stories, gossip, quotes or life scenes "
-        "noise merely because they are nontechnical. Uncertain meaning remains unclassified.\n"
+        "noise merely because they are nontechnical. Never invent uncertain meaning: preserve an unclear "
+        "conversational fragment as context_only with a reason stating what remains unknown, or cite it "
+        "with its uncertainty in a grounded scene. Raw source bytes remain retained and searchable. "
+        "unclassified means input processing could not be completed and blocks acknowledgment; it is "
+        "not a routine bucket for unclear references. Use the evidence's dominant language for titles, "
+        "units and reasons; preserve original quotations and technical terms.\n"
         + _json(payload)
     )
 

@@ -18,6 +18,13 @@ prompt, endpoint or credentials.
 The lower-level usage store raises `ProviderUsageError(code)`; Cloudflare
 adapters translate it to `ProviderError` without adding sensitive details.
 
+At Command Code's exact `https://api.commandcode.ai/provider/v1` endpoint,
+an explicit `thinking=False` with the DeepSeek thinking dialect also sends the
+gateway's `reasoning_effort="off"`; the output-token ceiling is unchanged.
+Semantic role composition enables JSON-object response mode at that endpoint.
+Ordinary prose summaries retain their normal response format. Other endpoints
+keep their explicitly selected dialect; this is no provider discovery or fallback.
+
 `ai.semantic_provider` exports:
 
 - `ProviderRoute(provider, model, task, fallback_from=None)`; every result carries

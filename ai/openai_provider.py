@@ -27,8 +27,12 @@ class OpenAIProvider(AIProvider):
         self.client = OpenAI(**kwargs)
         self.model = model
         self.max_output_tokens = 4096
+        self.json_object_output = False
         self.thinking = thinking
         self.thinking_parameter = thinking_parameter
+        self._commandcode_gateway = (
+            str(base_url or "").rstrip("/") == "https://api.commandcode.ai/provider/v1"
+        )
 
     def summarize(self, prompt: str) -> str:
         print(f"[ai] 调用 {self.model}, prompt 长度: {len(prompt)} 字符...")
@@ -38,6 +42,8 @@ class OpenAIProvider(AIProvider):
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": getattr(self, "max_output_tokens", 4096),
             }
+            if getattr(self, "json_object_output", False):
+                request["response_format"] = {"type": "json_object"}
             thinking = getattr(self, "thinking", None)
             if thinking is not None:
                 if getattr(self, "thinking_parameter", "thinking") == "enable_thinking":
@@ -46,6 +52,11 @@ class OpenAIProvider(AIProvider):
                     request["extra_body"] = {
                         "thinking": {"type": "enabled" if thinking else "disabled"},
                     }
+                    # This gateway accepts "off" and otherwise keeps its own
+                    # reasoning default despite DeepSeek's thinking field.
+                    # Preserve the caller's explicit off intent and token cap.
+                    if not thinking and getattr(self, "_commandcode_gateway", False):
+                        request["reasoning_effort"] = "off"
             response = self.client.chat.completions.create(**request)
             if getattr(response.choices[0], "finish_reason", None) == "length":
                 raise OutputTruncatedError()

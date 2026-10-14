@@ -110,6 +110,36 @@ class OpenAIProviderTests(unittest.TestCase):
 
         self.assertEqual(captured["extra_body"], {"enable_thinking": False})
 
+    def test_commandcode_thinking_off_uses_its_gateway_effort_value(self):
+        for endpoint in ("https://api.commandcode.ai/provider/v1/",
+                         "https://api.deepseek.com", "https://api.commandcode.ai.example.test/provider/v1"):
+            for thinking in (False, True, None):
+                with self.subTest(endpoint=endpoint, thinking=thinking):
+                    captured = {}
+                    class FakeOpenAI:
+                        def __init__(self, **kwargs):
+                            self.chat = types.SimpleNamespace(completions=self)
+                        def create(self, **kwargs):
+                            captured.update(kwargs)
+                            return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                                finish_reason="stop", message=types.SimpleNamespace(content='{"ready":true}'))])
+                    with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}):
+                        provider = OpenAIProvider("synthetic-key", model="deepseek/deepseek-v4.1-flash",
+                                                  base_url=endpoint, thinking=thinking)
+                    provider.max_output_tokens = 16384
+                    provider.json_object_output = thinking is False
+                    provider.summarize("synthetic prompt")
+                    self.assertEqual(captured["max_tokens"], 16384)
+                    if thinking is False:
+                        self.assertEqual(captured["response_format"], {"type": "json_object"})
+                    else:
+                        self.assertNotIn("response_format", captured)
+                    if endpoint == "https://api.commandcode.ai/provider/v1/" and thinking is False:
+                        self.assertEqual(captured["reasoning_effort"], "off")
+                        self.assertEqual(captured["extra_body"], {"thinking": {"type": "disabled"}})
+                    else:
+                        self.assertNotIn("reasoning_effort", captured)
+
 
 if __name__ == "__main__":
     unittest.main()

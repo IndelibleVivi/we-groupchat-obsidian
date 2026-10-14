@@ -91,6 +91,16 @@ The global Item resolver, consolidation, View actions and canonical commits
 retain their serial revision checks. Decision concurrency is a ceiling across
 callers, not permission to race identity-changing proposals.
 
+Each parallel extraction reads core ownership only for the current batch's
+members, in bounded key lookups, rather than copying the whole ownership table.
+Observation citations and explicit disposition keys are disjoint. Unclear
+conversational fragments can retain a reasoned `context_only` disposition and
+their exact raw source without inventing a claim or an Item. This differs from
+`unclassified`, which means processing is unfinished and still blocks ACK.
+Meaningful life scenes, stories and quotations cannot become noise merely
+because they are nontechnical. The prompt asks for the evidence's dominant
+language while retaining original quotations and technical terms.
+
 Body preparation runs concurrently in pages of at most 100 Items. Each validated
 provider artifact is durable before publication; `prepare_canonical_item` holds
 no projection-root lock while calling the provider. `publish_prepared_item`
