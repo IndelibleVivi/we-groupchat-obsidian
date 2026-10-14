@@ -33,6 +33,20 @@ starting source/model processing; original bytes remain available for recovery.
 This is source capability, not evidence that any private run has been converted
 or activated. See the migration runbook for limits and recovery.
 
+An unpinned, pre-activation run whose plan expired or whose runtime root moved can
+be relocated to another already-mounted private local root by the explicit
+`relocate` recovery. It copies run/generation state (SQLite via Online Backup
+including WAL), rebinds only the operational plan, adopts `semantic_runtime_root`
+through the locked ConfigStore patch and leaves a retirement record for the
+retained original root, preserving the run/generation, raw captures, jobs and
+immutable evidence. It never fabricates a missing destination root and admits a
+changed TEXT/DECISION binding only while the generation has zero jobs. This is
+source capability, not evidence that any private run was relocated.
+An explicitly configured unavailable runtime root blocks app, monitor, health
+and legacy dispatch with `semantic_runtime_root_unavailable`; it is not treated
+as an unmigrated installation. Relocation verification streams copied files,
+and SQLite retries publish a fresh WAL-aware Online Backup atomically.
+
 Local cosine now keeps vectors in a private disposable SQLite disk cache, and
 retrieval reads bounded vector payload pages instead of retaining all vectors
 and receipt payloads in Python. This candidate change does not establish a

@@ -125,21 +125,29 @@ class RebuildCoordinatorTests(unittest.TestCase):
             self.source_calls += 1
             self.assertIn("resource_locked", self.managed.events)
             return self.source
+        self.locks = locks
+        self.source_factory = source_factory
         self.coordinator = RebuildCoordinator(self.runtime_root, self.config_store,
             source_factory=source_factory, roles_factory=lambda _c, _p: self.roles,
             managed_runtime=self.managed, state_paths={"chat": self.state_path}, lock_context=locks,
             usage_path=self.root / "provider-usage.sqlite", review_queue_dir=self.root / "review_queue")
 
+    def coordinator_at(self, root, *, clock=None):
+        return RebuildCoordinator(root, self.config_store, source_factory=self.source_factory,
+            roles_factory=lambda _c, _p: self.roles, managed_runtime=self.managed,
+            state_paths={"chat": self.state_path}, lock_context=self.locks, clock=clock or __import__("time").time,
+            usage_path=self.root / "provider-usage.sqlite", review_queue_dir=self.root / "review_queue")
+
     def execute(self):
         return self.coordinator.execute("test-run", allow_source_read=True, allow_model_processing=True)
 
-    def live_increment(self):
+    def live_increment(self, root=None):
         from core.semantic.store import SemanticStore
         from core.semantic.runtime import SemanticRuntime
         from core.monitor import TopicMonitor
         from core.monitor_state import MonitorStateStore
         from tests.test_monitor_source import raw_message
-        pin = GenerationRegistry(self.runtime_root).pin()
+        pin = GenerationRegistry(root or self.runtime_root).pin()
         if pin is None:
             return
         store = SemanticStore(pin.database, pin.generation_id)
@@ -593,6 +601,296 @@ class RebuildCoordinatorTests(unittest.TestCase):
         run = RebuildJournal(self.runtime_root, 'test-run').read()
         self.assertIn('rebuild_interrupted', [entry['code'] for entry in run['errors']])
         self.assertIsNone(GenerationRegistry(self.runtime_root).pin())
+
+
+    # --- Pre-activation relocation to another private local runtime root ---
+    # Synthetic only: no live config, Keychain, protected source or account
+    # access; the same rebuild fixture drives the whole pipeline.
+
+    def partial_run(self):
+        """A valid pre-cutover run: frozen checkpoint, generation DB and live jobs."""
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        def fault(phase):
+            if phase == "after_freeze-1-processed-C0":
+                raise RebuildError("synthetic_before_cutover")
+        self.coordinator.fault_hook = fault
+        result = self.execute()
+        self.coordinator.fault_hook = lambda _: None
+        self.assertTrue(result["restored"], result)
+        self.assertNotEqual(result["state"], "run_complete")
+        return result
+
+    def relocate(self, *args, **kwargs):
+        return self.coordinator.relocate(*args, **kwargs)
+
+    def test_relocation_preserves_run_generation_counts_and_wal_commits(self):
+        self.partial_run()
+        before = journal_details(self.runtime_root, "test-run")
+        generation = before["plan"]["generation_id"]
+        generation_db = Path(before["plan"]["database"])
+        connection = sqlite3.connect(generation_db)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE IF NOT EXISTS relocation_probe(value TEXT)")
+        connection.execute("INSERT INTO relocation_probe VALUES('committed-in-wal')")
+        connection.commit()
+        connection.close()
+        with closing(sqlite3.connect(generation_db)) as check:
+            jobs = check.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            records = check.execute("SELECT COUNT(*) FROM source_records").fetchone()[0]
+            batches = check.execute("SELECT COUNT(*) FROM capture_batches").fetchone()[0]
+        self.assertGreater(jobs, 0)
+        destination = self.root / "relocated"
+        destination.mkdir()
+        result = self.relocate("test-run", destination_root=str(destination),
+                               apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "relocated", result)
+        self.assertTrue(result["restored"], result)
+        destination_db = destination / f"generations/{generation}/knowledge.sqlite"
+        with closing(sqlite3.connect(destination_db)) as moved:
+            self.assertEqual(moved.execute("SELECT value FROM relocation_probe").fetchone()[0],
+                             "committed-in-wal")
+            self.assertEqual(moved.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], jobs)
+            self.assertEqual(moved.execute("SELECT COUNT(*) FROM source_records").fetchone()[0], records)
+            self.assertEqual(moved.execute("SELECT COUNT(*) FROM capture_batches").fetchone()[0], batches)
+        moved_run = journal_details(destination, "test-run")
+        self.assertEqual(moved_run["run_id"], "test-run")
+        self.assertEqual(moved_run["plan"]["generation_id"], generation)
+        compact = RebuildJournal(destination, "test-run").read()
+        self.assertEqual(compact["plan_fingerprint"], fingerprint(compact["plan"]))
+        self.assertEqual(moved_run["original_plan_fingerprint"], before["plan_fingerprint"])
+        self.assertEqual(moved_run["plan"]["database"], str(destination_db))
+        # Immutable evidence is referenced, never rewritten in place.
+        self.assertEqual(moved_run["freeze_receipts"], before["freeze_receipts"])
+        self.assertEqual(moved_run["plan"]["legacy_inventory"], before["plan"]["legacy_inventory"])
+        journal = RebuildJournal(destination, "test-run")
+        self.assertTrue("$rebuild_payload" in journal.read()["original_plan"])
+        original = journal.payloads.expand(journal.read()["original_plan"])
+        self.assertEqual(original["database"], before["plan"]["database"])
+        # The original root is retained with an explicit retirement record.
+        self.assertTrue((self.runtime_root / "runs/test-run/run.json").is_file())
+        self.assertEqual(read_json(destination / "runs/test-run/relocation-retired.json")["state"],
+                         "retired_by_relocation")
+        self.assertEqual(self.config_store.inspect()["semantic_runtime_root"], str(destination))
+        self.assertEqual(self.coordinator_at(destination).status("test-run")["relocated"], True)
+
+    def test_expired_plan_is_recovered_by_relocation_and_resumes(self):
+        base = 1_000_000.0
+        self.coordinator.clock = lambda: base
+        self.coordinator.plan(PROFILE, run_id="test-run", expires_in=10)
+        self.coordinator.clock = lambda: base + 1000
+        with self.assertRaisesRegex(RebuildError, "plan_expired"):
+            self.execute()
+        destination = self.root / "relocated"
+        destination.mkdir()
+        result = self.relocate("test-run", destination_root=str(destination),
+                               apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "relocated", result)
+        self.assertGreater(journal_details(destination, "test-run")["plan"]["expires_at"], base + 1000)
+        self.managed.on_restore = lambda: self.live_increment(destination)
+        moved = self.coordinator_at(destination, clock=lambda: base + 1000)
+        outcome = moved.execute("test-run", allow_source_read=True, allow_model_processing=True)
+        self.assertEqual(outcome["state"], "run_complete", outcome)
+        self.assertEqual(GenerationRegistry(destination).pin().generation_id,
+                         journal_details(destination, "test-run")["plan"]["generation_id"])
+
+    def test_changed_provider_route_allowed_only_before_jobs(self):
+        self.partial_run()
+        # The live config endpoint/model changed after planning: material even
+        # though the stored profile is untouched.
+        self.config_store.update(lambda value: value.update(ai_base_url="http://127.0.0.1:9999/v1",
+                                                            monitor_ai_model="refreshed-model"))
+        with self.assertRaisesRegex(RebuildError, "relocation_provider_changed"):
+            self.relocate("test-run", destination_root=str(self._destination("moved-jobs")),
+                          apply=True, allow_runtime_changes=True)
+        self.assertEqual(self.config_store.inspect()["semantic_runtime_root"], str(self.runtime_root))
+        self.coordinator.plan(PROFILE, run_id="clean-run")
+        self.config_store.update(lambda value: value.update(monitor_ai_model="zero-job-new-model"))
+        ok = self.relocate("clean-run", destination_root=str(self._destination("moved-clean")),
+                           apply=True, allow_runtime_changes=True)
+        self.assertEqual(ok["state"], "relocated", ok)
+        self.assertEqual(ok["job_count"], 0)
+        self.assertTrue(ok["provider_refreshed"])
+        moved = journal_details(self.root / "moved-clean", "clean-run")
+        self.assertEqual(moved["plan"]["config"]["monitor_ai_model"], "zero-job-new-model")
+        self.assertEqual(moved["plan"]["config_fingerprint"], fingerprint(moved["plan"]["config"]))
+
+    def test_provider_profile_refresh_allowed_only_before_jobs(self):
+        self.partial_run()
+        changed = dict(PROFILE, secret_name="synthetic-key-refresh")
+        with self.assertRaisesRegex(RebuildError, "relocation_provider_changed"):
+            self.relocate("test-run", destination_root=str(self._destination("profile-jobs")),
+                          apply=True, allow_runtime_changes=True, provider_profile=changed)
+        self.coordinator.plan(PROFILE, run_id="clean-run")
+        ok = self.relocate("clean-run", destination_root=str(self._destination("profile-clean")),
+                           apply=True, allow_runtime_changes=True, provider_profile=changed)
+        self.assertEqual(ok["state"], "relocated", ok)
+        self.assertTrue(ok["provider_refreshed"], ok)
+        moved = journal_details(self.root / "profile-clean", "clean-run")
+        self.assertEqual(moved["plan"]["provider_profile"]["secret_name"], "synthetic-key-refresh")
+
+    def test_interrupted_transfer_retry_resumes_without_losing_authority(self):
+        self.partial_run()
+        destination = self._destination("relocated")
+        original = self.coordinator._relocation_copy_entry
+        calls = {"count": 0}
+        def flaky(source, target, relative):
+            calls["count"] += 1
+            if calls["count"] == 3:
+                raise RebuildError("synthetic_transfer_crash")
+            return original(source, target, relative)
+        with patch.object(self.coordinator, "_relocation_copy_entry", side_effect=flaky):
+            failed = self.relocate("test-run", destination_root=str(destination),
+                                   apply=True, allow_runtime_changes=True)
+        self.assertEqual(failed["state"], "incomplete", failed)
+        self.assertTrue(failed["restored"], failed)
+        self.assertEqual(self.config_store.inspect()["semantic_runtime_root"], str(self.runtime_root))
+        self.assertTrue((destination / ".wgo-relocation.json").is_file())
+        self.assertTrue((self.runtime_root / "runs/test-run/run.json").is_file())
+        result = self.relocate("test-run", destination_root=str(destination),
+                               apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "relocated", result)
+        self.assertEqual(self.config_store.inspect()["semantic_runtime_root"], str(destination))
+        compact = RebuildJournal(destination, "test-run").read()
+        self.assertEqual(compact["plan_fingerprint"], fingerprint(compact["plan"]))
+
+    def test_disjoint_config_update_is_preserved(self):
+        self.partial_run()
+        self.config_store.update(lambda value: value.update(daily_digest_time="23:59"))
+        destination = self._destination("relocated")
+        result = self.relocate("test-run", destination_root=str(destination),
+                               apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "relocated", result)
+        config = self.config_store.inspect()
+        self.assertEqual(config["daily_digest_time"], "23:59")
+        self.assertEqual(config["semantic_runtime_root"], str(destination))
+
+    def test_interrupted_adoption_resumes_in_place_and_blocks_plain_execute(self):
+        self.partial_run()
+        destination = self._destination("relocated")
+        with patch.object(self.coordinator, "_relocation_complete",
+                          side_effect=RebuildError("synthetic_adoption_crash")):
+            failed = self.relocate("test-run", destination_root=str(destination),
+                                   apply=True, allow_runtime_changes=True)
+        self.assertEqual(failed["state"], "incomplete", failed)
+        self.assertTrue(failed["recovery_required"], failed)
+        # Config is adopted, so the run is reachable at the new root but must be
+        # finalized by an explicit relocate resume, never a plain execute.
+        self.assertEqual(self.config_store.inspect()["semantic_runtime_root"], str(destination))
+        moved = self.coordinator_at(destination)
+        with self.assertRaisesRegex(RebuildError, "relocation_recovery_required"):
+            moved.execute("test-run", allow_source_read=True, allow_model_processing=True)
+        from core.semantic import rebuild
+        original_read = rebuild.read_regular
+        def bounded_read(path):
+            if str(path).endswith(".sqlite"):
+                raise AssertionError("relocation verification must stream the database")
+            return original_read(path)
+        with patch.object(rebuild, "read_regular", side_effect=bounded_read):
+            result = moved.relocate("test-run", destination_root=str(destination),
+                                    apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "relocated", result)
+        compact = RebuildJournal(destination, "test-run").read()
+        self.assertIs(compact["relocation"]["complete"], True)
+        self.assertEqual(compact["plan"]["database"],
+                         str(destination / "generations" / compact["plan"]["generation_id"] / "knowledge.sqlite"))
+
+    def test_sqlite_copy_retry_includes_wal_even_when_main_file_matches(self):
+        source, destination = self.root / "copy-source.sqlite", self.root / "copy-dest.sqlite"
+        with closing(sqlite3.connect(source)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE probe(value TEXT)")
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            destination.write_bytes(source.read_bytes())
+            conn.execute("INSERT INTO probe VALUES('new-wal-commit')")
+            conn.commit()
+            self.assertEqual(source.read_bytes(), destination.read_bytes())
+            self.coordinator._relocation_copy_entry(source, destination, "copy-dest.sqlite")
+            with closing(sqlite3.connect(destination)) as moved:
+                self.assertEqual(moved.execute("SELECT value FROM probe").fetchone()[0], "new-wal-commit")
+
+    def test_failed_sqlite_retry_preserves_existing_destination(self):
+        source, destination = self.root / "copy-source.sqlite", self.root / "copy-dest.sqlite"
+        with closing(sqlite3.connect(source)) as conn:
+            conn.execute("CREATE TABLE probe(value TEXT)")
+        before = b"previous validated destination"
+        destination.write_bytes(before)
+        with patch("core.semantic.rebuild.backup_sqlite", side_effect=RebuildError("backup_integrity_failed")), \
+             self.assertRaisesRegex(RebuildError, "backup_integrity_failed"):
+            self.coordinator._relocation_copy_entry(source, destination, "copy-dest.sqlite")
+        self.assertEqual(destination.read_bytes(), before)
+
+    def test_relocation_refuses_active_generation(self):
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        self.managed.on_restore = self.live_increment
+        self.assertEqual(self.execute()["state"], "run_complete")
+        with self.assertRaisesRegex(RebuildError, "relocation_run_complete"):
+            self.relocate("test-run", destination_root=str(self._destination("moved")),
+                          apply=True, allow_runtime_changes=True)
+
+    def test_relocation_refuses_in_progress_cutover(self):
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        def fault(phase):
+            if phase == "after_cutover_intent":
+                raise RebuildError("synthetic_cutover_crash")
+        self.coordinator.fault_hook = fault
+        self.assertEqual(self.execute()["code"], "synthetic_cutover_crash")
+        self.coordinator.fault_hook = lambda _: None
+        with self.assertRaisesRegex(RebuildError, "relocation_cutover_in_progress"):
+            self.relocate("test-run", destination_root=str(self._destination("moved")),
+                          apply=True, allow_runtime_changes=True)
+
+    def test_relocation_refuses_unsafe_foreign_and_missing_roots(self):
+        self.partial_run()
+        with self.assertRaisesRegex(RebuildError, "relocation_path_overlap"):
+            self.relocate("test-run", destination_root=str(self.legacy.vault / "relocated"))
+        with self.assertRaisesRegex(RebuildError, "relocation_path_overlap"):
+            self.relocate("test-run", destination_root=str(self.runtime_root))
+        # A missing root may be an unmounted volume: never fabricated.
+        with self.assertRaisesRegex(RebuildError, "destination_unavailable"):
+            self.relocate("test-run", destination_root=str(self.root / "absent" / "moved"),
+                          apply=True, allow_runtime_changes=True)
+        self.assertFalse((self.root / "absent").exists())
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        (foreign / "keep.txt").write_text("mine", encoding="utf-8")
+        with self.assertRaisesRegex(RebuildError, "destination_not_empty"):
+            self.relocate("test-run", destination_root=str(foreign),
+                          apply=True, allow_runtime_changes=True)
+        self.assertEqual((foreign / "keep.txt").read_text(encoding="utf-8"), "mine")
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(RebuildError):
+            self.relocate("test-run", destination_root=str(alias / "moved"))
+
+    def test_relocation_restores_exact_app_only_after_releasing_locks(self):
+        self.partial_run()
+        mark = len(self.managed.events)
+        self.relocate("test-run", destination_root=str(self._destination("relocated")),
+                      apply=True, allow_runtime_changes=True)
+        events = self.managed.events[mark:]
+        self.assertIn("stopped", events)
+        self.assertIn("restored", events)
+        self.assertLess(events.index("stopped"), events.index("resource_locked"))
+        self.assertLess(events.index("resource_released"), events.index("app_released"))
+        self.assertLess(events.index("app_released"), events.index("restored"))
+
+    def test_relocation_plan_is_source_free_and_requires_grant(self):
+        self.partial_run()
+        destination = self._destination("relocated")
+        with patch.object(self.coordinator, "source_factory", side_effect=AssertionError("source")), \
+             patch.object(self.coordinator, "_roles", side_effect=AssertionError("provider")):
+            plan = self.relocate("test-run", destination_root=str(destination))
+        self.assertEqual(plan["state"], "relocation_planned", plan)
+        self.assertGreater(plan["file_count"], 0)
+        self.assertGreater(plan["job_count"], 0)
+        with self.assertRaisesRegex(RebuildError, "relocation_grant_required"):
+            self.relocate("test-run", destination_root=str(destination), apply=True)
+
+    def _destination(self, name):
+        destination = self.root / name
+        destination.mkdir()
+        return destination
 
 
 class RebuildPreparationMemoryTests(unittest.TestCase):

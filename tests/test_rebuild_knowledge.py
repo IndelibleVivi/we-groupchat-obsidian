@@ -45,6 +45,36 @@ class RebuildCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         coordinator.rollback.assert_called_once_with("run", apply=False, allow_runtime_changes=False)
 
+    def test_relocate_requires_explicit_apply_grant(self):
+        factory = Mock(side_effect=AssertionError("constructor before grants"))
+        code, result = self.invoke(["relocate", "run", "--destination-root", "/private/moved", "--apply"], factory)
+        self.assertEqual(code, 2)
+        self.assertEqual(result["code"], "rebuild_relocation_grant_required")
+        factory.assert_not_called()
+
+    def test_relocate_plan_and_apply_wire_arguments_and_stay_content_free(self):
+        coordinator = Mock()
+        coordinator.relocate.return_value = {"state": "relocation_planned", "run_id": "run",
+            "generation_id": "gen", "file_count": 3, "total_bytes": 10, "job_count": 0}
+        code, result = self.invoke(["--runtime-root", "/private/old", "relocate", "run",
+                                    "--destination-root", "/private/moved"], Mock(return_value=coordinator))
+        self.assertEqual(code, 0)
+        self.assertFalse(coordinator.relocate.call_args.kwargs["apply"])
+        self.assertNotIn("destination_root", result)
+        coordinator.relocate.return_value = {"state": "relocated", "run_id": "run",
+            "generation_id": "gen", "relocation_receipt": "a" * 64, "job_count": 4,
+            "file_count": 12, "total_bytes": 900, "destination_root": "/private/moved"}
+        code, result = self.invoke(["--runtime-root", "/private/old", "relocate", "run",
+                                    "--destination-root", "/private/moved",
+                                    "--apply", "--allow-runtime-changes"], Mock(return_value=coordinator))
+        self.assertEqual(code, 0)
+        kwargs = coordinator.relocate.call_args.kwargs
+        self.assertEqual(kwargs["destination_root"], "/private/moved")
+        self.assertTrue(kwargs["apply"])
+        self.assertTrue(kwargs["allow_runtime_changes"])
+        self.assertEqual(result["relocation_receipt"], "a" * 64)
+        self.assertNotIn("private", json.dumps(result))
+
     def test_public_output_omits_private_runtime_identity(self):
         admission = {"text": {"max_inflight": 2, "requests_per_minute": None,
                               "tokens_per_minute": None, "unset": ["requests_per_minute", "tokens_per_minute"]}}

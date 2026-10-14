@@ -178,15 +178,27 @@ class LegacyEntrypointGuardTests(unittest.TestCase):
         self.assertFalse(self.config_path.exists())
 
     def test_missing_generation_and_candidate_do_not_create_or_open_storage(self):
+        self.semantic_root.mkdir()
         before = self.snapshot()
         self.assertFalse(runtime.legacy_command_blocked())
         self.assertEqual(self.snapshot(), before)
+
         candidate = self.semantic_root / "generations/candidate/knowledge.sqlite"
         candidate.parent.mkdir(parents=True)
         candidate.write_bytes(b"unactivated candidate")
         before = self.snapshot()
         with patch("sqlite3.connect", side_effect=AssertionError("candidate database opened")):
             self.assertFalse(runtime.legacy_command_blocked())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unavailable_configured_root_blocks_every_legacy_writer(self):
+        self.assert_blocked_entries("semantic_legacy_cutover_blocked")
+
+    def test_unconfigured_default_root_preserves_unmigrated_installation(self):
+        self.config.pop("semantic_runtime_root")
+        ConfigStore().replace(self.config)
+        before = self.snapshot()
+        self.assertFalse(runtime.legacy_command_blocked())
         self.assertEqual(self.snapshot(), before)
 
     def test_missing_grant_still_precedes_semantic_inspection(self):
@@ -197,6 +209,7 @@ class LegacyEntrypointGuardTests(unittest.TestCase):
         self.assertIn("--allow-transient-wechat-source-read", output.getvalue())
 
     def test_unmigrated_and_explicit_rollback_preserve_legacy_dispatch(self):
+        self.semantic_root.mkdir()
         for phase in (None, "rolled_back"):
             with self.subTest(phase=phase), redirect_stdout(StringIO()):
                 if phase:

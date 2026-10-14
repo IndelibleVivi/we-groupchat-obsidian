@@ -707,6 +707,9 @@ class TaxonomyMigrationTests(unittest.TestCase):
                     os.unlink(source)
                 with open(destination, "wb") as handle:
                     handle.write(data)
+                # Model the migration's preserved mode, independent of the
+                # test runner's umask when a new destination is created.
+                os.chmod(destination, record["before_mode"])
 
     def test_preview_seals_private_manifest_without_source_mutation(self):
         before_db = self.digest(self.db_path)

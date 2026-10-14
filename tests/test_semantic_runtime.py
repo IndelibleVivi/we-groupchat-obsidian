@@ -53,6 +53,7 @@ class SemanticRuntimeTests(unittest.TestCase):
         self.assertEqual(self.monitor._check_once()["status"], "no_messages")
 
     def test_missing_active_pin_never_falls_back_with_semantic_checkpoint(self):
+        (self.root / "missing-runtime").mkdir()
         monitor = TopicMonitor(self.source, {
             "monitor_chat_username": "chat", "monitor_topic": "old preference",
             "semantic_runtime_root": str(self.root / "missing-runtime"),
@@ -65,6 +66,14 @@ class SemanticRuntimeTests(unittest.TestCase):
                              "semantic_active_generation_missing")
         self.assertEqual(self.state.inspect(), before)
         self.assertEqual(len(self.source.page_calls), calls)
+
+    def test_unavailable_explicit_runtime_root_blocks_before_source_or_provider(self):
+        from core.semantic.rebuild import RebuildError
+        config = {"semantic_runtime_root": str(self.root / "unmounted-runtime")}
+        with patch.object(ProviderRoles, "from_profile", side_effect=AssertionError("provider")), \
+             self.assertRaisesRegex(RebuildError, "semantic_runtime_root_unavailable"):
+            SemanticRuntime.active(config)
+        self.assertFalse((self.root / "unmounted-runtime").exists())
 
     def test_provider_failure_keeps_capture_but_does_not_advance_applied(self):
         self.append()

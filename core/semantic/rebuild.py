@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import time
 import uuid
 
@@ -30,10 +31,24 @@ from core.semantic.rebuild_payloads import (Payloads, STORAGE_SCHEMA, MAX_JOURNA
 SCHEMA = "we-groupchat-obsidian.semantic-rebuild.v1"
 ACTIVE_SCHEMA = "we-groupchat-obsidian.semantic-active.v1"
 JOURNAL_SCHEMA = "we-groupchat-obsidian.semantic-cutover.v1"
+RELOCATION_SCHEMA = "we-groupchat-obsidian.semantic-relocation.v1"
+RETIREMENT_SCHEMA = "we-groupchat-obsidian.semantic-relocation-retirement.v1"
+_RELOCATION_MARKER = ".wgo-relocation.json"
 _ID = re.compile(r"^[a-zA-Z0-9_-]{1,100}$")
 _ACTIVATION_STEPS = (
     "intent", "acceptance", "projections", "checkpoints", "active_manifest",
     "consistency", "activation_committed", "provisional",
+)
+# Config keys whose change alters the effective TEXT or DECISION binding (the
+# endpoint, model, provider, thinking parameter, timeout or admission). The
+# binding comes from the profile AND config, so a live endpoint/model edit is a
+# material change even when the stored profile is identical. A relocation may
+# adopt a changed value only for a generation that has never dispatched a job.
+_PROVIDER_CONFIG_KEYS = (
+    "ai_provider", "ai_model", "ai_base_url", "ollama_url", "ollama_model",
+    "monitor_ai_provider", "monitor_ai_model", "monitor_ai_thinking",
+    "monitor_ai_timeout_seconds", "custom_thinking_parameter",
+    "semantic_provider_limits", "semantic_text_output_tokens",
 )
 
 
@@ -155,12 +170,15 @@ class GenerationPin:
 
 class GenerationRegistry:
     """One immutable read pin; no independent config/index fallback on failure."""
-    def __init__(self, runtime_root):
+    def __init__(self, runtime_root, *, require_available=False):
         self.root = Path(runtime_root)
+        self.require_available = require_available
         self.active_path = safe_path(self.root, "active.json")
         self.journal_path = safe_path(self.root, "cutover.json")
 
     def pin(self):
+        if self.require_available and not self.root.is_dir():
+            raise RebuildError("semantic_runtime_root_unavailable")
         journal = read_json(self.journal_path)
         if journal is not None and journal.get("schema") != JOURNAL_SCHEMA:
             raise RebuildError("cutover_journal_invalid")
@@ -397,6 +415,45 @@ def backup_files(entries, destination):
     return receipts
 
 
+def copy_regular(source, destination):
+    """Stream one regular file into a secured destination, then replace atomically.
+
+    Used for relocation of large immutable evidence (payloads, inline backups)
+    without loading whole documents into memory. The temporary file is created
+    mode-0600 before any payload byte and the target is never removed first.
+    """
+    source, destination = Path(source), Path(destination)
+    if not regular_exists(source):
+        raise RebuildError("rebuild_relocation_source_invalid")
+    safe_path(destination.parent, destination.name)
+    services = create_platform_services()
+    services.require("private_storage").ensure_directory(str(destination.parent))
+    fd, temporary = tempfile.mkstemp(prefix=".pending-copy-", dir=str(destination.parent))
+    digest = hashlib.sha256()
+    length = 0
+    try:
+        with open(source, "rb") as handle, os.fdopen(fd, "wb") as output:
+            fd = -1
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                output.write(chunk)
+                digest.update(chunk)
+                length += len(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+        temporary = None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    return digest.hexdigest(), length
+
+
 class ManagedRuntime:
     """Exact managed LaunchAgent; no process-name kill or implicit different app."""
     def __init__(self, project_dir, *, runner=subprocess.run, lock_factory=AppInstanceLock,
@@ -511,6 +568,24 @@ def _regular_tree(root):
             result.append({"path": str(path), "relative": path.relative_to(root).as_posix(),
                            "sha256": file_fingerprint(path), "size": path.stat().st_size})
     return sorted(result, key=lambda row: row["relative"])
+
+
+def _job_count(path):
+    """Count durable jobs without creating or initializing a generation DB.
+
+    A missing or not-yet-created database has zero accepted inventory, so a
+    pre-activation relocation may safely refresh the provider binding. Only the
+    jobs table matters: unknown outcomes and accepted artifacts are jobs too.
+    """
+    path = Path(path)
+    if not regular_exists(path):
+        return 0
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "jobs" not in tables:
+            return 0
+        return int(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
 
 
 def _default_source(config):
@@ -730,6 +805,7 @@ class RebuildCoordinator:
         return {"run_id": run_id, "generation_id": run["plan"]["generation_id"],
                 "phase": phase, "error_codes": [e["code"] for e in run["errors"]],
                 "freeze_count": len(run["freeze_receipts"]),
+                "relocated": bool((run.get("relocation") or {}).get("complete")),
                 "configured_admission": _admission_snapshot(run["plan"]["config"]),
                 "state": state}
 
@@ -771,10 +847,471 @@ class RebuildCoordinator:
             return {"run_id": run_id, "generation_id": run["plan"]["generation_id"],
                     "state": "journal_ready", "phase": run["phase"]}
 
+    # --- Pre-activation relocation to another private local runtime root ---
+
+    def _configured_root(self, config):
+        from core.config import DATA_DIR
+        return Path(os.path.abspath(os.path.expanduser(
+            os.fspath(config.get("semantic_runtime_root") or Path(DATA_DIR) / "semantic"))))
+
+    def _admit_destination(self, config, destination_root):
+        """Reject overlap with the source, vault, legacy or state paths, lexically."""
+        from core.config import DATA_DIR
+        from core.resource_capture import resource_capture_db_path
+        def lexical(value):
+            return Path(os.path.abspath(os.path.expanduser(os.fspath(value))))
+        destination = lexical(destination_root)
+        safe_path(destination, "")
+        protected = [self.root, self.usage_path, self.review_queue_dir,
+                     config.get("monitor_knowledge_db"), config.get("monitor_obsidian_root"),
+                     config.get("attachment_archive_root") or Path(DATA_DIR) / "attachment_archive",
+                     resource_capture_db_path(config), *(self.state_paths or {}).values()]
+        if config.get("db_dir"):
+            protected.append(config["db_dir"])
+        for value in protected:
+            if not value:
+                continue
+            other = lexical(value)
+            if destination == other or destination.is_relative_to(other) or other.is_relative_to(destination):
+                raise RebuildError("rebuild_relocation_path_overlap")
+        # Fail closed for an unavailable or untrusted root. An absent path (for
+        # example an unmounted volume mount point) must never be fabricated into
+        # a substitute tree on the boot volume; the operator creates the exact
+        # private destination directory first.
+        if not destination.exists():
+            raise RebuildError("rebuild_relocation_destination_unavailable")
+        if destination.is_symlink() or not destination.is_dir():
+            raise RebuildError("rebuild_relocation_destination_invalid")
+        return destination
+
+    def _relocation_guard(self, journal, run, destination):
+        """Relocation is pre-activation only: no active pin and no live cutover."""
+        if run.get("final_receipt", {}).get("state") == "run_complete" or run.get("phase") == "run_complete":
+            raise RebuildError("rebuild_relocation_run_complete")
+        if read_json(journal.registry.journal_path) is not None:
+            raise RebuildError("rebuild_relocation_cutover_in_progress")
+        if journal.registry.pin() is not None:
+            raise RebuildError("rebuild_relocation_active_generation")
+
+    def _effective_profile(self, plan, provider_profile):
+        if provider_profile is None:
+            return plan["provider_profile"], False
+        from core.semantic.runtime import validate_profile
+        try:
+            refreshed = validate_profile(provider_profile)
+        except Exception as exc:
+            raise RebuildError(getattr(exc, "code", "rebuild_relocation_profile_invalid")) from exc
+        return refreshed, refreshed != plan["provider_profile"]
+
+    @staticmethod
+    def _config_provider_changed(old, new):
+        return any(old.get(key) != new.get(key) for key in _PROVIDER_CONFIG_KEYS)
+
+    @staticmethod
+    def _relocation_binding_check(old, new):
+        """Only the runtime root, revision and rolled-back provider binding may move."""
+        for key in ("monitor_knowledge_db", "monitor_obsidian_root", "monitor_obsidian_subdir",
+                    "monitor_chats", "db_dir", "wechat_source_identity",
+                    "attachment_archive_root", "resource_capture_db"):
+            if old.get(key) != new.get(key):
+                raise RebuildError("rebuild_relocation_binding_changed")
+
+    def _relocation_inventory(self, run_id, generation):
+        """Bound the exact run + generation tree to copy; reject symlinks/non-regulars."""
+        roots, total = [], 0
+        for relative in (f"runs/{run_id}", f"generations/{generation}"):
+            root = safe_path(self.root, relative)
+            if root.exists():
+                if not root.is_dir():
+                    raise RebuildError("rebuild_relocation_source_invalid")
+                roots.append((root, relative))
+        if not roots or roots[0][1] != f"runs/{run_id}":
+            raise RebuildError("rebuild_run_missing")
+        entries = []
+        for root, prefix in roots:
+            for directory, directories, files in os.walk(root, followlinks=False):
+                for name in (*directories, *files):
+                    safe_path(self.root, Path(directory, name).relative_to(self.root).as_posix())
+                for name in files:
+                    if name.endswith(".lock") or name.startswith(".pending") or name == _RELOCATION_MARKER:
+                        continue
+                    if name in {"relocation-receipt.json", "relocation-retired.json"}:
+                        continue
+                    if name.endswith(("-wal", "-shm")):
+                        # Online Backup consolidates committed WAL state; a raw
+                        # sidecar beside a consolidated copy would be corrupt.
+                        continue
+                    path = Path(directory, name)
+                    if not regular_exists(path):
+                        raise RebuildError("rebuild_relocation_source_invalid")
+                    relative = prefix + "/" + path.relative_to(root).as_posix()
+                    size = path.stat().st_size
+                    entries.append({"source": str(path), "relative": relative, "size": size})
+                    total += size
+        return entries, total
+
+    def _relocation_prepare_marker(self, destination, run_id, generation, plan):
+        """Admit only an existing empty or already-owned destination, then publish intent."""
+        if not destination.exists() or destination.is_symlink() or not destination.is_dir():
+            # Never create the tree: a missing root may be an unmounted volume.
+            raise RebuildError("rebuild_relocation_destination_unavailable")
+        data = self._relocation_destination_state(destination, run_id, generation, plan)
+        if data is not None:
+            return data
+        data = {"schema": RELOCATION_SCHEMA, "state": "transferring", "run_id": run_id,
+                "generation_id": generation, "original_root": str(self.root),
+                "original_plan_fingerprint": fingerprint(plan), "created_at": self.clock()}
+        write_json(safe_path(destination, _RELOCATION_MARKER), data)
+        return data
+
+    def _relocation_destination_state(self, destination, run_id, generation, plan):
+        """Validate the destination before any app stop; never create the tree."""
+        marker = destination / _RELOCATION_MARKER
+        if regular_exists(marker):
+            data = read_json(marker)
+            if (data.get("run_id") != run_id or data.get("generation_id") != generation
+                    or data.get("original_root") != str(self.root)
+                    or data.get("original_plan_fingerprint") != fingerprint(plan)):
+                raise RebuildError("rebuild_relocation_destination_foreign")
+            return data
+        if any(name.name != _RELOCATION_MARKER for name in destination.iterdir()):
+            raise RebuildError("rebuild_relocation_destination_not_empty")
+        return None
+
+    def _relocation_copy_entry(self, source, destination, relative):
+        if not regular_exists(source):
+            raise RebuildError("rebuild_relocation_source_invalid")
+        create_platform_services().require("private_storage").ensure_directory(str(destination.parent))
+        if source.suffix == ".sqlite":
+            # Main-file equality cannot prove equality of committed WAL state.
+            # Publish a fresh validated backup atomically; a failed retry must
+            # leave the previously verified destination intact.
+            temporary = safe_path(destination.parent, ".pending-sqlite-" + uuid.uuid4().hex + ".sqlite")
+            try:
+                digest = backup_sqlite(source, temporary)["sha256"]
+                os.replace(temporary, destination)
+            finally:
+                if regular_exists(temporary):
+                    temporary.unlink()
+        else:
+            digest = file_fingerprint(source)
+            if regular_exists(destination) and file_fingerprint(destination) == digest:
+                return {"relative": relative, "sha256": digest, "size": destination.stat().st_size,
+                        "copied": False}
+            digest, _ = copy_regular(source, destination)
+        if file_fingerprint(destination) != digest:
+            raise RebuildError("rebuild_relocation_copy_mismatch")
+        return {"relative": relative, "sha256": digest, "size": destination.stat().st_size,
+                "copied": True}
+
+    def _relocation_transfer(self, entries, destination):
+        receipts = []
+        for entry in entries:
+            target = safe_path(destination, entry["relative"])
+            receipts.append(self._relocation_copy_entry(Path(entry["source"]), target, entry["relative"]))
+            self.fault_hook("after_relocation_copy")
+        return receipts
+
+    def _relocation_rebind(self, journal, run, config, destination, profile, provider_changed,
+                           job_count, expires_in, receipts, total):
+        """Write the operational plan bound to the destination and the durable receipt."""
+        plan = run["plan"]
+        generation = plan["generation_id"]
+        original_plan_fingerprint = run["plan_fingerprint"]
+        new_plan = dict(plan)
+        new_plan["database"] = str(safe_path(destination, f"generations/{generation}/knowledge.sqlite"))
+        new_plan["staging_root"] = str(safe_path(destination, f"runs/{journal.run_id}/staging/WGO"))
+        new_plan["config"] = config
+        new_plan["config_fingerprint"] = fingerprint(config)
+        new_plan["config_revision"] = config["config_revision"]
+        new_plan["provider_profile"] = profile
+        new_plan["provider_budget"] = _budget_snapshot(profile, self.usage_path, self.clock())
+        new_plan["configured_admission"] = _admission_snapshot(config)
+        new_plan["expires_at"] = self.clock() + expires_in
+        receipt = {"schema": RELOCATION_SCHEMA, "state": "transferred", "complete": False,
+                   "run_id": journal.run_id, "generation_id": generation,
+                   "original_root": str(self.root), "destination_root": str(destination),
+                   "original_plan_fingerprint": original_plan_fingerprint,
+                   "job_count": job_count, "provider_refreshed": bool(provider_changed),
+                   "file_count": len(receipts), "total_bytes": total, "files": receipts,
+                   "created_at": self.clock()}
+        destination_journal = RebuildJournal(destination, journal.run_id)
+        with destination_journal.locked():
+            def mutator(row):
+                if row.get("run_id") != journal.run_id or row["plan"]["generation_id"] != generation:
+                    raise RebuildError("rebuild_relocation_identity_mismatch")
+                row["original_plan"] = destination_journal.payloads.put(row["plan"])
+                row.setdefault("original_plan_fingerprint", original_plan_fingerprint)
+                row["plan"] = destination_journal.payloads.compact(dict(new_plan), ("plan",))
+                row["plan_fingerprint"] = fingerprint(row["plan"])
+                row["relocation"] = {key: value for key, value in receipt.items() if key != "files"}
+                row["relocation"]["plan_fingerprint"] = row["plan_fingerprint"]
+                row["relocation_files"] = destination_journal.payloads.put(receipt["files"])
+                return row
+            destination_journal.update(mutator)
+        receipt["plan_fingerprint"] = destination_journal.read()["plan_fingerprint"]
+        receipt["receipt_id"] = fingerprint({key: value for key, value in receipt.items()
+                                             if key != "receipt_id"})
+        with destination_journal.locked():
+            destination_journal.update(lambda row: row["relocation"].update(
+                receipt_id=receipt["receipt_id"], plan_fingerprint=receipt["plan_fingerprint"]))
+        return receipt
+
+    def _relocation_retire(self, run_id, destination, receipt):
+        """Publish a durable retirement record; final reclamation stays with review."""
+        record = {"schema": RETIREMENT_SCHEMA, "run_id": run_id,
+                  "generation_id": receipt["generation_id"],
+                  "original_root": receipt["original_root"], "destination_root": str(destination),
+                  "destination_receipt_id": receipt["receipt_id"],
+                  "original_plan_fingerprint": receipt["original_plan_fingerprint"],
+                  "state": "retired_by_relocation", "reclaim": "operator_review_required",
+                  "created_at": self.clock()}
+        destination_run = safe_path(destination, f"runs/{run_id}")
+        write_json(safe_path(destination_run, "relocation-retired.json"), record)
+        original = Path(receipt["original_root"]) / "runs" / run_id
+        if original.is_dir() and original != destination_run:
+            try:
+                write_json(safe_path(original, "relocation-retired.json"), record)
+            except RebuildError:
+                pass
+        return record
+
+    def _relocation_adopt_config(self, destination, plan, job_count, provider_changed):
+        """Adopt the runtime root through the locked ConfigStore writer only."""
+        from core.config import DATA_DIR
+        target = str(destination)
+        def adopt(working):
+            current = Path(os.path.abspath(os.path.expanduser(os.fspath(
+                working.get("semantic_runtime_root") or Path(DATA_DIR) / "semantic"))))
+            if current not in (self.root, destination):
+                raise RebuildError("rebuild_relocation_config_conflict")
+            if job_count and (provider_changed or self._config_provider_changed(plan["config"], working)):
+                raise RebuildError("rebuild_relocation_provider_changed")
+            self._relocation_binding_check(plan["config"], working)
+            working["semantic_runtime_root"] = target
+        return self.config_store.update(adopt)
+
+    def _relocation_complete(self, journal, receipt, adopted_config):
+        """Finalize the relocated plan; the caller holds ``journal.locked()``."""
+        final = {}
+        def mutator(row):
+            plan = dict(row["plan"])
+            plan["config"] = adopted_config
+            plan["config_fingerprint"] = fingerprint(adopted_config)
+            plan["config_revision"] = adopted_config["config_revision"]
+            plan["provider_budget"] = _budget_snapshot(plan["provider_profile"], self.usage_path, self.clock())
+            plan["configured_admission"] = _admission_snapshot(adopted_config)
+            row["plan"] = journal.payloads.compact(plan, ("plan",))
+            row["plan_fingerprint"] = fingerprint(row["plan"])
+            row["relocation"] = {key: value for key, value in receipt.items() if key != "files"}
+            row["relocation"].update(state="relocated", complete=True,
+                                     config_revision=adopted_config["config_revision"],
+                                     plan_fingerprint=row["plan_fingerprint"],
+                                     completed_at=self.clock())
+            final["plan_fingerprint"] = row["plan_fingerprint"]
+            final["relocation"] = row["relocation"]
+            return row
+        journal.update(mutator)
+        receipt = dict(receipt, **final.get("relocation", {}))
+        write_json(safe_path(journal.run_root, "relocation-receipt.json"),
+                   {key: value for key, value in receipt.items() if key != "files"})
+        return receipt
+
+    def relocate(self, run_id, *, destination_root, apply=False, allow_runtime_changes=False,
+                 provider_profile=None, expires_in=86400):
+        """Move a pre-activation interrupted run to another private local root.
+
+        Plan is read-only and source/provider-free. Apply requires the explicit
+        runtime grant; it copies durable run/generation state with bounded reads,
+        adopts the new runtime root through the locked ConfigStore writer and
+        publishes a durable relocation plus a retirement record for the retained
+        original root. It never reads the WeChat source or calls a provider.
+        """
+        config = self._config()
+        self._admit_private_paths(config)
+        if apply and allow_runtime_changes is not True:
+            raise RebuildError("rebuild_relocation_grant_required")
+        if self._configured_root(config) != self.root:
+            raise RebuildError("rebuild_runtime_root_binding_mismatch")
+        if type(expires_in) not in (int, float) or not 0 < expires_in <= 7 * 86400:
+            raise RebuildError("rebuild_relocation_expiry_invalid")
+        journal = RebuildJournal(self.root, run_id)
+        run = journal.read()
+        if run.get("plan_fingerprint") != fingerprint(run["plan"]):
+            raise RebuildError("rebuild_run_invalid")
+        existing = run.get("relocation")
+        if existing is not None:
+            target = Path(os.path.abspath(os.path.expanduser(os.fspath(destination_root))))
+            if target != self.root or existing.get("destination_root") != str(self.root):
+                raise RebuildError("rebuild_relocation_already_moved")
+            if not apply:
+                return self._relocation_result(run, planned=existing.get("complete") is not True)
+            with journal.locked(), create_platform_services().require("locks").acquire(
+                    str(self.root / "rebuild.lock"), mode=LockMode.EXCLUSIVE, blocking=False):
+                return self._relocate_resume_in_place(journal, journal.read(), config)
+        destination = self._admit_destination(config, destination_root)
+        if destination == self.root:
+            raise RebuildError("rebuild_relocation_same_root")
+        self._relocation_guard(journal, run, destination)
+        self._relocation_destination_state(destination, journal.run_id,
+                                           run["plan"]["generation_id"], run["plan"])
+        profile, provider_changed = self._effective_profile(run["plan"], provider_profile)
+        if not apply:
+            return self._relocation_preview(journal, run, config, provider_changed)
+        with journal.locked(), create_platform_services().require("locks").acquire(
+                str(self.root / "rebuild.lock"), mode=LockMode.EXCLUSIVE, blocking=False):
+            return self._relocate_locked(journal, journal.read(), config, destination,
+                                         profile, provider_changed, expires_in)
+
+    def _relocation_result(self, run, *, planned):
+        relocation = run.get("relocation") or {}
+        return {"run_id": run["run_id"], "generation_id": run["plan"]["generation_id"],
+                "state": "relocation_planned" if planned else "relocated",
+                "code": "rebuild_relocation_pending" if planned else "rebuild_relocation_complete",
+                "provider_refreshed": bool(relocation.get("provider_refreshed")),
+                "job_count": relocation.get("job_count", 0), "requires_runtime_grant": planned}
+
+    def _relocation_preview(self, journal, run, config, provider_changed):
+        plan = run["plan"]
+        entries, total = self._relocation_inventory(journal.run_id, plan["generation_id"])
+        job_count = _job_count(plan["database"])
+        material = provider_changed or self._config_provider_changed(plan["config"], config)
+        return {"run_id": journal.run_id, "generation_id": plan["generation_id"],
+                "state": "relocation_planned", "code": "rebuild_relocation_pending",
+                "file_count": len(entries), "total_bytes": total, "job_count": job_count,
+                "provider_refreshed": bool(material),
+                "provider_change_blocked": bool(material and job_count),
+                "requires_runtime_grant": True}
+
+    def _relocate_locked(self, journal, run, config, destination, profile, provider_changed, expires_in):
+        plan = run["plan"]
+        generation = plan["generation_id"]
+        job_count = _job_count(plan["database"])
+        provider_changed = provider_changed or self._config_provider_changed(plan["config"], config)
+        if provider_changed and job_count:
+            raise RebuildError("rebuild_relocation_provider_changed")
+        self._relocation_binding_check(plan["config"], config)
+        observation = self.managed.inspect()
+        validator = getattr(self.managed, "validate_execution", None)
+        if callable(validator):
+            validator(observation)
+        for key in ("label", "plist_path", "plist_sha256", "program_arguments", "working_directory"):
+            if observation[key] != plan["runtime"][key]:
+                raise RebuildError("rebuild_runtime_changed")
+        states = self._states(config)
+        entries, total = self._relocation_inventory(journal.run_id, generation)
+        parent = destination
+        while not parent.exists():
+            parent = parent.parent
+        if shutil.disk_usage(parent).free < total:
+            raise RebuildError("rebuild_storage_insufficient")
+        stopped, transferred, adopted, failure, receipt = False, False, False, None, None
+        lock_stack = ExitStack()
+        try:
+            self.managed.stop_and_lock(observation)
+            stopped = True
+            lock_stack.enter_context(self.lock_context(config, states))
+            self._relocation_prepare_marker(destination, journal.run_id, generation, plan)
+            receipts = self._relocation_transfer(entries, destination)
+            transferred = True
+            receipt = self._relocation_rebind(journal, run, config, destination, profile,
+                                              provider_changed, job_count, expires_in, receipts, total)
+            self._relocation_retire(journal.run_id, destination, receipt)
+            adopted_config = self._relocation_adopt_config(destination, plan, job_count, provider_changed)
+            adopted = True
+            destination_journal = RebuildJournal(destination, journal.run_id)
+            with destination_journal.locked():
+                receipt = self._relocation_complete(destination_journal, receipt, adopted_config)
+        except (Exception, KeyboardInterrupt) as exc:
+            failure = RebuildError("rebuild_interrupted") if isinstance(exc, KeyboardInterrupt) else exc
+            if not transferred:
+                code = ("rebuild_interrupted" if isinstance(exc, KeyboardInterrupt)
+                        else getattr(exc, "code", "rebuild_relocation_failed"))
+                journal.error(code, "relocation")
+        finally:
+            try:
+                lock_stack.close()
+            finally:
+                self.managed.release()
+        restored = False
+        if stopped:
+            try:
+                restored = self.managed.restore(plan["runtime"]) is True
+            except Exception:
+                restored = False
+        if failure is not None:
+            return {"run_id": journal.run_id, "generation_id": generation, "state": "incomplete",
+                    "code": getattr(failure, "code", "rebuild_relocation_failed"),
+                    "restored": restored,
+                    # Once the runtime root is adopted a plain execute would run
+                    # the copied tree; require an explicit relocate resume first.
+                    "recovery_required": bool(adopted),
+                    "relocation_receipt": (receipt or {}).get("receipt_id")}
+        return {"run_id": journal.run_id, "generation_id": generation, "state": "relocated",
+                "code": "rebuild_relocation_complete", "relocation_receipt": receipt["receipt_id"],
+                "provider_refreshed": bool(receipt.get("provider_refreshed")),
+                "job_count": job_count, "file_count": len(entries), "total_bytes": total,
+                "restored": restored}
+
+    def _relocate_resume_in_place(self, journal, run, config):
+        relocation = run["relocation"]
+        destination = self.root
+        plan = run["plan"]
+        generation = plan["generation_id"]
+        # run.json is intentionally rebound in place; every other copied byte is
+        # verified against its recorded digest.
+        journal_relative = f"runs/{journal.run_id}/run.json"
+        for entry in journal.payloads.get(run["relocation_files"]):
+            if entry["relative"] == journal_relative:
+                continue
+            path = safe_path(destination, entry["relative"])
+            if not regular_exists(path) or file_fingerprint(path) != entry["sha256"]:
+                raise RebuildError("rebuild_relocation_copy_incomplete")
+        observation = self.managed.inspect()
+        for key in ("label", "plist_path", "plist_sha256", "program_arguments", "working_directory"):
+            if observation[key] != plan["runtime"][key]:
+                raise RebuildError("rebuild_runtime_changed")
+        states = self._states(config)
+        stopped, failure, receipt = False, None, None
+        lock_stack = ExitStack()
+        try:
+            self.managed.stop_and_lock(observation)
+            stopped = True
+            lock_stack.enter_context(self.lock_context(config, states))
+            self._relocation_retire(journal.run_id, destination, relocation)
+            adopted_config = self._relocation_adopt_config(destination, plan,
+                                                           relocation.get("job_count", 0),
+                                                           relocation.get("provider_refreshed", False))
+            receipt = self._relocation_complete(journal, relocation, adopted_config)
+        except (Exception, KeyboardInterrupt) as exc:
+            failure = RebuildError("rebuild_interrupted") if isinstance(exc, KeyboardInterrupt) else exc
+        finally:
+            try:
+                lock_stack.close()
+            finally:
+                self.managed.release()
+        restored = False
+        if stopped:
+            try:
+                restored = self.managed.restore(plan["runtime"]) is True
+            except Exception:
+                restored = False
+        if failure is not None:
+            return {"run_id": journal.run_id, "generation_id": generation, "state": "incomplete",
+                    "code": getattr(failure, "code", "rebuild_relocation_failed"),
+                    "restored": restored, "recovery_required": True}
+        return {"run_id": journal.run_id, "generation_id": generation, "state": "relocated",
+                "code": "rebuild_relocation_complete", "relocation_receipt": receipt["receipt_id"],
+                "provider_refreshed": bool(receipt.get("provider_refreshed")),
+                "job_count": relocation.get("job_count", 0), "restored": restored}
+
     def _execute_locked(self, journal):
         from core.semantic.store import SemanticStore
         run, config = journal.read(), self._config()
         plan = run["plan"]
+        relocation = run.get("relocation")
+        if relocation is not None and relocation.get("complete") is not True:
+            raise RebuildError("rebuild_relocation_recovery_required")
         cutover = read_json(journal.registry.journal_path)
         own_cutover = cutover and cutover.get("run_id") == journal.run_id
         if cutover and not own_cutover and cutover.get("phase") not in {"run_complete", "rolled_back"}:

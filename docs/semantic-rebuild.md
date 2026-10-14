@@ -21,6 +21,8 @@ derived consumers。协议细节分别见 [store](semantic-store-contract.md)、
 `semantic_runtime_root` 未设置时使用应用 DATA_DIR 下的 `semantic/`；
 传入 `--runtime-root` 时必须与既有配置一致。配置只能通过 ConfigStore
 或应用已有设置界面修改，不能在执行中替换配置快照。
+显式 root 必须存在且可用；外部卷未挂载时 app、monitor、health 与旧命令都
+失败关闭为 `semantic_runtime_root_unavailable`，不会自动创建替代目录或回落到旧版。
 
 managed LaunchAgent 必须唯一、精确绑定实际 app bundle executable、plist
 及 working directory。旧 `/bin/bash 启动.command` wrapper 不能证明 app
@@ -226,6 +228,65 @@ run 重试，不能删除原件或手改 phase。旧 writer 生成的 canonical 
 收到正常 Ctrl-C / SIGINT 后，coordinator 记录中断并释放锁；切换状态允许安全
 恢复时再恢复精确 app，不能把中断当完成。强制终止仍按 durable journal 恢复。
 
+## 激活前迁移到另一个本地 runtime root
+
+已 plan、尚未 activation 的重建若计划过期或需要换到另一个已挂载的本地卷，可用
+同一 `run_id` 的显式 recovery 把该 run/generation 复制到新的私有本地 root 后继续。
+先看 plan，再显式 apply（apply 必须同时给出两个 flag）：
+
+```bash
+.venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \
+  --runtime-root /EXISTING/OLD/runtime relocate FIRST_MIGRATION \
+  --destination-root /EXISTING/NEW/runtime
+.venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \
+  --runtime-root /EXISTING/OLD/runtime relocate FIRST_MIGRATION \
+  --destination-root /EXISTING/NEW/runtime --apply --allow-runtime-changes
+```
+
+`relocate` 只处理 activation 之前的中断 run：已有 active pin、进行中的 cutover、
+`run_complete` 或已绑定到另一个 destination 都失败关闭。目标 root 必须由操作员
+在确认卷已挂载后事先创建为空目录；缺失、symlink、非目录、非空且不属于该 run 的
+目标，以及任何与 source/vault/legacy/state 路径重叠的位置都会被拒绝。`relocate`
+绝不代替创建 mount 目录，避免在 boot volume 上生成错误的替代卷树。准备阶段只读，
+不读 WeChat 来源、不构造 provider、不停止 app。
+
+apply 先停止并精确绑定 managed app（AppInstanceLock）与既有 rebuild/capture/state
+owners，再用 SQLite Online Backup（含 WAL）复制该 run 的 journal/payloads/backups/
+staging 与 generation DB，逐文件校验 digest。inventory、verification 等不可变
+大 payload 只按引用复制，不展开或重写。中断的复制可对同一 destination 重试：重试
+重新校验并补齐，绝不删除、改写或替换旧 root。复制、destination journal 绑定与校验
+全部成功并写入 relocation 与 retirement evidence 后，才用 latest-locked
+`ConfigStore` patch 写入新的 `semantic_runtime_root` 并 finalize relocation receipt；
+所有锁释放后才恢复精确 app，返回值单独记录 `restored`。
+
+同一 run/generation、原始 plan fingerprint、raw captures、jobs/artifacts、
+checkpoints 与旧 journal provenance 全部保留；不新建会丢弃进度的 plan、不 reset
+cursor、不伪造完成 receipt、也不自动重放 provider。operational plan 只重绑运行位置
+（`database`/`staging_root`）、config revision/fingerprint、预算与限额快照，以及新的
+`expires_at`（这是显式 recovery，不是手改过期时间）；原 plan 存为 `original_plan`
+payload 供历史恢复。旧 root 保留，另有 `runs/<run_id>/relocation-retired.json`
+记录 destination、receipt 与 `reclaim: operator_review_required`，最终空间回收
+留给 operator/coordinator review。
+
+Provider 绑定同时来自 profile 与 live config。generation 已有任何 jobs（含 accepted/
+unknown）时，profile 或 live config 的 TEXT/DECISION route（provider/model/base URL/
+thinking/timeout）变化一律失败关闭；只有零 job 的 generation 才能用
+`--provider-profile` 刷新，或采用已变更的 config endpoint/model。无变化则保留既有
+jobs。config 只经 `ConfigStore.update` 以最新 revision patch，只改
+`semantic_runtime_root`，无关的并发 config 更新会被保留。完成迁移后用新的
+`--runtime-root /EXISTING/NEW/runtime` 正常 resume：
+
+```bash
+.venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \
+  --runtime-root /EXISTING/NEW/runtime resume FIRST_MIGRATION \
+  --allow-transient-wechat-source-read --allow-model-processing
+```
+
+relocation receipt、retirement record 与复制的 payload 仍是私有材料，可能包含本地
+路径；CLI 默认只输出状态与数量。若 adoption 被中断，同一 run/同一 destination
+再跑一次 `relocate --apply --allow-runtime-changes` 完成 finalize；此时 plain
+`execute`/`resume` 会失败关闭为 `rebuild_relocation_recovery_required`。
+
 ## 冻结、完整来源与 publication
 
 每次真正重新冻结都会生成新的 `freeze-N`：fresh 读取旧 DB/state/config 与
@@ -349,6 +410,8 @@ Rollback 只在 current bytes 仍等于已发布 candidate 时恢复原 WGO byte
 | projection conflict 或个人编辑 | 使用 reader owner 的明确冲突处置；原 bytes、backup 和 draft 都保留。 |
 | cutover recovery required | 保持 app 停止；同一 run resume 或显式 rollback，不手改 active.json。 |
 | restore failed / live increment pending | 同一 run 复查 exact binding 与真实 app；不能仅修改 receipt 声称完成。 |
+| relocation 中断、plan 过期或已换 root | 用同一 run 与同一 destination 再跑显式 `relocate --apply --allow-runtime-changes` 完成复制/adoption/finalize；不新建 run、不手改 plan 或 expires_at、不在 config 未 adopt 前继续。 |
+| `rebuild_relocation_*` 拒绝（active/cutover/路径/目标非空/provider 变化） | 按 code 处理：先完成或 rollback 现有 cutover；在已挂载卷上创建空目标目录；jobs 存在时恢复原 provider route/model，或另走新 generation 而不是就地改绑。 |
 
 不要删除状态目录、修改成功计数、清空 pending、换一个 run id 隐藏未解决
 cutover，或以“文件已写出”代替 model/index/source proof。空 journal、FIFO、

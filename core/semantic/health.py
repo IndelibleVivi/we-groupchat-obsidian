@@ -330,7 +330,7 @@ def semantic_health(config, *, checkpoint_paths=(), runtime_root=None, usage_pat
     protected = (config or {}).get("db_dir")
     try:
         root = _admit_path(runtime_root or (config or {}).get("semantic_runtime_root") or Path(DATA_DIR) / "semantic", protected)
-        registry = GenerationRegistry(root)
+        registry = GenerationRegistry(root, require_available=bool(runtime_root or (config or {}).get("semantic_runtime_root")))
         journal = read_json(registry.journal_path)
         pin = registry.pin()
         phase = journal.get("phase") if journal else "none"

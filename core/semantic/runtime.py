@@ -64,7 +64,7 @@ def legacy_command_blocked() -> bool:
             source = Path(os.path.abspath(os.path.expanduser(config["db_dir"])))
             if root == source or root.is_relative_to(source) or source.is_relative_to(root):
                 raise ValueError("semantic_metadata_source_overlap")
-        if GenerationRegistry(root).pin() is None:
+        if GenerationRegistry(root, require_available=bool(config.get("semantic_runtime_root"))).pin() is None:
             return False
         code = "semantic_legacy_command_blocked"
     except (ConfigError, RebuildError, OSError, TypeError, ValueError):
@@ -196,7 +196,7 @@ class SemanticRuntime:
     @classmethod
     def active(cls, config):
         root = Path(config.get("semantic_runtime_root") or Path(DATA_DIR) / "semantic")
-        pin = GenerationRegistry(root).pin()
+        pin = GenerationRegistry(root, require_available=bool(config.get("semantic_runtime_root"))).pin()
         if pin is None:
             return None
         store = SemanticStore(pin.database, pin.generation_id)

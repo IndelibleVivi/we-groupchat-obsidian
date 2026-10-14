@@ -120,9 +120,18 @@ class SemanticHealthTests(unittest.TestCase):
             self.assertNotIn(private, serialized)
 
     def test_missing_generation_is_inactive_without_storage_creation(self):
+        self.runtime.mkdir()
         before = list(self.root.iterdir())
         report = self.report()
         self.assertEqual(report["state"], "inactive")
+        self.assertEqual(list(self.root.iterdir()), before)
+
+    def test_unavailable_configured_root_is_blocked_without_storage_creation(self):
+        before = list(self.root.iterdir())
+        with patch("sqlite3.connect", side_effect=AssertionError("unavailable root must not open DB")):
+            report = self.report()
+        self.assertEqual(report["state"], "blocked")
+        self.assertEqual(report["error_codes"], ["semantic_runtime_root_unavailable"])
         self.assertEqual(list(self.root.iterdir()), before)
 
     def test_candidate_and_retained_generation_are_not_active(self):

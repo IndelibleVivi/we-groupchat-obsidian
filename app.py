@@ -258,7 +258,8 @@ def _notify(title, subtitle, message, data=None):
 
 def _semantic_pin(config):
     from core.semantic.rebuild import GenerationRegistry
-    return GenerationRegistry(config.get("semantic_runtime_root") or os.path.join(DATA_DIR, "semantic")).pin()
+    return GenerationRegistry(config.get("semantic_runtime_root") or os.path.join(DATA_DIR, "semantic"),
+                              require_available=bool(config.get("semantic_runtime_root"))).pin()
 
 
 class _SemanticNotifier:
