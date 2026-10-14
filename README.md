@@ -183,7 +183,7 @@ cutover cannot disappear with a failed candidate.
 
 Editable source: [functional map](docs/architecture/semantic-functional.en.excalidraw).
 Implementation details: [module and authority map](docs/assets/architecture/semantic-core.en.svg)
-and [complete technical Mermaid with source anchors](docs/architecture/semantic-implementation.md).
+and the [implementation walkthrough, with expandable full Mermaid and source anchors](docs/architecture/semantic-implementation.md).
 Detailed contracts: [store](docs/semantic-store-contract.md),
 [engine](docs/semantic-engine.md), [v3 progress](docs/monitor-state-v3.md),
 [reading](docs/semantic-reading.md), and [migration](docs/semantic-rebuild.md).

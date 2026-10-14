@@ -148,7 +148,7 @@ active generation 选择唯一知识链：raw capture 落库后才提交 capture
 
 可编辑源：[功能图](docs/architecture/semantic-functional.zh-CN.excalidraw)。
 技术细节：[模块与状态归属图](docs/assets/architecture/semantic-core.zh-CN.svg)、
-[完整技术 Mermaid 与源码索引](docs/architecture/semantic-implementation.md)。
+[实现走读（含可展开的完整 Mermaid 与源码索引）](docs/architecture/semantic-implementation.md)。
 详细契约：[store](docs/semantic-store-contract.md)、[engine](docs/semantic-engine.md)、
 [v3 进度](docs/monitor-state-v3.md)、[阅读](docs/semantic-reading.md)、[迁移](docs/semantic-rebuild.md)。
 

@@ -1,13 +1,62 @@
-# WGO 语义整理：技术实现总图
+# WGO 语义整理：实现走读
 
-本文件是 [semantic-implementation.zh-CN.mmd](semantic-implementation.zh-CN.mmd) 的
-配套说明：region / node / edge / state 说明、图例、读图方式、repo-relative
-源码锚点、源码与 activation 的边界，以及渲染复现方法。
+从这里顺着读就够了。完整大图和源码表收在文末，日常阅读不需要另外打开 viewer、
+拖动画布或记住节点编号。本文描述候选源码；一台机器是否完成迁移和激活，要另看
+该次运行的验收结果。
 
+## 一条消息最后变成什么
+
+```mermaid
+flowchart TD
+    INPUT[选中群聊的消息与保留的旧知识] --> CAPTURE[只读采集：保存原始证据]
+    CAPTURE --> MODEL[模型：抽取经历、方案、观点与更正]
+    MODEL --> STORE[(SQLite：知识条目、归属、关系与处理凭据)]
+    STORE --> BODY[Obsidian：完整 Markdown 正文与来源]
+    STORE --> SEARCH[检索：全文、向量和关系候选]
+    STORE --> BRIEF[简报与后续变化]
+    BODY --> CONTROL[阅读、关注、静音、等待与标记已知]
+    CONTROL --> BRIEF
+    CAPTURE -. 来源不完整时停止 .-> STOP[保留进度，修复后继续]
+    MODEL -. 失败或结果未知时停止 .-> STOP
+```
+
+**正文是你真正要读的成果。** 同一件事可以跨天、跨群补充和更正，WGO 将证据接到
+持续更新的 Item 上。成员归属来自该条消息已有的身份与名字；转述、本人经历和
+被谈论的人保持区分。内容适合比较时用小表格，适合步骤时用列表，原话用带归属的
+引用；不要求每页套同一个模板。实现入口是
+[`SemanticEngine`](../../core/semantic/engine.py) 与
+[`BodyPlanWriter`](../../core/semantic/projections.py)。
+
+**`View` 是主题目录页。** 比如一个 Item 同时与「申请材料」和「签证」有关，两处
+目录都可以链接到它的正文或具体段落。正文仍只有一个维护位置。View 在 Obsidian 的
+`WGO/视图/` 下，不需要独立应用、网站或操作入口；实现是
+[`ProjectionPublisher.publish_view`](../../core/semantic/projections.py)。
+
+**向量帮助找回材料。** Embedding 把检索文本转成向量，index 保存可重建的检索数据；
+两者可分别选本地或 Cloudflare。模型与 canonical store 负责知识内容和合并决定。
+所选网络 provider 会接收对应文本；具体边界见 [provider contract](../semantic-providers.md)。
+
+## 全量洗笔记与以后更新
+
+首次重建先冻结范围、停止精确的受管理 app 并备份，再完整观察来源、处理旧知识与
+聊天历史、生成正文和索引。第二次独立来源观察和 conservation 校验通过后，才切换
+active generation、恢复 app，并验证真实增量接续。抓到原始消息只是中间步骤；
+模型任务、正文生成和激活各有自己的完成证据。
+
+激活后，同一个 engine 继续处理新消息。`captured` 表示原始资料已保存，`applied`
+表示整批已完成语义处理；模型失败可以让前者领先后者，不能把失败算成“已经洗好”。
+故障恢复沿原 run 继续，操作步骤见 [重建 runbook](../semantic-rebuild.md)。
+
+阅读操作见 [Obsidian 使用说明](../semantic-workflow.md)。下面保留完整技术图，供追踪
+具体 owner、失败边和源码；它与上面的阅读路线描述同一套实现。
+
+<details>
+<summary>展开完整技术 Mermaid、状态归属与源码表</summary>
+
+完整可编辑源：[semantic-implementation.zh-CN.mmd](semantic-implementation.zh-CN.mmd)。
+便携导出：[完整 SVG](../assets/architecture/semantic-implementation.zh-CN.svg)。
 功能图见 [semantic-functional.zh-CN.excalidraw](semantic-functional.zh-CN.excalidraw)，
 模块与权威图见 [semantic-core.zh-CN.excalidraw](semantic-core.zh-CN.excalidraw)。
-本图补充**技术实现层**的入口、状态 owner、载荷与失败去向，不重画功能图，也不是
-只写模块名的线性 pipeline。
 
 ## 范围与事实边界
 
@@ -261,3 +310,5 @@ mmdc -i docs/architecture/semantic-implementation.zh-CN.mmd \
 - 编辑以 `.mmd` 为准；本文件与图保持 region / node / edge 名称一致。
 - 每次改源后重跑结构校验并在有 renderer 的环境渲染、分块目视检查后再合并。
 - Mermaid 渲染产物是 derived artifact，不构成第二份架构权威。
+
+</details>

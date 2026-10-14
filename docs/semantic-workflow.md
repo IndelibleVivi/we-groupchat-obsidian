@@ -6,7 +6,7 @@ WGO 把选中群聊里分散的方案、经历和故事接成可持续更新的�
 
 ![从群聊输入到知识页、检索、简报、跟进与资料交付的功能图](assets/architecture/semantic-functional.zh-CN.svg)
 
-上图先回答「我能拿它做什么」。[完整技术 Mermaid 与源码索引](architecture/semantic-implementation.md)追踪实现接线；[模块与状态归属图](assets/architecture/semantic-core.zh-CN.svg)给出较小的内部视图；[可编辑功能图和导出命令](architecture/README.md)用于维护。这些是源码支持的流程，完整迁移、激活和实际阅读验收仍须分别完成。
+上图先回答「我能拿它做什么」。[实现走读](architecture/semantic-implementation.md)从消息到正文解释接线，完整技术 Mermaid 和源码表在同一文档末尾展开；[可编辑功能图和导出命令](architecture/README.md)用于维护。这些是源码支持的流程，完整迁移、激活和实际阅读验收仍须分别完成。
 
 ## 内容如何成为笔记
 
@@ -20,7 +20,7 @@ SQLite 保存 canonical source、语义、关系、任务和提交证据。Markd
 
 ## 在 Obsidian 中阅读和操作
 
-新 generation 使用固定的 `WGO/` 阅读根目录。Item 保持稳定 `wgo_id`，Views 通过链接组织多个归属，简报保留当时的正文与证据。旧笔记有完整的冻结备份和可见的 Legacy 导航，不把旧摘要冒充原始聊天。
+新 generation 使用固定的 `WGO/` 阅读根目录。Item 是持续更新的知识正文，保持稳定 `wgo_id`。`WGO/视图/` 下的 View 是主题目录页：通过链接或段落嵌入，把同一正文组织到不同主题下，不复制维护第二份正文，也不需要独立的查看器。简报保留当时的正文与证据。旧笔记有完整的冻结备份和可见的 Legacy 导航，不把旧摘要冒充原始聊天。
 
 正文按内容选择 Markdown 形式：比较不同条件时可用表格，操作顺序用有序列表，平行要点用列表，准确原话用带归属和来源的引用。故事可以保留连续叙述，不强制插入表格。格式变化不能丢失条件、步骤或反证，也不能把不同成员各自的测试拼成一个人的完整成功案例。
 

@@ -11,7 +11,7 @@ visible. Source capability does not establish a completed private migration.
 - [Chinese module and authority map](semantic-core.zh-CN.excalidraw)
 - [English module and authority map](semantic-core.en.excalidraw)
 - [Complete technical Mermaid](semantic-implementation.zh-CN.mmd)
-- [Implementation map legend and source anchors](semantic-implementation.md)
+- [Implementation walkthrough, with expandable full reference](semantic-implementation.md)
 - [Portable technical SVG](../assets/architecture/semantic-implementation.zh-CN.svg)
 
 The `.excalidraw` files are editable source. Functional-map exports are generated
@@ -29,8 +29,10 @@ Render and visually inspect both exports after editing. At a 900 px display
 width, body text remains readable; open the standalone SVG for a larger view.
 
 The `.mmd` file is the editable source for the complete technical flowchart.
-Its companion Markdown explains the reading order, authority boundaries and
-source anchors. Renderer output is derived from the same Mermaid source.
+Its companion Markdown starts with a compact inline flow and a plain-language
+walkthrough. The complete reference and source tables are collapsed below it;
+no separate diagram viewer is required. Renderer output is derived from the
+same complete Mermaid source.
 With a Mermaid CLI renderer already installed, regenerate the portable SVG:
 
 ```bash
