@@ -1,0 +1,389 @@
+%% WGO 语义整理 - 技术实现总图（candidate 源码）
+%% 阅读方式、图例、证据表与边界说明见同目录 semantic-implementation.md
+%% 前缀即语义标记，不依赖颜色：
+%%   (C)=canonical 权威或 durable canonical 状态（含 reader ledger / 已接受 artifact）
+%%   (D)=derived 可重建输出   (O)=optional/network/inert   (X)=repo 外 adapter
+%%   (cand)=候选恢复分支      (inv)=失败关闭不变式
+%% 线型：实线=成功路径；虚线=门 / 失败 / 恢复 / 不变式。
+%%{init: {"theme":"neutral","flowchart":{"htmlLabels":true,"wrappingWidth":190,"curve":"basis"}}}%%
+flowchart TB
+  accTitle: WGO semantic implementation — capture, canonical knowledge, reading and recovery
+  accDescr: A source-based candidate architecture with 116 nodes. Durable sources, semantic and reader ledgers are distinguished from derived indexes and Markdown. Optional providers, resource backup, generation cutover and failure paths remain visible.
+
+  classDef canon fill:#e6f4ea,stroke:#1b5e20,color:#0b1a10,stroke-width:2px;
+  classDef derived fill:#e7f0fb,stroke:#0d47a1,color:#06121f;
+  classDef optional fill:#fff8e1,stroke:#8a6d00,color:#221a00,stroke-dasharray:6 3;
+  classDef outside fill:#f3e5f5,stroke:#4a148c,color:#14001c;
+  classDef entry fill:#eceff1,stroke:#37474f,color:#101418;
+  classDef invariant fill:#fdeaea,stroke:#b71c1c,color:#2a0000;
+
+  subgraph ENTRY["入口与长寿命进程 / Entry and long-lived process"]
+    APP["(C) app.py :: WeGroupchatObsidianApp<br/>长寿命菜单栏进程 拥有 rumps.Timer 与 daemon worker"]:::canon
+    QMAIN["主线程队列 _process_main_queue<br/>只接收 prepared UI data"]
+    COALESCE["chat-menu refresh 合并为一个 pending source worker"]
+    T_MON["monitor timer → daemon"]
+    T_READER["semantic reader timer 5s → daemon"]
+    T_GUARD["source guard timer 进程内常驻"]
+    T_RES["resource backup timer → daemon"]
+    T_DRIVE["drive sync timer → daemon"]
+    T_DIGEST["daily digest timer legacy"]
+    MCP["(O) mcp_server.py 可选 legacy 只读兼容<br/>非普通安装依赖 独立 SDK 客户端拥有生命周期"]:::optional
+    MCP_SEND["(O) mcp_send_retired 惰性 stub 无发送路径"]:::optional
+    CLI_REBUILD["scripts/rebuild_knowledge.py operator CLI"]
+    CLI_HEALTH["scripts/health_check.py 内容无关健康矩阵"]
+    CLI_SOURCE["(O) 短命 source CLI<br/>需 --allow-transient-wechat-source-read"]:::optional
+    WECHAT_APP["(O) WeChat 客户端进程 仅由 guard 在后台拉起"]:::optional
+  end
+
+  subgraph SOURCE["只读来源边界 / Read-only source boundary"]
+    SRC_INV["(C) core/source_inventory.py :: SourceInventoryStore<br/>期望分片集合 complete/incomplete"]:::canon
+    WECHATDB["core/wechat_db.py :: WeChatDB.for_runtime(config)<br/>只读来源适配器"]
+    ADAPTER["core/source_adapter.py 能力/游标 token/页/错误词汇"]
+    GATE["共享 in-process source gate<br/>首 pin generation binding + 只读 query/decode"]
+    CAPLOCK["resource capture operation lock + AppInstanceLock"]
+    DECRYPT["key/decrypt/snapshot/page<br/>不可变已发布 payload 私有 hardlink pin"]
+    GUARD["core/wechat_source_guard.py :: WeChatSourceGuard.check<br/>检查来源 metadata freshness 可在后台拉起 WeChat<br/>绝不 content read/UI/key refresh/terminate"]
+  end
+
+  subgraph CAPTURE["采集与检查点 / Capture and checkpoint"]
+    RUNTIME_ACTIVE["(C) SemanticRuntime.active()<br/>pin 存在则 semantic 唯一 owner 否则 legacy"]:::canon
+    RUNTIME_CHECK["SemanticRuntime.check_monitor() 活动 monitor 路径"]
+    SEM_CAP["core/semantic/source.py :: SemanticCapture.page/snapshot<br/>有界原始读取"]
+    BRIDGE["MonitorReceiptBridge<br/>先解析 durable DB 证据再产出 CAS 绑定"]
+    MS["(C) core/monitor_state.py :: MonitorStateStore<br/>唯一检查点写入者 schema v3"]:::canon
+    MS_CAP["captured_cursors raw 落盘后才前进"]
+    MS_APP["source_cursors 仅在完整<br/>processing receipt 后前进"]
+  end
+
+  subgraph WORK["作业与 provider 准入 / Jobs and admission"]
+    JOBS["(C) core/semantic/jobs.py :: JobStore<br/>ensure/claim/accept 已验证 artifact 先落盘"]:::canon
+    SCHED["core/semantic/scheduling.py :: ProviderScheduler<br/>进程内 admission 有界并行"]
+    ROLES["ProviderRoles.from_profile / preflight<br/>text/decision/embedding/index 角色与速率"]
+    TEXT_PROV["TextProvider 现有配置的 AI provider"]
+    DEC_SEL["decision role 选择 text 或 cloudflare<br/>独立于 text/embedding"]
+    CF_DEC["(O) CloudflareDecisionProvider Clef<br/>网络 + Workers AI 预算"]:::optional
+  end
+
+  subgraph ENGINE["抽取/解析/合并 / Engine"]
+    ATTR["core/semantic/attribution.py :: source_attribution<br/>speaker vs quoted author vs subject"]
+    EXTRACT["SemanticEngine.extract_batch<br/>0..N Observations 连续 2000 字符 span"]
+    RESOLVE["SemanticEngine.resolve_batch<br/>候选 + typed decision → canonical commit"]
+    CONSOL["SemanticEngine.consolidate<br/>merge/split/relation"]
+    VIEWS["SemanticEngine.reconcile_views<br/>view 定义与 membership"]
+    WATCH["(C) core/semantic/watches.py :: WatchService<br/>精确 temporal witness/Episode"]:::canon
+  end
+
+  subgraph CANON["canonical 权威 / Canonical authority SQLite"]
+    STORE["(C) core/semantic/store.py :: SemanticStore<br/>BEGIN IMMEDIATE 事务 revision CAS"]:::canon
+    TABLES["不可变 source versions/Observations/Items/<br/>claims/relations/Views/change events"]
+    OUTBOX["(D) derived outboxes index/projection"]:::derived
+    PROOF["(C) verify_processing_receipt / complete_batch<br/>独立证明"]:::canon
+  end
+
+  subgraph DERIVED["可重建检索 / Rebuildable retrieval"]
+    RETRIEVAL["(D) core/semantic/retrieval.py :: HybridRetriever<br/>lexical+dense+structural+unindexed tail"]:::derived
+    EMB_SEL["embedding role 选择（profile 决定）"]
+    IDX_SEL["vector index role 选择（独立于 embedding）"]
+    LOCAL_IDX["(D) LocalCosineIndex 私有可丢弃 SQLite 磁盘缓存"]:::derived
+    LOCAL_EMB["(O) ai/local_embedding_provider.py<br/>loopback embedding"]:::optional
+    CF_EMB["(O) ai/cloudflare_provider.py BGE-M3 网络"]:::optional
+    CF_VEC["(O) ai/vector_index.py :: CloudflareVectorizeIndex<br/>网络"]:::optional
+    USAGE["(O) core/provider_usage.py<br/>预算确认与 reservation"]:::optional
+    HTTP["HTTPTransport / UrllibTransport<br/>loopback 受约束端点"]
+  end
+
+  subgraph READING["阅读投影与交付 / Reading projection and delivery"]
+    LEDGER["(C) ReadingLedger reader_* 表<br/>durable canonical 消费状态：偏好/known/open/delivery receipt/已接受 text artifact"]:::canon
+    BODY_PLAN["(C) 已接受 BodyPlan/page artifact<br/>durable evidence 存于 reader ledger"]:::canon
+    BODY_PAGE["(D) Markdown 正文 表格/列表/带归属引用 单一 detail home"]:::derived
+    PUB["(D) ProjectionPublisher publish_item/publish_view<br/>冲突=exact bytes+draft"]:::derived
+    CONTROLS["(C) ReaderControls<br/>属性/action/revision 手动 known/open"]:::canon
+    BRIEF_ACCEPT["(C) 已接受 BriefPlan/edition receipt durable"]:::canon
+    BRIEF_FILE["(D) 冻结 edition 文本 不改写历史期"]:::derived
+    DELIV["(C) DeliveryService 交付 receipt durable<br/>unknown 需 reconcile"]:::canon
+    READER_RT["ReaderRuntime.poll<br/>属性/动作/查询/visible-open/watch/attention"]
+    INBOX["(O) Obsidian visible-open bridge 私有 event inbox"]:::optional
+    NOTIF["_SemanticNotifier 本机通知"]
+    WGO["(D) WGO/ Markdown 阅读根 位于 vault 内"]:::derived
+  end
+
+  subgraph RES["资源与附件 / Resource lane"]
+    RES_CAP["core/resource_capture.py :: SelectedResourceCapture<br/>link 身份 上下文注入默认 off"]
+    RES_DB["(C) resource capture DB<br/>occurrence 身份 + source inventory evidence"]:::canon
+    RES_BACK["core/resource_backup.py :: MountedResourceBackup<br/>先封 v3 machine snapshot COMPLETE"]
+    CAS["CAS object store"]
+    MOUNTED["(D) mounted views 投影 独立状态"]:::derived
+    OBSIDX["(D) Obsidian index 投影 独立状态"]:::derived
+    DRIVE["core/google_drive_file_sync.py + google_drive_auth<br/>自有 scan queue 与认证"]
+    DRIVE_DB["(C) drive_scan_shards 队列<br/>含 opaque source_cursor_token"]:::canon
+    REMOTE["外部 Drive remote sync<br/>独立验证 未知不升级为 verified"]
+    EXT["(X) repo 外 consumer adapter<br/>复用 source/capture/v3 transport 保持 identity"]:::outside
+    LINKS["(O) core/link_preview.py<br/>link_preview_disabled 0 网络 惰性"]:::optional
+    DISABLED_LINK_PREVIEW["(inv) legacy link_export_mode=full 迁移为 redacted"]:::invariant
+  end
+
+  subgraph REBUILD["迁移与切换 / Rebuild and cutover"]
+    COORD["core/semantic/rebuild.py :: RebuildCoordinator<br/>plan/execute/resume/verify/rollback"]
+    MANAGED["ManagedRuntime 停止精确 app<br/>AppInstanceLock + exact restore"]
+    JOURNAL["RebuildJournal<br/>不可变 payload run lock 内升级"]
+    PIN["(C) GenerationRegistry / GenerationPin<br/>active.json + cutover.json"]:::canon
+    CUT["cutover journal phases 半切换启动 fail closed"]
+    VERIF["RebuildVerifier 独立 C0/C1 conservation 校验"]
+    COORD_V3["切换步骤 1：安装 v3 检查点<br/>MonitorStateStore.install_v3 CAS"]
+    COORD_PIN["切换步骤 2：激活 active manifest pin"]
+    COORD_PROV["切换步骤 3：记录 durable provisional receipt"]
+    COORD_RELEASE["切换步骤 4：<br/>释放 AppInstanceLock/capture/projection 锁"]
+    COORD_RESTORE_APP["切换步骤 5：ManagedRuntime exact restore"]
+    COORD_LIVE["切换步骤 6：live 增量验收<br/>真实 applied/processing receipt"]
+    COORD_ROLLBACK["(C) rollback restore_checkpoint CAS<br/>保留新 captures/reading/delivery 证据"]:::canon
+    RELOC["(cand) relocate 同 run/gen<br/>WAL-safe copy + config adopt + retirement"]:::optional
+  end
+
+  subgraph LEGACY["legacy 兼容路径 / Legacy path"]
+    LEG_PATH["legacy topic/event runtime 未 pin 前的真实兼容路径"]
+    LEG_IMPORT["core/semantic/legacy.py<br/>plan_legacy / import_legacy 只读旧 DB + 页面清单"]
+    LEG_NAV["(D) Legacy/ redacted 导航页"]:::derived
+    LEG_BLOCK["runtime.legacy_command_blocked 旧 writer fail closed"]
+    LEG_DB["(C) legacy knowledge DB 语义迁移不改写"]:::canon
+  end
+
+  subgraph PLATFORM["平台与配置 / Platform and config"]
+    CONFIG["(C) core/config.py :: ConfigStore<br/>唯一主配置写入者 锁内 patch"]:::canon
+    PLAT["core/platform 契约<br/>locks/paths/private storage/atomic publish/secrets/process"]
+    WIN["(O) Windows 共享基础 W0.2A/0.2B/W0.3/W1.1<br/>不等于 Windows source/runtime 支持"]:::optional
+    ROOT_ERR["(inv) 显式 semantic_runtime_root 不可用<br/>→ semantic_runtime_root_unavailable 全部 fail closed 不回落 legacy"]:::invariant
+  end
+
+  subgraph INVAR["不变式 / Invariants"]
+    INV_NOWRITE["(inv) source 数据从不被写回"]:::invariant
+    INV_INDEX["(inv) index/retrieval 从不决定 merge"]:::invariant
+    INV_ATTR["(inv) 姓名/相邻/时间/共同 URL 不建立 identity"]:::invariant
+    INV_BYTES["(inv) source-readable 不等于 attachment byte consent"]:::invariant
+    INV_NOACK["(inv) unclassified 或未消费页不 ACK"]:::invariant
+    INV_NOLOCK["(inv) 等 provider 不持有 DB 事务/projection lock"]:::invariant
+    INV_PROPOSAL["(inv) accepted proposal 不等于 canonical commit"]:::invariant
+    INV_SEP["(inv) Brief edition/read/known/notification 各自独立"]:::invariant
+    INV_EMB_ID["(inv) embedding 与 index 选择独立<br/>profile/dim/generation 身份不可混用"]:::invariant
+  end
+
+  subgraph LEGEND["图例 / Legend"]
+    L_C["(C) canonical 权威或 durable canonical 状态"]:::canon
+    L_D["(D) derived 可重建输出"]:::derived
+    L_O["(O) optional/network/inert"]:::optional
+    L_X["(X) repo 外 adapter"]:::outside
+    L_CAND["(cand) 候选恢复分支"]:::optional
+    L_I["(inv) 失败关闭不变式/失败状态"]:::invariant
+  end
+
+  %% 入口 → 生命周期
+  APP -->|拥有 rumps.Timer| T_MON
+  APP -->|拥有 rumps.Timer| T_READER
+  APP -->|拥有 rumps.Timer| T_GUARD
+  APP -->|拥有 rumps.Timer| T_RES
+  APP -->|拥有 rumps.Timer| T_DRIVE
+  APP -->|拥有 rumps.Timer| T_DIGEST
+  APP -->|prepared UI data only| QMAIN
+  APP -->|重复请求合并| COALESCE
+  APP -->|锁定 revision patch| CONFIG
+  APP -->|pin 查询| RUNTIME_ACTIVE
+  APP -.->|显式 root 不可用 fail closed| ROOT_ERR
+  MCP -->|只读查询/摘要| WECHATDB
+  MCP -->|只读 legacy 知识库| LEG_DB
+  MCP -->|复用惰性 stub| MCP_SEND
+
+  %% 活动监控 → 来源读取
+  T_MON -->|daemon worker| RUNTIME_CHECK
+  T_READER -->|daemon worker| READER_RT
+  T_GUARD -->|进程内常驻| GUARD
+  T_RES -->|daemon worker| RES_CAP
+  T_DRIVE -->|daemon worker| DRIVE
+  T_DIGEST -->|legacy digest| LEG_PATH
+  COALESCE -->|一个 pending source worker| WECHATDB
+  CLI_SOURCE -->|显式授权一次短命读取| WECHATDB
+  RUNTIME_ACTIVE -->|pin=None| LEG_PATH
+  RUNTIME_ACTIVE -->|pin 存在| RUNTIME_CHECK
+  RUNTIME_ACTIVE -.->|root 不可用 fail closed| ROOT_ERR
+  PIN -->|active.json 选择唯一 generation| RUNTIME_ACTIVE
+  PIN -.->|root 不可用| ROOT_ERR
+  RUNTIME_CHECK -->|有界读页| SEM_CAP
+  RUNTIME_CHECK -->|要求 complete inventory| SRC_INV
+  RUNTIME_CHECK -->|process batch| EXTRACT
+  SEM_CAP -->|bounded raw read| WECHATDB
+  WECHATDB -->|capability/cursor/page| ADAPTER
+  WECHATDB -->|key/decrypt/snapshot/page| DECRYPT
+  GATE -.->|首 pin generation binding + 只读 body| WECHATDB
+  CAPLOCK -.->|串行 capture 操作| SEM_CAP
+  SRC_INV -->|期望分片集合| SEM_CAP
+  WECHATDB -.->|只读| INV_NOWRITE
+  GUARD -->|metadata freshness 检查| WECHAT_APP
+  GUARD -->|后台拉起| WECHAT_APP
+  GUARD -.->|不读内容/不刷新 key| INV_NOWRITE
+
+  %% 采集 → 检查点 v3
+  SEM_CAP -->|capture_batch 原始 bytes| STORE
+  SEM_CAP -->|capture receipt| BRIDGE
+  BRIDGE -->|capture CAS| MS_CAP
+  MS_CAP -->|raw 落盘后前进| MS
+  BRIDGE -->|processing CAS| MS_APP
+  MS_APP -->|完整 receipt 后前进| MS
+  PROOF -->|processing receipt| BRIDGE
+
+  %% 作业 → provider → engine
+  EXTRACT -->|ensure/claim 作业| JOBS
+  JOBS -->|dispatch| SCHED
+  SCHED -->|admission 限额| ROLES
+  ROLES -->|text| TEXT_PROV
+  ROLES -->|decision role| DEC_SEL
+  DEC_SEL -->|text 路由| TEXT_PROV
+  DEC_SEL -->|cloudflare| CF_DEC
+  CF_DEC -->|reservation| USAGE
+  CF_DEC -->|HTTP| HTTP
+  ROLES -->|embedding role| EMB_SEL
+  SCHED -.->|仅未发送证明才回 pending| JOBS
+  SCHED -.->|unknown 保持 unknown 不伪造 replay| JOBS
+  SCHED -.->|provider 失败 captured 可领先 applied 但不 ACK| MS_CAP
+  SCHED -.->|等待 provider| INV_NOLOCK
+  JOBS -->|验证后 artifact 先于 canonical 写入| RESOLVE
+  JOBS -.->|artifact 是 proposal| INV_PROPOSAL
+  ATTR -->|同源 payload 派生 speaker/display| EXTRACT
+  EXTRACT -->|observations+dispositions 同事务| STORE
+  EXTRACT -.->|unclassified 保持 pending| INV_NOACK
+  RESOLVE -->|apply_proposal actions+decision| STORE
+  CONSOL -->|merge/split/relation 保留 lineage| STORE
+  VIEWS -->|view 定义 + membership| STORE
+  WATCH -->|witness/Episode 表| STORE
+  WATCH -->|reader wait 归一| ROLES
+  ATTR -.->|不建立 identity| INV_ATTR
+  COORD -->|consolidate 阶段| CONSOL
+  COORD -->|reconcile_views 阶段| VIEWS
+
+  %% canonical → 证明 → 派生输入
+  STORE -->|canonical transaction @revision CAS| TABLES
+  TABLES -->|派生 outbox 行| OUTBOX
+  STORE -->|独立证明| PROOF
+  OUTBOX -->|pending index| RETRIEVAL
+  OUTBOX -->|pending projection| BODY_PLAN
+  STORE -->|CanonicalReadingAdapter.snapshot Item 与证据| BODY_PLAN
+  STORE -->|canonical change events| BRIEF_ACCEPT
+  STORE -->|canonical claims/relations| WATCH
+
+  %% 检索（派生 不决定 merge）
+  RETRIEVAL -->|documents 需 embed| EMB_SEL
+  EMB_SEL -->|local profile| LOCAL_EMB
+  EMB_SEL -->|cloudflare profile| CF_EMB
+  LOCAL_EMB -->|vectors + profile_id| IDX_SEL
+  CF_EMB -->|vectors + profile_id| IDX_SEL
+  IDX_SEL -->|local| LOCAL_IDX
+  IDX_SEL -->|cloudflare| CF_VEC
+  LOCAL_IDX -->|本地 indexed| RETRIEVAL
+  CF_VEC -->|仅 confirmed mutation| RETRIEVAL
+  CF_VEC -.->|未确认 mutation 保持 pending| RETRIEVAL
+  CF_EMB -->|reservation| USAGE
+  CF_VEC -->|reservation| USAGE
+  LOCAL_EMB -->|loopback 直连 无代理/重定向| HTTP
+  CF_EMB -->|HTTP| HTTP
+  CF_VEC -->|HTTP| HTTP
+  EMB_SEL -.->|选择独立| INV_EMB_ID
+  IDX_SEL -.->|选择独立| INV_EMB_ID
+  RETRIEVAL -.->|只读派生| INV_INDEX
+  RETRIEVAL -->|search 结果| CONTROLS
+
+  %% 阅读投影
+  BODY_PLAN -->|Markdown 正文 表格/列表/带归属引用| BODY_PAGE
+  BODY_PAGE -->|publish_item/publish_view| PUB
+  BODY_PLAN -->|durable accepted 先于发布| LEDGER
+  PUB -->|BodyPlan accepted → 页| WGO
+  PUB -->|冲突 exact bytes + draft + status| CONTROLS
+  CONTROLS -->|preference/known/open revision| LEDGER
+  LEDGER -->|wgo_* 属性 + 注册 action| WGO
+  WGO -->|visible open plugin| INBOX
+  INBOX -->|校验后 event| CONTROLS
+  BRIEF_ACCEPT -->|冻结 edition 文本| BRIEF_FILE
+  BRIEF_FILE -->|page| WGO
+  BRIEF_ACCEPT -->|change floor + 候选| DELIV
+  BRIEF_ACCEPT -->|edition receipt durable| LEDGER
+  DELIV -->|NotificationEnvelope| NOTIF
+  NOTIF -->|accepted/unknown| DELIV
+  DELIV -.->|unknown 需 reconcile| DELIV
+  DELIV -.->|acceptance 不等于 read/known| INV_SEP
+  DELIV -.->|delivery 证据 durable| LEDGER
+  READER_RT -->|属性同步/动作| CONTROLS
+  READER_RT -->|watch 同步| WATCH
+  READER_RT -->|attention 桥接| DELIV
+  READER_RT -->|visible-open inbox| INBOX
+  DELIV -->|resolve_click logical id| PUB
+  CONTROLS -->|查询回调| RETRIEVAL
+
+  %% 资源与附件
+  RES_CAP -->|只读 occurrence| WECHATDB
+  RES_CAP -->|occurrence/context 绑定| RES_DB
+  RES_CAP -.->|source-readable 不等于字节同意| INV_BYTES
+  RES_CAP -->|link preview retired| LINKS
+  LINKS -.->|0 网络 惰性| INV_NOACK
+  LINKS -.->|legacy 配置| DISABLED_LINK_PREVIEW
+  RES_DB -->|capture/selection 权威| RES_BACK
+  RES_BACK -->|先封 v3 machine snapshot COMPLETE| CAS
+  RES_BACK -->|独立| MOUNTED
+  RES_BACK -->|独立| OBSIDX
+  CAS -->|objects| MOUNTED
+  DRIVE -->|自有 scan queue 只读来源| WECHATDB
+  DRIVE -->|drive_scan_shards 队列 + opaque cursor_token| DRIVE_DB
+  DRIVE_DB -->|own upload 状态| REMOTE
+  EXT -->|复用 source/capture/v3 transport| CAS
+  EXT -.->|repo 外 adapter| RES_BACK
+
+  %% 迁移与切换
+  CLI_REBUILD -->|plan/execute/resume/verify/rollback/relocate| COORD
+  COORD -->|frozen plan + journal| JOURNAL
+  COORD -->|停止精确 app| MANAGED
+  MANAGED -->|AppInstanceLock| APP
+  COORD -->|Online Backup + C0/C1 完整来源观测| SEM_CAP
+  COORD -->|固定投影发布| PUB
+  COORD -->|verify| VERIF
+  COORD -->|legacy conservation| LEG_IMPORT
+  VERIF -->|独立 conservation| JOURNAL
+  CUT -->|半切换启动 fail closed| PIN
+  COORD -.->|in-progress cutover 拒绝新 plan| CUT
+  PIN -.->|半切换 fail closed| RUNTIME_ACTIVE
+  COORD -->|切换步骤序列| COORD_V3
+  COORD_V3 -->|install_v3 CAS| MS
+  COORD_V3 -->|→| COORD_PIN
+  COORD_PIN -->|active manifest| PIN
+  COORD_PIN -->|→| COORD_PROV
+  COORD_PROV -->|durable receipt| JOURNAL
+  COORD_PROV -->|→| COORD_RELEASE
+  COORD_RELEASE -->|→| COORD_RESTORE_APP
+  COORD_RESTORE_APP -->|exact restore| MANAGED
+  COORD_RESTORE_APP -->|→| COORD_LIVE
+  COORD_LIVE -->|真实 applied 证据| MS
+  COORD_LIVE -->|验收 evidence| JOURNAL
+  COORD -->|rollback| COORD_ROLLBACK
+  COORD_ROLLBACK -->|restore_checkpoint revision CAS| MS
+  COORD_ROLLBACK -->|exact restore| COORD_RESTORE_APP
+  COORD -->|relocate candidate| RELOC
+  RELOC -->|WAL-safe copy| JOURNAL
+  RELOC -->|adopt semantic_runtime_root| CONFIG
+
+  %% legacy 兼容
+  LEG_IMPORT -->|只读旧 DB/页面 走 capture_batch| STORE
+  LEG_IMPORT -->|不改写| LEG_DB
+  LEG_PATH -->|topic/event writer| LEG_DB
+  LEG_BLOCK -->|pin 后停止旧 writer| LEG_PATH
+  LEG_PATH -.->|root 不可用 fail closed| ROOT_ERR
+  LEG_IMPORT -->|frozen inventory + topic map| LEG_NAV
+  LEG_NAV -->|redacted Legacy/ 页| WGO
+
+  %% 平台 / 配置 / 健康
+  CONFIG -->|semantic_runtime_root| PIN
+  CONFIG -->|config revision| RUNTIME_ACTIVE
+  PLAT -.->|locks/paths/private storage/atomic publish| CONFIG
+  PLAT -.->|locks/private storage| MS
+  PLAT -.->|locks/private storage| SRC_INV
+  PLAT -.->|native secret store| CF_EMB
+  PLAT -.->|native secret store| CF_DEC
+  PLAT -.->|共享基础| WIN
+  CLI_HEALTH -->|content-free 矩阵| CONFIG
+  CLI_HEALTH -->|generation/jobs/index/budget 证据| PIN
+  CLI_HEALTH -->|检查 checkpoint 证据| MS
+  CLI_HEALTH -->|不扫 source| SRC_INV
+  CLI_HEALTH -.->|root 不可用| ROOT_ERR

@@ -1,0 +1,251 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="3651.7599999999993" viewBox="0 0 1280 3651.7599999999993" role="img" aria-labelledby="title description" lang="en">
+<title id="title">WGO · Conversations into living knowledge</title><desc id="description">Functional view: conversations and legacy knowledge become readable knowledge, search, briefings, follow-ups and resource associations. Semantic workflows require migration and activation; resource delivery, backup and external ingestion retain separate states.</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L10 4L0 8Z" fill="#216B5B"/></marker></defs>
+<g id="canvas"><rect x="0" y="0" width="1280" height="3651.7599999999993" rx="0" fill="#F7F8F6" stroke="#F7F8F6" stroke-width="1.5"/></g>
+<g id="inputs-region"><rect x="56" y="324.88" width="1168" height="287.91999999999996" rx="0" fill="#EAF3EE" stroke="#EAF3EE" stroke-width="1.5"/></g>
+<g id="capture"><rect x="56" y="692.8" width="320" height="606.72" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="extract"><rect x="480" y="692.8" width="320" height="606.72" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="resolve"><rect x="904" y="692.8" width="320" height="606.72" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="knowledge-page"><rect x="56" y="1527.6" width="620" height="722.3199999999997" rx="0" fill="#EAF3EE" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="example-region"><rect x="80" y="2017.36" width="572" height="208.55999999999972" rx="0" fill="#F7F8F6" stroke="#F7F8F6" stroke-width="1.5"/></g>
+<g id="search"><rect x="724" y="1527.6" width="500" height="348.31999999999994" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="brief"><rect x="724" y="1907.9199999999998" width="500" height="495.20000000000005" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="follow-wait"><rect x="56" y="2481.12" width="564" height="495.1999999999998" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="reading-controls"><rect x="660" y="2481.12" width="564" height="495.1999999999998" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="resources-lane"><rect x="56" y="3054.3199999999997" width="1168" height="416.7199999999998" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="input-to-source"><path d="M216 624.8 L216 680.8" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="legacy-to-source"><path d="M648 624.8 L648 648.8 L216 648.8 L216 680.8" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="capture-to-extract"><path d="M388 996.16 L468 996.16" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="extract-to-resolve"><path d="M812 996.16 L892 996.16" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="items-to-reading"><path d="M1064 1311.52 L1251 1311.52 L1251 1505.6 L366 1505.6 L366 1515.6" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="reading-to-follow"><path d="M300 2417.12 L300 2469.12" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="reading-to-controls"><path d="M942 2417.12 L942 2469.12" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="items-to-search"><path d="M974 1505.6 L974 1515.6" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="resource-parallel-path"><path d="M1228 414.88 L1268 414.88 L1268 3022.3199999999997 L1180 3022.3199999999997 L1180 3042.3199999999997" fill="none" stroke="#216B5B" stroke-width="2" stroke-dasharray="10 7" marker-end="url(#arrow)"/></g>
+<g id="masthead" data-readability-background="#F7F8F6"><text x="56" y="86" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="44" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="56" dy="0">WGO · Conversations into living knowledge</tspan>
+</text></g>
+<g id="purpose" data-readability-background="#F7F8F6"><text x="56" y="140" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="400" fill="#172E2A" data-readability="critical">
+<tspan x="56" dy="0">Connect scattered solutions, experiences and stories so you can read,</tspan>
+<tspan x="56" dy="40.800000000000004">find and follow them.</tspan>
+</text></g>
+<g id="candidate-state" data-readability-background="#F7F8F6"><text x="56" y="237.60000000000002" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#486158" data-readability="body">
+<tspan x="56" dy="0">Semantic source candidate: available after a verified rebuild and activation. This map</tspan>
+<tspan x="56" dy="32.64">does not claim a completed live migration.</tspan>
+</text></g>
+<g id="input-conversations-title" data-readability-background="#EAF3EE"><text x="80" y="370.88" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="28" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">Selected conversations</tspan>
+</text></g>
+<g id="input-conversations" data-readability-background="#EAF3EE"><text x="80" y="416.96" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">Select chats and enable</tspan>
+<tspan x="80" dy="32.64">monitoring</tspan>
+<tspan x="80" dy="32.64">New messages are</tspan>
+<tspan x="80" dy="32.64">incremental; history</tspan>
+<tspan x="80" dy="32.64">requires an explicit</tspan>
+<tspan x="80" dy="32.64">rebuild</tspan>
+</text></g>
+<g id="input-legacy-title" data-readability-background="#EAF3EE"><text x="488" y="370.88" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="28" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="488" dy="0">Existing knowledge</tspan>
+<tspan x="488" dy="38.080000000000005">and notes</tspan>
+</text></g>
+<g id="input-legacy" data-readability-background="#EAF3EE"><text x="488" y="455.04" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="488" dy="0">Preservation and legacy</tspan>
+<tspan x="488" dy="32.64">navigation</tspan>
+<tspan x="488" dy="32.64">Old summaries retain</tspan>
+<tspan x="488" dy="32.64">their provenance grade</tspan>
+</text></g>
+<g id="input-resources-title" data-readability-background="#EAF3EE"><text x="922" y="370.88" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="28" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="922" dy="0">Links and files</tspan>
+</text></g>
+<g id="input-resources" data-readability-background="#EAF3EE"><text x="922" y="416.96" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="922" dy="0">Message provenance +</tspan>
+<tspan x="922" dy="32.64">resource records</tspan>
+<tspan x="922" dy="32.64">Original bytes</tspan>
+<tspan x="922" dy="32.64">require separate</tspan>
+<tspan x="922" dy="32.64">consent</tspan>
+</text></g>
+<g id="capture-title" data-readability-background="#FFFFFF"><text x="80" y="742.8" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">01  Preserve the</tspan>
+<tspan x="80" dy="40.800000000000004">source</tspan>
+</text></g>
+<g id="capture-body" data-readability-background="#FFFFFF"><text x="80" y="836.4" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">Background read-</tspan>
+<tspan x="80" dy="35.36">only capture</tspan>
+<tspan x="80" dy="35.36">Keep words, context</tspan>
+<tspan x="80" dy="35.36">and versions</tspan>
+<tspan x="80" dy="35.36">Record speaker and</tspan>
+<tspan x="80" dy="35.36">time</tspan>
+<tspan x="80" dy="35.36">Preserve observed</tspan>
+<tspan x="80" dy="35.36">changes</tspan>
+<tspan x="80" dy="35.36">Advance captured</tspan>
+<tspan x="80" dy="35.36">progress</tspan>
+<tspan x="80" dy="35.36">only after durable</tspan>
+<tspan x="80" dy="35.36">storage</tspan>
+</text></g>
+<g id="extract-title" data-readability-background="#FFFFFF"><text x="504" y="742.8" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="504" dy="0">02  Identify the</tspan>
+<tspan x="504" dy="40.800000000000004">content</tspan>
+</text></g>
+<g id="extract-body" data-readability-background="#FFFFFF"><text x="504" y="836.4" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="504" dy="0">Technical and</tspan>
+<tspan x="504" dy="35.36">everyday material</tspan>
+<tspan x="504" dy="35.36">share one</tspan>
+<tspan x="504" dy="35.36">processing path</tspan>
+<tspan x="504" dy="35.36">One window may</tspan>
+<tspan x="504" dy="35.36">yield many parts</tspan>
+<tspan x="504" dy="35.36">Keep conditions,</tspan>
+<tspan x="504" dy="35.36">steps and words</tspan>
+<tspan x="504" dy="35.36">Connect statements</tspan>
+<tspan x="504" dy="35.36">to evidence</tspan>
+<tspan x="504" dy="35.36">Uncertain input</tspan>
+<tspan x="504" dy="35.36">stays pending</tspan>
+</text></g>
+<g id="resolve-title" data-readability-background="#FFFFFF"><text x="928" y="742.8" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="928" dy="0">03  Build</tspan>
+<tspan x="928" dy="40.800000000000004">lasting</tspan>
+<tspan x="928" dy="40.800000000000004">knowledge</tspan>
+</text></g>
+<g id="resolve-body" data-readability-background="#FFFFFF"><text x="928" y="877.1999999999999" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="928" dy="0">Connect across days</tspan>
+<tspan x="928" dy="35.36">and chats</tspan>
+<tspan x="928" dy="35.36">Keep a continuing</tspan>
+<tspan x="928" dy="35.36">Item identity</tspan>
+<tspan x="928" dy="35.36">Merge / split /</tspan>
+<tspan x="928" dy="35.36">correct</tspan>
+<tspan x="928" dy="35.36">Independent cases</tspan>
+<tspan x="928" dy="35.36">remain distinct</tspan>
+<tspan x="928" dy="35.36">Preserve competing</tspan>
+<tspan x="928" dy="35.36">conditions</tspan>
+<tspan x="928" dy="35.36">Names alone never</tspan>
+<tspan x="928" dy="35.36">join people</tspan>
+</text></g>
+<g id="extract-verb" data-readability-background="#F7F8F6"><text x="389" y="970.16" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="22" font-weight="600" fill="#216B5B" data-readability="supporting">
+<tspan x="389" dy="0">extract</tspan>
+</text></g>
+<g id="resolve-verb" data-readability-background="#F7F8F6"><text x="811" y="970.16" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="22" font-weight="600" fill="#216B5B" data-readability="supporting">
+<tspan x="811" dy="0">resolve</tspan>
+</text></g>
+<g id="canonical-authority" data-readability-background="#F7F8F6"><text x="56" y="1351.52" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#486158" data-readability="body">
+<tspan x="56" dy="0">Models propose content and changes; the program validates evidence and commits to SQLite.</tspan>
+<tspan x="56" dy="32.64">Notes, views and indexes are rebuildable.</tspan>
+</text></g>
+<g id="reading-phase" data-readability-background="#F7F8F6"><text x="56" y="1468.8" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="56" dy="0">What you use in Obsidian</tspan>
+</text></g>
+<g id="knowledge-page-title" data-readability-background="#EAF3EE"><text x="80" y="1577.6" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">A knowledge page that keeps growing</tspan>
+</text></g>
+<g id="knowledge-page-body" data-readability-background="#EAF3EE"><text x="80" y="1630.3999999999999" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">One Item, one stable body</tspan>
+<tspan x="80" dy="35.36">Use tables, lists, quotations or</tspan>
+<tspan x="80" dy="35.36">narrative as appropriate</tspan>
+<tspan x="80" dy="35.36">Follow key statements back to original</tspan>
+<tspan x="80" dy="35.36">messages</tspan>
+<tspan x="80" dy="35.36">Append later evidence, corrections and</tspan>
+<tspan x="80" dy="35.36">retractions</tspan>
+<tspan x="80" dy="35.36">Preserve your properties and authored</tspan>
+<tspan x="80" dy="35.36">regions</tspan>
+<tspan x="80" dy="35.36">Managed-body edits retain a conflict</tspan>
+<tspan x="80" dy="35.36">backup and draft</tspan>
+</text></g>
+<g id="example-title" data-readability-background="#F7F8F6"><text x="96" y="2057.3599999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="600" fill="#172E2A" data-readability="body">
+<tspan x="96" dy="0">Illustration · Two tests of one tool</tspan>
+</text></g>
+<g id="example-body" data-readability-background="#F7F8F6"><text x="96" y="2099.3599999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="96" dy="0">One member succeeds on macOS; another</tspan>
+<tspan x="96" dy="32.64">fails on Windows.</tspan>
+<tspan x="96" dy="32.64">Keep each environment and condition;</tspan>
+<tspan x="96" dy="32.64">connect later results.</tspan>
+</text></g>
+<g id="search-title" data-readability-background="#FFFFFF"><text x="748" y="1577.6" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="748" dy="0">Search · Bring a question</tspan>
+</text></g>
+<g id="search-body" data-readability-background="#FFFFFF"><text x="748" y="1630.3999999999999" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="748" dy="0">Enter a question on the search</tspan>
+<tspan x="748" dy="35.36">page</tspan>
+<tspan x="748" dy="35.36">Combine words, vectors and</tspan>
+<tspan x="748" dy="35.36">relationships</tspan>
+<tspan x="748" dy="35.36">Jump to Items and source</tspan>
+<tspan x="748" dy="35.36">evidence</tspan>
+<tspan x="748" dy="35.36">Report incomplete index coverage</tspan>
+</text></g>
+<g id="brief-title" data-readability-background="#FFFFFF"><text x="748" y="1957.9199999999998" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="748" dy="0">Briefing · What is worth</tspan>
+<tspan x="748" dy="40.800000000000004">reading today</tspan>
+</text></g>
+<g id="brief-body" data-readability-background="#FFFFFF"><text x="748" y="2051.5199999999995" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="748" dy="0">Edit meaningful changes across</tspan>
+<tspan x="748" dy="35.36">Items</tspan>
+<tspan x="748" dy="35.36">Everyday stories can stand on</tspan>
+<tspan x="748" dy="35.36">their own</tspan>
+<tspan x="748" dy="35.36">One edition per day, revised by</tspan>
+<tspan x="748" dy="35.36">late updates</tspan>
+<tspan x="748" dy="35.36">Old editions keep their frozen</tspan>
+<tspan x="748" dy="35.36">evidence</tspan>
+<tspan x="748" dy="35.36">Failure is deferred, never a</tspan>
+<tspan x="748" dy="35.36">silent day</tspan>
+</text></g>
+<g id="views" data-readability-background="#F7F8F6"><text x="80" y="2295.9199999999996" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#486158" data-readability="body">
+<tspan x="80" dy="0">Views: organize an Item in several places</tspan>
+<tspan x="80" dy="32.64">using links and embeds, without duplicating</tspan>
+<tspan x="80" dy="32.64">its body.</tspan>
+</text></g>
+<g id="follow-wait-title" data-readability-background="#FFFFFF"><text x="80" y="2531.12" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">Follow up · Follow and wait</tspan>
+</text></g>
+<g id="follow-wait-body" data-readability-background="#FFFFFF"><text x="80" y="2583.92" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">Follow without an automatic deadline</tspan>
+<tspan x="80" dy="35.36">Wait for explicit conditions and</tspan>
+<tspan x="80" dy="35.36">valid evidence</tspan>
+<tspan x="80" dy="35.36">Verify subject, case and time</tspan>
+<tspan x="80" dy="35.36">Corrections may retract a fulfilled</tspan>
+<tspan x="80" dy="35.36">judgment</tspan>
+<tspan x="80" dy="35.36">Important updates respect mute and</tspan>
+<tspan x="80" dy="35.36">known state</tspan>
+<tspan x="80" dy="35.36">Historical rebuilds never replay old</tspan>
+<tspan x="80" dy="35.36">alerts</tspan>
+</text></g>
+<g id="reading-controls-title" data-readability-background="#FFFFFF"><text x="684" y="2531.12" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="684" dy="0">Control · Reading and your</tspan>
+<tspan x="684" dy="40.800000000000004">choices</tspan>
+</text></g>
+<g id="reading-controls-body" data-readability-background="#FFFFFF"><text x="684" y="2624.72" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="684" dy="0">Opening, reading, knowing and</tspan>
+<tspan x="684" dy="35.36">delivery stay distinct</tspan>
+<tspan x="684" dy="35.36">The plugin witnesses an actual</tspan>
+<tspan x="684" dy="35.36">visible open</tspan>
+<tspan x="684" dy="35.36">You can also mark an exact revision</tspan>
+<tspan x="684" dy="35.36">known</tspan>
+<tspan x="684" dy="35.36">Management actions bind object and</tspan>
+<tspan x="684" dy="35.36">revision</tspan>
+<tspan x="684" dy="35.36">Preferences and queries need no new</tspan>
+<tspan x="684" dy="35.36">message</tspan>
+</text></g>
+<g id="resources-title" data-readability-background="#FFFFFF"><text x="80" y="3106.3199999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">The resource path remains · Links, originals, backup and external</tspan>
+<tspan x="80" dy="40.800000000000004">consumers</tspan>
+</text></g>
+<g id="resource-storage" data-readability-background="#FFFFFF"><text x="80" y="3205.9199999999996" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">Keep URLs and exact message associations;</tspan>
+<tspan x="80" dy="32.64">redact display</tspan>
+<tspan x="80" dy="32.64">Resolve downloaded attachments only with</tspan>
+<tspan x="80" dy="32.64">byte consent</tspan>
+<tspan x="80" dy="32.64">Mounted backup and optional Direct Drive</tspan>
+<tspan x="80" dy="32.64">have separate status</tspan>
+<tspan x="80" dy="32.64">Message EOF, byte coverage and remote</tspan>
+<tspan x="80" dy="32.64">sync are separate facts</tspan>
+</text></g>
+<g id="resource-delivery" data-readability-background="#FFFFFF"><text x="680" y="3205.9199999999996" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="680" dy="0">Knowledge pages link exact resource</tspan>
+<tspan x="680" dy="32.64">occurrences</tspan>
+<tspan x="680" dy="32.64">Missing bytes remain pending</tspan>
+<tspan x="680" dy="32.64">External adapters ingest by exact source</tspan>
+<tspan x="680" dy="32.64">identity</tspan>
+<tspan x="680" dy="32.64">Ingestion, publishing and withdrawal</tspan>
+<tspan x="680" dy="32.64">have separate owners</tspan>
+</text></g>
+<g id="loop-close" data-readability-background="#F7F8F6"><text x="56" y="3553.0399999999995" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#172E2A" data-readability="critical">
+<tspan x="56" dy="0">New messages and corrections continue through this path, retaining source history</tspan>
+<tspan x="56" dy="35.36">and your reading and editing choices.</tspan>
+</text></g>
+</svg>

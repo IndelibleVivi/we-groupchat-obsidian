@@ -22,7 +22,9 @@ plan or successful canary does not establish the state of a current installation
 | Use the offline source-package fallback | [Chinese offline-guide template](share-package-guide.zh-CN.md) | The exact-commit builder generates `群友使用说明.md` from this one source. |
 
 For component relationships, use the [README architecture](../README.md#architecture).
-Editable diagram sources are in [architecture/](architecture/); the SVGs in
+The [complete technical Mermaid](architecture/semantic-implementation.md)
+adds implementation flow, state owners and source anchors. Editable diagram
+sources and export instructions are in [architecture/](architecture/README.md); the SVGs in
 [assets/architecture/](assets/architecture/) are generated exports. They are
 an overview, not an exhaustive CLI or support matrix.
 

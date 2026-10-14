@@ -2,6 +2,12 @@
 
 这是新语义 generation 的使用说明。它描述本 checkout 的候选源码；安装、全量重建、激活和真实增量验收是独立步骤。没有 active generation 的已有安装继续使用原来的 topic/event monitor。完整操作见 [重建 runbook](semantic-rebuild.md)，当前交付状态见 [current state](current-state.md)。
 
+WGO 把选中群聊里分散的方案、经历和故事接成可持续更新的知识页。你在菜单栏选群并开启监控，之后在 Obsidian 阅读完整内容、带着问题检索、看当天值得读的变化，并关注或等待某件事的后续。新选群从选择时刻起采集；全量历史需要显式重建。链接、已下载附件的归档与备份走独立的资源路径，各自报告完成或待补状态。
+
+![从群聊输入到知识页、检索、简报、跟进与资料交付的功能图](assets/architecture/semantic-functional.zh-CN.svg)
+
+上图先回答「我能拿它做什么」。[完整技术 Mermaid 与源码索引](architecture/semantic-implementation.md)追踪实现接线；[模块与状态归属图](assets/architecture/semantic-core.zh-CN.svg)给出较小的内部视图；[可编辑功能图和导出命令](architecture/README.md)用于维护。这些是源码支持的流程，完整迁移、激活和实际阅读验收仍须分别完成。
+
 ## 内容如何成为笔记
 
 选中群聊的消息先保存为不可变的 SourceRecord 版本，再抽取零到多个 Observations。一个聊天窗口可以包含技术讨论、生活片段和玩笑；它们可以形成不同 Item，也可以为跨天、跨群的已有 Item 增补细节、证据或更正。阅读偏好不再决定哪些内容有资格留存，也没有旧版相关性分数门槛。不能确定的输入留在待处理状态，不能伪装成“无内容”。

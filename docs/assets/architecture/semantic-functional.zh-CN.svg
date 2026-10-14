@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="2508" viewBox="0 0 1280 2508" role="img" aria-labelledby="title description" lang="zh-CN">
+<title id="title">WGO · 从群聊到持续更新的知识</title><desc id="description">功能视图：群聊与旧知识如何形成可读知识、检索、简报、跟进事项与资料关联。语义工作流需完整迁移和激活；资源保存、备份和外部收录各有独立状态。</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L10 4L0 8Z" fill="#216B5B"/></marker></defs>
+<g id="canvas"><rect x="0" y="0" width="1280" height="2508" rx="0" fill="#F7F8F6" stroke="#F7F8F6" stroke-width="1.5"/></g>
+<g id="inputs-region"><rect x="56" y="254" width="1168" height="190" rx="0" fill="#EAF3EE" stroke="#EAF3EE" stroke-width="1.5"/></g>
+<g id="capture"><rect x="56" y="524" width="320" height="348.31999999999994" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="extract"><rect x="480" y="524" width="320" height="348.31999999999994" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="resolve"><rect x="904" y="524" width="320" height="348.31999999999994" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="knowledge-page"><rect x="56" y="1067.7599999999998" width="620" height="480.24" rx="0" fill="#EAF3EE" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="example-region"><rect x="80" y="1380.7199999999998" width="572" height="143.27999999999997" rx="0" fill="#F7F8F6" stroke="#F7F8F6" stroke-width="1.5"/></g>
+<g id="search"><rect x="724" y="1067.7599999999998" width="500" height="242.24" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="brief"><rect x="724" y="1341.9999999999998" width="500" height="277.5999999999999" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="follow-wait"><rect x="56" y="1713.2799999999997" width="564" height="326" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="reading-controls"><rect x="660" y="1713.2799999999997" width="564" height="326" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="resources-lane"><rect x="56" y="2117.2799999999997" width="1168" height="245.36000000000013" rx="0" fill="#FFFFFF" stroke="#CCD8D1" stroke-width="1.5"/></g>
+<g id="input-to-source"><path d="M216 456 L216 512" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="legacy-to-source"><path d="M648 456 L648 480 L216 480 L216 512" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="capture-to-extract"><path d="M388 698.16 L468 698.16" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="extract-to-resolve"><path d="M812 698.16 L892 698.16" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="items-to-reading"><path d="M1064 884.3199999999999 L1251 884.3199999999999 L1251 1045.7599999999998 L366 1045.7599999999998 L366 1055.7599999999998" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="reading-to-follow"><path d="M300 1649.2799999999997 L300 1701.2799999999997" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="reading-to-controls"><path d="M942 1649.2799999999997 L942 1701.2799999999997" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="items-to-search"><path d="M974 1045.7599999999998 L974 1055.7599999999998" fill="none" stroke="#216B5B" stroke-width="2" marker-end="url(#arrow)"/></g>
+<g id="resource-parallel-path"><path d="M1228 344 L1268 344 L1268 2085.2799999999997 L1180 2085.2799999999997 L1180 2105.2799999999997" fill="none" stroke="#216B5B" stroke-width="2" stroke-dasharray="10 7" marker-end="url(#arrow)"/></g>
+<g id="masthead" data-readability-background="#F7F8F6"><text x="56" y="86" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="44" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="56" dy="0">WGO · 从群聊到持续更新的知识</tspan>
+</text></g>
+<g id="purpose" data-readability-background="#F7F8F6"><text x="56" y="140" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="400" fill="#172E2A" data-readability="critical">
+<tspan x="56" dy="0">把散落的方案、经历和故事，接成能读、能查、能跟进的内容。</tspan>
+</text></g>
+<g id="candidate-state" data-readability-background="#F7F8F6"><text x="56" y="196.8" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#486158" data-readability="body">
+<tspan x="56" dy="0">语义功能源码候选：完整重建并激活后使用。图示不代表已经完成真实迁移。</tspan>
+</text></g>
+<g id="input-conversations-title" data-readability-background="#EAF3EE"><text x="80" y="300" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="28" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">选中的群聊</tspan>
+</text></g>
+<g id="input-conversations" data-readability-background="#EAF3EE"><text x="80" y="346.08" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">菜单选群并开启监控</tspan>
+<tspan x="80" dy="32.64">持续收新消息；历史需显式重建</tspan>
+</text></g>
+<g id="input-legacy-title" data-readability-background="#EAF3EE"><text x="488" y="300" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="28" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="488" dy="0">已有的知识与笔记</tspan>
+</text></g>
+<g id="input-legacy" data-readability-background="#EAF3EE"><text x="488" y="346.08" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="488" dy="0">旧内容保全与可见导航</tspan>
+<tspan x="488" dy="32.64">旧摘要保留自己的来源等级</tspan>
+</text></g>
+<g id="input-resources-title" data-readability-background="#EAF3EE"><text x="922" y="300" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="28" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="922" dy="0">链接与文件</tspan>
+</text></g>
+<g id="input-resources" data-readability-background="#EAF3EE"><text x="922" y="346.08" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="922" dy="0">消息出处 + URL /</tspan>
+<tspan x="922" dy="32.64"> 文件记录</tspan>
+<tspan x="922" dy="32.64">原件字节按单独许可处理</tspan>
+</text></g>
+<g id="capture-title" data-readability-background="#FFFFFF"><text x="80" y="574" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">01  先保留来源</tspan>
+</text></g>
+<g id="capture-body" data-readability-background="#FFFFFF"><text x="80" y="626.8" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">后台定时只读采集</tspan>
+<tspan x="80" dy="35.36">保留原话、上下</tspan>
+<tspan x="80" dy="35.36">文与版本</tspan>
+<tspan x="80" dy="35.36">记录谁说、何时说</tspan>
+<tspan x="80" dy="35.36">消息变动留下历史</tspan>
+<tspan x="80" dy="35.36">原始数据落盘后</tspan>
+<tspan x="80" dy="35.36">才推进“已捕获”</tspan>
+</text></g>
+<g id="extract-title" data-readability-background="#FFFFFF"><text x="504" y="574" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="504" dy="0">02  拆出不同内容</tspan>
+</text></g>
+<g id="extract-body" data-readability-background="#FFFFFF"><text x="504" y="626.8" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="504" dy="0">技术、生活与故事</tspan>
+<tspan x="504" dy="35.36">使用同一整理流程</tspan>
+<tspan x="504" dy="35.36">一段聊天可有多份内容</tspan>
+<tspan x="504" dy="35.36">保留条件、步骤与原话</tspan>
+<tspan x="504" dy="35.36">每份说法都连接证据</tspan>
+<tspan x="504" dy="35.36">未确定内容保持待处理</tspan>
+</text></g>
+<g id="resolve-title" data-readability-background="#FFFFFF"><text x="928" y="574" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="928" dy="0">03  接成稳定知识</tspan>
+</text></g>
+<g id="resolve-body" data-readability-background="#FFFFFF"><text x="928" y="626.8" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="928" dy="0">跨天 / 跨群接续</tspan>
+<tspan x="928" dy="35.36">同一事项持续更新</tspan>
+<tspan x="928" dy="35.36">归并 / 拆分 / 更正</tspan>
+<tspan x="928" dy="35.36">不同案例各有归属</tspan>
+<tspan x="928" dy="35.36">相反说法保留条件</tspan>
+<tspan x="928" dy="35.36">同名不能推定同人</tspan>
+</text></g>
+<g id="extract-verb" data-readability-background="#F7F8F6"><text x="389" y="672.16" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="22" font-weight="600" fill="#216B5B" data-readability="supporting">
+<tspan x="389" dy="0">抽取</tspan>
+</text></g>
+<g id="resolve-verb" data-readability-background="#F7F8F6"><text x="811" y="672.16" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="22" font-weight="600" fill="#216B5B" data-readability="supporting">
+<tspan x="811" dy="0">核对归属</tspan>
+</text></g>
+<g id="canonical-authority" data-readability-background="#F7F8F6"><text x="56" y="924.3199999999999" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#486158" data-readability="body">
+<tspan x="56" dy="0">模型提出内容与变更；程序验证证据后保存到 SQLite。正文、视图与索引可以重建。</tspan>
+</text></g>
+<g id="reading-phase" data-readability-background="#F7F8F6"><text x="56" y="1008.9599999999999" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="56" dy="0">你在 Obsidian 中使用的功能</tspan>
+</text></g>
+<g id="knowledge-page-title" data-readability-background="#EAF3EE"><text x="80" y="1117.7599999999998" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">一份持续更新的知识页</tspan>
+</text></g>
+<g id="knowledge-page-body" data-readability-background="#EAF3EE"><text x="80" y="1170.5599999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">一个 Item，保持一份稳定正文</tspan>
+<tspan x="80" dy="35.36">表格、列表、引用、叙述按内容选用</tspan>
+<tspan x="80" dy="35.36">关键说法可回到原始消息</tspan>
+<tspan x="80" dy="35.36">后续补充、更正和撤回接回同一页</tspan>
+<tspan x="80" dy="35.36">自己的属性与手写区域保留</tspan>
+<tspan x="80" dy="35.36">手改受管理正文 → 保存冲突和待处理草稿</tspan>
+</text></g>
+<g id="example-title" data-readability-background="#F7F8F6"><text x="96" y="1420.7199999999998" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="600" fill="#172E2A" data-readability="body">
+<tspan x="96" dy="0">示意 · 同一个工具的两次测试</tspan>
+</text></g>
+<g id="example-body" data-readability-background="#F7F8F6"><text x="96" y="1462.7199999999998" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="96" dy="0">甲在 macOS 成功，乙在 Windows 失败。</tspan>
+<tspan x="96" dy="32.64">保留各自环境与条件，继续接收后续结果。</tspan>
+</text></g>
+<g id="search-title" data-readability-background="#FFFFFF"><text x="748" y="1117.7599999999998" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="748" dy="0">检索 · 带着问题找内容</tspan>
+</text></g>
+<g id="search-body" data-readability-background="#FFFFFF"><text x="748" y="1170.5599999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="748" dy="0">在检索页填写问题</tspan>
+<tspan x="748" dy="35.36">关键词 + 向量 + 关系联合查找</tspan>
+<tspan x="748" dy="35.36">结果回链知识页和来源</tspan>
+<tspan x="748" dy="35.36">未完成索引明确报告覆盖范围</tspan>
+</text></g>
+<g id="brief-title" data-readability-background="#FFFFFF"><text x="748" y="1391.9999999999998" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="748" dy="0">简报 · 今天值得读什么</tspan>
+</text></g>
+<g id="brief-body" data-readability-background="#FFFFFF"><text x="748" y="1444.7999999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="748" dy="0">跨知识页综合值得读的变化</tspan>
+<tspan x="748" dy="35.36">生活故事也可以独立成篇</tspan>
+<tspan x="748" dy="35.36">每天一版，后补内容修订同一期</tspan>
+<tspan x="748" dy="35.36">旧期保留当时的正文与证据</tspan>
+<tspan x="748" dy="35.36">失败留待处理，不冒充安静的一天</tspan>
+</text></g>
+<g id="views" data-readability-background="#F7F8F6"><text x="80" y="1593.9999999999998" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#486158" data-readability="body">
+<tspan x="80" dy="0">主题视图：多处组织同一知识，链接与嵌入不复</tspan>
+<tspan x="80" dy="32.64">制正文。</tspan>
+</text></g>
+<g id="follow-wait-title" data-readability-background="#FFFFFF"><text x="80" y="1763.2799999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">跟进 · 关注与等待</tspan>
+</text></g>
+<g id="follow-wait-body" data-readability-background="#FFFFFF"><text x="80" y="1816.0799999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">关注：持续收集后续，不自动到期</tspan>
+<tspan x="80" dy="35.36">等待：明确条件 + 有效证据</tspan>
+<tspan x="80" dy="35.36">核对人物、案例与发生时间</tspan>
+<tspan x="80" dy="35.36">更正可以撤回“已经满足”的判断</tspan>
+<tspan x="80" dy="35.36">重要后续提醒；静音 / 已知状态拦截</tspan>
+<tspan x="80" dy="35.36">历史重建不补发过去的提醒</tspan>
+</text></g>
+<g id="reading-controls-title" data-readability-background="#FFFFFF"><text x="684" y="1763.2799999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="684" dy="0">管理 · 阅读与自己的选择</tspan>
+</text></g>
+<g id="reading-controls-body" data-readability-background="#FFFFFF"><text x="684" y="1816.0799999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="684" dy="0">打开、看过、已知、收到通知分别记录</tspan>
+<tspan x="684" dy="35.36">真正可见的打开由 Obsidian 插件证明</tspan>
+<tspan x="684" dy="35.36">也可手动标记某个内容版本已知</tspan>
+<tspan x="684" dy="35.36">管理页操作绑定对象与当前版本</tspan>
+<tspan x="684" dy="35.36">偏好和查询无需等到新消息才生效</tspan>
+</text></g>
+<g id="resources-title" data-readability-background="#FFFFFF"><text x="80" y="2169.2799999999997" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="30" font-weight="600" fill="#172E2A" data-readability="critical">
+<tspan x="80" dy="0">资料这条线继续保留 · 链接、原件、备份与外部 consumer</tspan>
+</text></g>
+<g id="resource-storage" data-readability-background="#FFFFFF"><text x="80" y="2228.08" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="80" dy="0">URL 保存并与原消息关联，展示统一脱敏</tspan>
+<tspan x="80" dy="32.64">已下载附件按许可解析到本机归档</tspan>
+<tspan x="80" dy="32.64">挂载备份与可选 Direct Drive 分别有状态</tspan>
+<tspan x="80" dy="32.64">消息读完 ≠ 附件齐全 ≠ 远端同步已验证</tspan>
+</text></g>
+<g id="resource-delivery" data-readability-background="#FFFFFF"><text x="680" y="2228.08" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="24" font-weight="400" fill="#334B44" data-readability="body">
+<tspan x="680" dy="0">知识页关联原件与具体 occurrence</tspan>
+<tspan x="680" dy="32.64">缺少附件字节 → 明确待补</tspan>
+<tspan x="680" dy="32.64">外部 adapter 依精确身份收录来源和资料</tspan>
+<tspan x="680" dy="32.64">收录、发布与撤回由外部 owner 分别负责</tspan>
+</text></g>
+<g id="loop-close" data-readability-background="#F7F8F6"><text x="56" y="2444.64" font-family="'Avenir Next','PingFang SC','Noto Sans CJK SC',Arial,sans-serif" font-size="26" font-weight="400" fill="#172E2A" data-readability="critical">
+<tspan x="56" dy="0">新消息和后续更正继续走这条链；保留版本与原文证据，也保留你自己的阅读与编辑决定。</tspan>
+</text></g>
+</svg>

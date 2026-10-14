@@ -55,7 +55,10 @@ SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务
 两次完整观察来源、验证有限 cutover horizon，再切换唯一 generation pin 并检查恢复后的增量 runtime。
 拉取代码本身不会迁移或激活数据。大体积迁移 journal 将不可变证据与小型阶段状态分开保存；
 中断的旧内联 journal 可通过 `scripts/rebuild_knowledge.py compact-journal RUN_ID` 升级，
-原件保留，升级本身不读取微信或调用模型。日常操作见[语义阅读指南](docs/semantic-workflow.md)，
+原件保留，升级本身不读取微信或调用模型。`scripts/rebuild_knowledge.py relocate RUN_ID
+--destination-root /PATH/TO/NEW/ROOT` 规划把未 pin、激活前的 run 迁到另一个已挂载的
+私有本地 root；改动需 `--apply --allow-runtime-changes`，保留同一 run/generation 与证据，
+且绝不代替创建缺失的 root。日常操作见[语义阅读指南](docs/semantic-workflow.md)，
 数据流见[provider contract](docs/semantic-providers.md)，准确阶段见[候选状态](docs/current-state.md)。
 专用 archive producer、profile 与菜单已移至外部 adapter；公共 WGO 保留通用 source/capture、
 显式 context capture、CAS 和 mounted backup。
@@ -132,16 +135,25 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
 
 ## 架构
 
-![语义 generation、状态归属与阅读流程](docs/assets/architecture/semantic-core.zh-CN.svg)
+![从群聊到持续更新的知识、阅读与资料](docs/assets/architecture/semantic-functional.zh-CN.svg)
+
+功能图按使用路径展开：选中群聊与保留的旧知识，接成持续更新的 Item、Markdown
+正文、检索、简报、跟进和阅读控制。链接、附件许可与资料备份保留独立链路。
+图中是 semantic 源码候选能力，完成真实重建与激活后才可使用。
 
 active generation 选择唯一知识链：raw capture 落库后才提交 captured vector，
 整批语义完成后才提交 applied vector；索引、Obsidian 和通知消费持久 outbox／receipt。
 全量迁移和增量处理复用同一 engine，source inventory、密钥恢复、长驻进程授权和资源备份保持既有 owner。
 迁移 journal 留在 generation 外，半切换失败仍有独立恢复证据。
 
-可编辑源：[semantic core](docs/architecture/semantic-core.zh-CN.excalidraw)。
+可编辑源：[功能图](docs/architecture/semantic-functional.zh-CN.excalidraw)。
+技术细节：[模块与状态归属图](docs/assets/architecture/semantic-core.zh-CN.svg)、
+[完整技术 Mermaid 与源码索引](docs/architecture/semantic-implementation.md)。
 详细契约：[store](docs/semantic-store-contract.md)、[engine](docs/semantic-engine.md)、
 [v3 进度](docs/monitor-state-v3.md)、[阅读](docs/semantic-reading.md)、[迁移](docs/semantic-rebuild.md)。
+
+显式配置的 semantic runtime root 必须持续可用。外部卷未挂载时，app 与旧命令
+以 `semantic_runtime_root_unavailable` 停止；恢复同一 root 后再继续。
 
 <details>
 <summary>迁移前架构与继续复用的 source/resource 基础</summary>

@@ -150,6 +150,19 @@
   configuration/backfill/catch-up/digest/review/reorganization CLIs must stop
   before constructing their legacy writers. An in-progress cutover fails
   closed; no caller may infer an active generation from directory contents.
+  An explicitly configured runtime root must be available before app, monitor,
+  health or legacy dispatch can inspect its pin. A missing external volume is
+  `semantic_runtime_root_unavailable`, never evidence to fall back to legacy.
+  `RebuildCoordinator.relocate` owns the only pre-activation move of an unpinned
+  run to another explicit private local runtime root: it copies run/generation
+  state (SQLite via Online Backup including WAL), binds only the operational
+  plan to the new root, adopts `semantic_runtime_root` through the latest locked
+  ConfigStore patch and records a durable relocation plus a retirement record
+  for the retained original root. It never creates a missing destination root,
+  never changes cursors/jobs/provenance evidence, and admits a changed
+  TEXT/DECISION binding only while the generation has zero jobs.
+  Initial legacy inventory admits one fully revalidated reread after transient
+  file metadata change; frozen-input, backup and acceptance checks remain strict.
 - `core/semantic/store.py` owns immutable source versions, Observations, Items,
   typed claims, relations, Views, canonical change events and derived outboxes.
   `jobs.py` persists validated model artifacts before canonical or projection
@@ -337,6 +350,9 @@
 - Editable architecture truth lives in `docs/architecture/*.excalidraw`; SVGs
   under `docs/assets/architecture/` are portable generated exports and must be
   regenerated and visually inspected after source changes.
+  `docs/architecture/semantic-implementation.zh-CN.mmd` is the canonical Mermaid
+  implementation map; its companion document owns the legend and source anchors.
+  Mermaid renders are derived artifacts, not a second architecture authority.
 - Runtime config, WeChat keys/cache, chat-derived databases, logs, Obsidian
   output, OAuth material, mounted-target receipts and attachment bytes never
   belong in Git.

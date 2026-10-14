@@ -72,7 +72,11 @@ source observations and a finite cutover horizon, then switches one generation
 pin and checks the restored runtime. Large journals keep immutable evidence outside
 small mutable state. `scripts/rebuild_knowledge.py compact-journal RUN_ID` upgrades
 an interrupted inline journal, preserving original bytes without starting source
-or model processing. A source checkout does not migrate or
+or model processing. `scripts/rebuild_knowledge.py relocate RUN_ID
+--destination-root /PATH/TO/NEW/ROOT` plans moving an unpinned, pre-activation run
+to another already-mounted private local root; mutation needs `--apply
+--allow-runtime-changes`, preserves the run/generation and evidence, and never
+fabricates a missing root. A source checkout does not migrate or
 activate data. Start with the [reading guide](docs/semantic-workflow.md),
 [provider contract](docs/semantic-providers.md), and [candidate status](docs/current-state.md).
 Consumer-specific archive producers now belong to external adapters; generic
@@ -161,7 +165,13 @@ become stale.
 
 ## Architecture
 
-![Semantic generation, state owners and reading flow](docs/assets/architecture/semantic-core.en.svg)
+![Conversations into continuing knowledge, reading and resources](docs/assets/architecture/semantic-functional.en.svg)
+
+The functional map shows the reader's path: selected conversations and preserved
+legacy knowledge become continuing Items, readable Markdown, search, briefings,
+follow-up and reading controls. Links, attachment consent and resource backup
+keep their independent lane. This describes the semantic source candidate;
+a completed migration and activation are required before using it.
 
 The active generation selects one canonical pipeline. Raw capture commits before
 its captured cursor; accepted semantic work commits before its applied cursor.
@@ -171,10 +181,16 @@ recovery, process-lifetime access and selected-resource backup keep their existi
 owners. The migration journal lives outside the candidate generation so a partial
 cutover cannot disappear with a failed candidate.
 
-Editable source: [semantic core](docs/architecture/semantic-core.en.excalidraw).
+Editable source: [functional map](docs/architecture/semantic-functional.en.excalidraw).
+Implementation details: [module and authority map](docs/assets/architecture/semantic-core.en.svg)
+and [complete technical Mermaid with source anchors](docs/architecture/semantic-implementation.md).
 Detailed contracts: [store](docs/semantic-store-contract.md),
 [engine](docs/semantic-engine.md), [v3 progress](docs/monitor-state-v3.md),
 [reading](docs/semantic-reading.md), and [migration](docs/semantic-rebuild.md).
+
+An explicitly configured semantic runtime root must remain available. If its
+external volume is missing, the app and legacy commands fail closed with
+`semantic_runtime_root_unavailable`; restore the same root before continuing.
 
 <details>
 <summary>Pre-migration architecture and retained source/resource foundation</summary>
