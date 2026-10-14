@@ -1588,6 +1588,9 @@ class RebuildCoordinator:
         if imported.batch_ids:
             journal.update(lambda r: r.setdefault("legacy_imports", {}).update({imported.manifest_id: {
                 "receipt_id": imported.manifest_id, "batch_ids": list(imported.batch_ids)}}))
+        # The immutable journal payload remains the evidence owner. Do not keep
+        # the decoded legacy corpus alive throughout parallel provider work.
+        del inventory
         self._event(journal, prefix + "-processed-C0", self._process_all(runtime, run_id=journal.run_id + "-" + prefix + "-C0"))
         final = self._snapshot(journal, capture, prefix + "-C1", list(states))
         self._event(journal, prefix + "-processed-C1", self._process_all(runtime, run_id=journal.run_id + "-" + prefix + "-C1"))
@@ -1600,6 +1603,7 @@ class RebuildCoordinator:
                           "max_input_bytes": runtime.briefing.max_input_bytes,
                           "provider_route": provider_binding(roles.text)}
         journal.update(lambda r: r.update(required_brief=required_brief))
+        inventory = LegacyInventory.from_dict(journal.payloads.get(frozen["legacy_inventory"]))
         mapping = derive_topic_item_map(store, inventory)
         mapped_ids = {iid for ids in mapping.values() for iid in ids}
         item_paths = {iid: runtime.publisher.resolve(iid) for iid in mapped_ids}

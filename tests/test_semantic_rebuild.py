@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 from types import SimpleNamespace
 import unittest
+import weakref
 from contextlib import contextmanager, closing
 from unittest.mock import patch
 
@@ -194,6 +195,30 @@ class RebuildCoordinatorTests(unittest.TestCase):
         with closing(sqlite3.connect(run["plan"]["database"])) as conn:
             metadata = json.loads(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0])
         self.assertEqual(metadata["activation"]["delivery_floor_change_id"], 0)
+
+    def test_decoded_legacy_inventory_is_released_during_provider_work(self):
+        from core.semantic.legacy import LegacyInventory
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        self.managed.on_restore = self.live_increment
+        decoded = []
+        original_decode = LegacyInventory.from_dict
+        original_process = self.coordinator._process_all
+
+        def decode(value):
+            inventory = original_decode(value)
+            decoded.append(weakref.ref(inventory))
+            return inventory
+
+        def process(runtime, *, run_id):
+            self.assertTrue(decoded)
+            self.assertTrue(all(reference() is None for reference in decoded),
+                            "decoded legacy corpus is still retained during provider work")
+            return original_process(runtime, run_id=run_id)
+
+        with patch.object(LegacyInventory, "from_dict", side_effect=decode), \
+             patch.object(self.coordinator, "_process_all", side_effect=process):
+            result = self.execute()
+        self.assertEqual(result["state"], "run_complete", result)
 
     def use_semantic_text(self):
         from tests.test_semantic_engine import FakeText

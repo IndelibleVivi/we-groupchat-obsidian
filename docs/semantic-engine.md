@@ -14,6 +14,12 @@ offsets, or excerpts. The engine assigns stable unit, claim and Observation IDs.
 Facts, steps, quotations, scenes,
 counterevidence and resources retain provenance. Unknown claim qualifiers stay
 unknown; matching names do not establish entity identity.
+A quote unit's `text` is only the contiguous verbatim words of one cited message.
+Neither the prompt nor the correction pass allows a self-added speaker label or
+name, quotation-mark wrapping, a Markdown `>` blockquote marker, or words joined
+from separate messages; the strict grounding check rejects them. Attribution
+stays in captured speaker metadata and in scene/fact units, never inside the
+quote text.
 
 The engine passes captured **source version IDs**, not message occurrence IDs.
 `core/semantic/attribution.py::source_attribution(namespace, chat_id, payload)`
@@ -65,6 +71,23 @@ dispositions can finish a source with zero Observations. Empty
 `legacy_resource` and `legacy_metadata` rows receive the program disposition
 `unsupported_type` because their complete private metadata remains captured;
 empty pages and messages do not receive that assumption.
+
+Before an unaccepted parent aggregates, every member still `unclassified` gets
+at most one bounded adjacent-context coverage re-read (`extract_coverage`, phase
+`bounded-adjacent-context-v1`). Only the pending members are core and citable;
+the nearest neighbouring messages of the same frozen batch are attached as
+non-citable, character-bounded context text without span identities (at most four
+message sources and 8,000 characters per page), so no earlier terminal
+disposition is overwritten. The coverage pass reuses the shared page generation
+and known-output correction path, binds exact source/span/context inputs, reuses
+accepted page artifacts byte-for-byte and never reopens the protected WeChat source. It
+contributes a new Observation only when that Observation cites a pending core
+member, and it replaces a pending disposition only when every still-unclassified
+fragment of that member reaches a terminal state. A still-unclassified or unknown
+coverage result keeps the member unread with no processing ACK; a distinct
+coverage job is never re-sent under a new prompt, and no uniform `noise` or
+forced `context_only` disposition may bypass the gap. An already accepted parent
+keeps its exact artifact and receipt.
 
 Relations describe evidence (`replay_same_source`, `same_material`, `restates`,
 `independent_support`, `refines_scope`, `changes_over_time`, `disputes`,

@@ -1,5 +1,6 @@
 """Known rejected JSON may be corrected; unknown outcomes cannot be replayed."""
 from contextlib import closing
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -67,3 +68,43 @@ class OutputCorrectionTests(unittest.TestCase):
         with self.assertRaisesRegex(SemanticValidationError, 'semantic_job_busy_or_unknown'):
             engine.extract_batch('batch')
         self.assertEqual(len(text.calls), 1)
+
+    def test_attributed_quote_wrapper_is_corrected_to_the_exact_passage(self):
+        payload = {"raw_sender_id": "wxid_synthetic_speaker", "sender": "小林"}
+        passage = "版本回滚以后本地缓存需要重新生成。"
+        record = capture(self.store, 'quoted', [passage], payloads=[payload])
+
+        class WrappedQuote(FakeText):
+            def __init__(self):
+                super().__init__()
+                self.prompts = []
+
+            def generate(self, prompt, **kwargs):
+                if not prompt.startswith('The following captured'):
+                    return super().generate(prompt, **kwargs)
+                self.calls.append(kwargs['request_id'])
+                self.prompt_sizes.append(len(prompt.encode()))
+                self.prompts.append(prompt)
+                data = json.loads(prompt.rsplit('\n', 1)[-1])
+                quoted = passage if 'Correct the prior JSON' in prompt else '小林说：“' + passage + '”'
+                values = [{"title": "署名包裹的引语", "scene_kind": "quote",
+                           "spans": [{"source_id": source["source_id"], "span_id": span["span_id"]}
+                                     for span in source["spans"]],
+                           "units": [{"kind": "quote", "text": quoted,
+                                      "span_indices": list(range(len(source["spans"])))}],
+                           "topics": [], "claims": []}
+                          for source in data if source["core"]]
+                return TextResult(json.dumps({"observations": values}, ensure_ascii=False), self.route)
+
+        text = WrappedQuote()
+        result = SemanticEngine(self.store, text, FakeDecision()).extract_batch('quoted')
+        self.assertEqual(len(result['observations']), 1)
+        self.assertEqual(result['observations'][0]['units'][0]['text'], passage)
+        self.assertEqual(len(text.calls), 2)
+        self.assertIn('semantic_quote_not_grounded', text.prompts[1])
+        self.assertIn('verbatim', text.prompts[1])
+        with closing(self.store.connect()) as connection:
+            quotes = [row[0] for row in connection.execute(
+                "SELECT text FROM content_units WHERE kind='quote'")]
+        self.assertEqual(quotes, [passage])
+        self.assertEqual(self.store.get_source(record['member_version_ids'][0])['payload'], payload)

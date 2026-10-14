@@ -214,6 +214,8 @@ reference/hash/plan 身份与 schema 不变。此优化不降低冻结、来源�
 conservation 验证。
 Legacy inventory 的身份校验也按 canonical JSON chunks 计算，保持既有 digest；
 单次 backup/navigation 操作复用其已算身份，不在每个旧页面上重算全库。
+完成 legacy 导入和备份核对后，coordinator 释放已 decode 的清单；模型处理结束、
+需要旧页面映射时再读取同一不可变 payload，避免整个旧库随 provider 并发长期驻留。
 parallel wave 准备只读取轻量 batch metadata（`batch_id` 与 capture order），再
 逐 batch 读取 core members 计算 overlap-owner wave，不预先解出全部 capture
 receipt 或保留全部 member 副本；它仍不持有 DB 事务或 projection lock。
