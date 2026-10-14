@@ -251,7 +251,11 @@ artifacts. Work not dispatched is neither successful nor failed. JobStore and
 reader artifact records return to pending only on the scheduler's own pre-send
 proof; arbitrary provider errors cannot use that transition. Restart reuses
 accepted results, and unknown sent outcomes retain their reconciliation
-requirement. There is no automatic fallback or same-phase retry.
+requirement. There is no automatic fallback or same-phase provider retry.
+The extraction consumer separately permits at most two corrections of a
+received JSON response rejected by its validator; it records each failed
+attempt and uses distinct request IDs. This cannot replay an unknown outcome
+or reinterpret an already accepted artifact.
 
 ## Index and usage APIs
 

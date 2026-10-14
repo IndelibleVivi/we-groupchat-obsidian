@@ -114,7 +114,13 @@ accepted results. A scheduler-proven unsent attempt returns to `pending`,
 retaining its attempt record. `outcome_unknown=False` on an arbitrary provider
 exception is not that proof. Sent failures and unknown outcomes retain their
 existing JobStore state; unknown work requires explicit reconciliation. There
-is no same-pass retry or automatic provider fallback. Waiting for configured
+is no automatic provider retry or fallback. Extraction may correct a known
+received JSON validation failure at most twice: each rejected result closes its
+durable attempt, and the next claim uses a distinct physical request ID with
+the error and rejected JSON as untrusted feedback for the same source spans.
+Accepted pages are reused; unknown outcomes, unsent work and provider failures
+cannot enter this correction loop. Exhaustion still stops extraction without
+canonical acceptance or ACK. Waiting for configured
 rate capacity renews the owned job lease without holding a database transaction.
 The role defaults, explicit rate ceilings and process scope are documented in
 [semantic-providers.md](semantic-providers.md#bounded-provider-admission).
