@@ -14,12 +14,23 @@ offsets, or excerpts. The engine assigns stable unit, claim and Observation IDs.
 Facts, steps, quotations, scenes,
 counterevidence and resources retain provenance. Unknown claim qualifiers stay
 unknown; matching names do not establish entity identity.
-A quote unit's `text` is only the contiguous verbatim words of one cited message.
-Neither the prompt nor the correction pass allows a self-added speaker label or
-name, quotation-mark wrapping, a Markdown `>` blockquote marker, or words joined
-from separate messages; the strict grounding check rejects them. Attribution
-stays in captured speaker metadata and in scene/fact units, never inside the
-quote text.
+For a quote unit, the model selects `span_indices` and omits `text`. The program
+copies those complete, contiguous source spans from one message verbatim before
+persisting the accepted artifact; canonical units still always have `text`.
+Noncontiguous selections or joined messages fail closed. Explicit `text` from
+an older response remains supported only when it already matches the cited
+source exactly: the program never silently rewrites a rejected quotation.
+Self-added speaker labels, quotation wrappers and Markdown markers are not
+source words. Attribution stays in captured speaker metadata and scene/fact
+units, while the reading projection supplies quotation formatting.
+
+If a page also returns a scene whose every source/span pair is a verified
+non-core context reference, the page artifact retains it under
+`excluded_context_results` as untrusted audit evidence. It never enters the
+canonical Observations or becomes a duplicate of earlier work. Unknown,
+mispaired or malformed references stay in strict validation. Omitting a core
+member still leaves it `unclassified` and blocks processing ACK; scope admission
+does not turn missing work into a negative result.
 
 The engine passes captured **source version IDs**, not message occurrence IDs.
 `core/semantic/attribution.py::source_attribution(namespace, chat_id, payload)`
@@ -148,8 +159,8 @@ existing JobStore state; unknown work requires explicit reconciliation. There
 is no automatic provider retry or fallback. Extraction may correct a known
 received JSON validation failure at most twice: each rejected result closes its
 attempt. Eligibility comes from the exact exception raised while validating that
-received response, rather than an error-name prefix; context-only Observations
-are rejected output too. Provider, prompt-building, claim and acceptance failures
+received response, rather than an error-name prefix. Provider, prompt-building,
+claim and acceptance failures
 do not enter this path. Each correction claims a new durable attempt and uses a
 distinct physical request ID with
 the error and rejected JSON as untrusted feedback for the same source spans.

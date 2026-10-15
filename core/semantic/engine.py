@@ -477,14 +477,18 @@ class SemanticEngine:
             response = self.text_provider.generate(prompt, request_id=request_id, generation_id=generation)
             last_response[0] = response.text
             try:
-                extracted_page = validate_extraction(response.text, page_sources, namespace=namespace, span_ids=span_ids)
-                dispositions = validate_dispositions(response.text, page_sources, extracted_page)
+                scoped, context_results = scope_page_output(response.text, page_sources,
+                                                           namespace=namespace, span_ids=span_ids)
+                extracted_page = validate_extraction(scoped, page_sources, namespace=namespace, span_ids=span_ids)
+                dispositions = validate_dispositions(scoped, page_sources, extracted_page)
             except SemanticValidationError as exc:
                 rejected_validation[0] = exc
                 raise
-            return {"observations": [observation.as_dict() for observation in extracted_page],
-                    "dispositions": dispositions,
-                    "route": asdict(response.route)}
+            artifact = {"observations": [observation.as_dict() for observation in extracted_page],
+                        "dispositions": dispositions, "route": asdict(response.route)}
+            if context_results:
+                artifact["excluded_context_results"] = context_results
+            return artifact
 
         for repair in range(3):
             try:
@@ -516,11 +520,10 @@ class SemanticEngine:
                         "semantic_invalid_source_span": "Copy only the exact source_id/span_id pairs supplied "
                             "in the final messages payload. Never invent IDs or pair one message's source_id "
                             "with another message's span_id. Every observation also needs a core=true message.",
-                        "semantic_quote_not_grounded": "quote.text must be only the contiguous verbatim words of "
-                            "one cited message. Do not add a speaker label or name, do not wrap the words in "
-                            "quotation marks or a Markdown '>' blockquote marker, and do not join separate "
-                            "messages. Captured speaker metadata is already preserved; put attribution and "
-                            "who-said-what in a scene or fact unit instead.",
+                        "semantic_quote_not_grounded": "For quote units, omit text and select span_indices for "
+                            "one contiguous passage of one cited message; the program copies its verbatim "
+                            "words. Do not compose speaker labels or quotation wrappers. Put attribution in "
+                            "a separate scene/fact unit; captured speaker metadata is already retained.",
                     }.get(exc.code, "Follow the exact supplied schema, scoped IDs, source wording and timestamps."),
                     "rejected_json": last_response[0]}
         raise SemanticValidationError("semantic_page_attempt_missing")
@@ -1232,7 +1235,7 @@ def extraction_prompt(sources: Sequence[CapturedSource], *, namespace="semantic"
         "never emit context alone as another observation. Return strict JSON only: {\"observations\":[{"
         "\"title\":str,\"scene_kind\":technical|story|gossip|life|quote|other,"
         "\"spans\":[{\"source_id\":provided ID,\"span_id\":provided span ID}],"
-        "\"units\":[{\"kind\":fact|step|quote|scene|counterevidence|resource,\"text\":str,"
+        "\"units\":[{\"kind\":fact|step|quote|scene|counterevidence|resource,\"text\":str (omit for quote),"
         "\"span_indices\":[int]}],\"topics\":[str],\"claims\":[{"
         "\"subject_id\":str|null,\"case_id\":str|null,\"condition\":str|null,"
         "\"channel\":str|null,\"version\":str|null,\"phase\":str|null,"
@@ -1241,9 +1244,10 @@ def extraction_prompt(sources: Sequence[CapturedSource], *, namespace="semantic"
         "do not create IDs or offsets. "
         "An input with an empty spans list has no citable text: never create a null or invented span_id. "
         "Give it a reasoned disposition instead of inventing an observation. "
-        "All units and claims need exact source spans. A quote unit's text is only the contiguous "
-        "verbatim words of one cited message: never add a speaker label or name, never wrap it in "
-        "quotation marks or a Markdown '>' blockquote marker, and never join separate messages. "
+        "All units and claims need exact source spans. For a quote unit, return only kind and span_indices; "
+        "omit text. Select one contiguous passage of one cited message, and the program will copy the "
+        "complete supplied span(s) verbatim. Use separate quote units for separate messages. Never compose "
+        "speaker labels, quotation wrappers or Markdown blockquote markers as source words. "
         "Captured speaker metadata already preserves attribution; put who-said-what explanation in a "
         "scene or fact unit instead. "
         "claims is normally []: use typed claims only for independently checkable, comparable or watchable "
@@ -1279,6 +1283,33 @@ def extraction_prompt(sources: Sequence[CapturedSource], *, namespace="semantic"
         "units and reasons; preserve original quotations and technical terms.\n"
         + _json(payload)
     )
+
+
+def scope_page_output(raw, sources, *, namespace, span_ids):
+    """Separate provably context-only output from the current core task.
+
+    Unknown/mispaired/malformed refs remain in the validator path. Excluded
+    objects are retained as untrusted job evidence, never canonical content.
+    Missing core coverage still becomes unclassified and blocks processing ACK.
+    """
+    value = _model_json(raw, "semantic_invalid_json")
+    _keys(value, {"observations"}, {"dispositions"})
+    if not isinstance(value["observations"], list):
+        raise SemanticValidationError("semantic_invalid_observations")
+    by_id = {source.source_id: source for source in sources}
+    allowed = set(span_ids)
+    spans = {span.span_id: span for span in prepare_spans(sources, namespace=namespace)
+             if span.span_id in allowed}
+    retained, excluded = [], []
+    for observation in value["observations"]:
+        refs = observation.get("spans") if isinstance(observation, dict) else None
+        context_only = isinstance(refs, list) and bool(refs) and all(
+            isinstance(ref, dict) and set(ref) == {"source_id", "span_id"}
+            and isinstance(ref["source_id"], str) and isinstance(ref["span_id"], str)
+            and ref["span_id"] in spans and spans[ref["span_id"]].source_id == ref["source_id"]
+            and not by_id[ref["source_id"]].core for ref in refs)
+        (excluded if context_only else retained).append(observation)
+    return {**value, "observations": retained}, excluded
 
 
 def validate_extraction(raw: str | Mapping, sources: Sequence[CapturedSource], *, namespace="semantic", span_ids=None):
@@ -1325,10 +1356,11 @@ def validate_extraction(raw: str | Mapping, sources: Sequence[CapturedSource], *
             raise SemanticValidationError("semantic_empty_units")
         units = []
         for unit in value["units"]:
-            _keys(unit, {"kind", "text", "span_indices"})
+            _keys(unit, {"kind", "span_indices"}, {"text"})
             if unit["kind"] not in UNIT_KINDS:
                 raise SemanticValidationError("semantic_invalid_unit_kind")
-            text = _text(unit["text"])
+            if unit["kind"] != "quote":
+                _keys(unit, {"kind", "text", "span_indices"})
             refs = referenced(unit["span_indices"])
             if unit["kind"] == "quote":
                 passages, current, prior = [], "", None
@@ -1339,8 +1371,19 @@ def validate_extraction(raw: str | Mapping, sources: Sequence[CapturedSource], *
                     current += span.excerpt
                     prior = span
                 passages.append(current)
-                if not any(text in passage for passage in passages):
-                    raise SemanticValidationError("semantic_quote_not_grounded")
+                if "text" not in unit:
+                    passages = [passage for passage in passages if passage]
+                    if len(passages) != 1:
+                        raise SemanticValidationError("semantic_invalid_quote_selection")
+                    text = passages[0]
+                else:
+                    # Explicit older quote text still requires strict matching;
+                    # never replace rejected words with different source words.
+                    text = _text(unit["text"])
+                    if not any(text in passage for passage in passages):
+                        raise SemanticValidationError("semantic_quote_not_grounded")
+            else:
+                text = _text(unit["text"])
             identity = _json([namespace, unit["kind"], text, sorted(refs)])
             units.append(ContentUnit(str(uuid.uuid5(uuid.NAMESPACE_URL, identity)), unit["kind"], text, refs))
         if not isinstance(value["topics"], list):

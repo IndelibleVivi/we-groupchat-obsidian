@@ -57,7 +57,7 @@ class OutputCorrectionTests(unittest.TestCase):
             self.assertEqual(connection.execute('SELECT COUNT(*) FROM observations').fetchone()[0], 0)
             self.assertEqual(connection.execute('SELECT COUNT(*) FROM accepted_job_artifacts').fetchone()[0], 0)
 
-    def test_context_only_observation_is_a_known_rejected_output(self):
+    def test_extra_context_result_is_audited_without_becoming_a_second_observation(self):
         self.store.capture_batch('contextual', [
             {'source_id': str(index), 'logical_shard_id': 'synthetic-shard',
              'physical_generation': 'synthetic-generation', 'source_cursor_token': str(index + 1),
@@ -68,24 +68,26 @@ class OutputCorrectionTests(unittest.TestCase):
 
         class ContextOnly(FakeText):
             def generate(self, prompt, **kwargs):
-                if self.calls:
-                    self.correction_prompt = prompt
-                    return super().generate(prompt, **kwargs)
-                self.calls.append(kwargs['request_id'])
+                response = super().generate(prompt, **kwargs)
+                raw = json.loads(response.text)
                 context = json.loads(prompt.rsplit('\n', 1)[-1])[1]
-                return TextResult(json.dumps({'observations': [{
+                raw['observations'].append({
                     'title': 'Context alone', 'scene_kind': 'life',
                     'spans': [{'source_id': context['source_id'], 'span_id': context['spans'][0]['span_id']}],
                     'units': [{'kind': 'scene', 'text': 'Previous context', 'span_indices': [0]}],
-                    'topics': [], 'claims': []}]}), self.route)
+                    'topics': [], 'claims': []})
+                return TextResult(json.dumps(raw), self.route)
 
         text = ContextOnly()
         extracted = SemanticEngine(self.store, text, FakeDecision()).extract_batch('contextual')
-        self.assertEqual(len(text.calls), 2)
-        self.assertIn('semantic_context_without_core', text.correction_prompt)
-        self.assertIn('do not invent a core link', text.correction_prompt)
+        self.assertEqual(len(text.calls), 1)
         self.assertEqual(len(extracted['observations']), 1)
         self.assertEqual(extracted['observations'][0]['units'][0]['text'], 'Current scene')
+        with closing(self.store.connect()) as connection:
+            artifact = json.loads(connection.execute("SELECT artifact_json FROM jobs "
+                "JOIN accepted_job_artifacts USING(job_id) WHERE kind='extract_page'").fetchone()[0])
+            self.assertEqual(len(artifact['excluded_context_results']), 1)
+            self.assertEqual(connection.execute('SELECT count(*) FROM observations').fetchone()[0], 1)
 
     def test_unknown_outcome_is_not_corrected_or_bypassed_on_resume(self):
         class Unknown(FakeText):
