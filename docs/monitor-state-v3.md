@@ -157,6 +157,15 @@ is part of this schema. A prior capture receipt can be consumed after later
 capture commits; requiring only the most recent receipt would incorrectly
 exclude an existing captured backlog.
 
+A known semantic `defer` does not prevent later captured batches from forming
+canonical knowledge. It still blocks the continuous processing receipt and
+applied cursor at the unresolved gap. Ordinary monitoring reports
+`semantic_processing_pending`, keeps accepted work, and retries the deferred
+plan only after its Item/View dependencies change. Empty EOF polling does not
+constitute new evidence. Once the gap resolves, receipt verification and
+checkpoint CAS consume batches in source order; no new checkpoint schema or
+second progress owner is introduced.
+
 ## Explicit installation/migration receipt
 
 ```json

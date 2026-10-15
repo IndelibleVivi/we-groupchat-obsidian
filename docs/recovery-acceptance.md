@@ -6,9 +6,13 @@ dated acceptance evidence. Initial recovery hardening followed public baseline
 (PR #18). [Frozen batches](#monitor-acceptance-and-frozen-batches) arrived later
 in `72a5d7b` (PR #24); the earlier native canary does not cover them.
 It is not an attestation of today's installed app or live WeChat state.
-The exact protected profile remains macOS WeChat
-`4.1.11 (269136)` arm64; a version string from another distribution channel is
-not interchangeable evidence.
+Source currently admits exact macOS WeChat protected profiles `4.1.11 (269136)`
+and `4.1.15 (270102)` on arm64; the content-free distribution and runtime
+provenance for `4.1.15 (270102)` is recorded in
+[#47](https://github.com/IndelibleVivi/we-groupchat-obsidian/issues/47). The
+dated maintainer native canary below remains limited to `4.1.11 (269136)`.
+A version string from another distribution channel is not interchangeable
+evidence.
 
 Read the [source behavior](#source-behavior) and [frozen-batch contract](#monitor-acceptance-and-frozen-batches)
 for current recovery rules, the [bounded canary](#v010-alpha1-bounded-native-canary)

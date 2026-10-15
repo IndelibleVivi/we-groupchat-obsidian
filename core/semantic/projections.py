@@ -672,6 +672,19 @@ class BodyPlanWriter:
                     and set(current_fingerprints) == {u for b in previous.blocks for u in b.unit_ids}):
                 return validate_body_plan(snapshot, BodyPlan(
                     snapshot.item_id, snapshot.content_revision, previous.blocks))
+        if ledger is not None:
+            # A version/budget change may turn a page into fragments (or vice
+            # versa). Such repartitioning must not bypass an unresolved child
+            # invocation of this stable caller-owned request.
+            prefixes = (request_id + ":page:", request_id + ":group:")
+            unresolved = ledger.one(
+                "SELECT 1 FROM reader_text_artifacts WHERE generation_id=? "
+                "AND status IN ('running','unknown') AND prompt_version LIKE 'body-%' "
+                "AND (request_id=? OR substr(request_id,1,?)=? OR substr(request_id,1,?)=?) LIMIT 1",
+                (self.generation_id, request_id, len(prefixes[0]), prefixes[0],
+                 len(prefixes[1]), prefixes[1]))
+            if unresolved:
+                raise ReadingError("text_provider_outcome_unknown")
         prompt_text = self._prompt(snapshot, previous, unchanged)
         if len(prompt_text.encode("utf-8")) > self.max_input_bytes:
             return self._paged(snapshot, previous, current_fingerprints, unchanged, request_id, ledger)
@@ -705,9 +718,12 @@ class BodyPlanWriter:
                     "Reader-facing prose must not expose internal processing, schema, unit or evidence ids, or "
                     "processing caveats; state a real uncertainty or limit only where it materially affects "
                     "the reader. Each unit has one stable block home. Keep stable block IDs. "
-                    "Unchanged blocks supplied below keep exact bytes unless extended with newly supplied "
-                    "units. Such an extension keeps its old paragraph text verbatim and adds the detail "
-                    "inside the same block. Retracted/contested units remain historical quoted evidence, never "
+                    "Unchanged blocks supplied below keep exact bytes unless they incorporate newly supplied "
+                    "units. For that affected block, integrate new detail by rewriting automatic prose naturally "
+                    "at the same stable home; do not repeat the old sentence just to append a supplement. "
+                    "Retain every old unit, evidence and resource, and preserve required verbatim fragments "
+                    "and exact quotations. Blocks receiving no new or changed units keep their exact bytes. "
+                    "Retracted/contested units remain historical quoted evidence, never "
                     "current conclusions: use correction/historical/counterevidence role. "
                     "Keep old block IDs and the home of retained units when correcting their explanation. "
                     + MARKDOWN_CONTRACT,
@@ -716,7 +732,7 @@ class BodyPlanWriter:
             "writing_units": [{"index": index, "unit_id": unit.id} for index, unit in enumerate(snapshot.units)],
             "snapshot": asdict(snapshot),
             "previous": asdict(previous) if previous else None,
-            "immutable_blocks": list(unchanged),
+            "unchanged_blocks": list(unchanged),
             **context,
         }
         return redact_urls_in_text(json_text(prompt))
@@ -771,7 +787,7 @@ class BodyPlanWriter:
             return result.to_json()
         if ledger is not None:
             artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
-                                              prompt_version="body-plan-v4", validate=validate)
+                                              prompt_version="body-plan-v5", validate=validate)
             return BodyPlan.from_json(artifact)
         route = provider_binding(self.provider)
         result = self.provider.generate(prompt_text, request_id=request_id, generation_id=self.generation_id)
@@ -790,7 +806,7 @@ class BodyPlanWriter:
         binding = fingerprint(json_text(asdict(snapshot)))
         route = provider_binding(self.provider)
         aggregate_key = fingerprint(json_text([binding, asdict(previous) if previous else None,
-                                               route, self.max_input_bytes, "body-paged-v4"]))
+                                               route, self.max_input_bytes, "body-paged-v5"]))
         if ledger:
             reused = ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request_id,))
             if reused and (reused["generation_id"] != self.generation_id or reused["job_key"] != aggregate_key):
@@ -864,7 +880,7 @@ class BodyPlanWriter:
         if ledger:
             with ledger.transaction() as conn:
                 conn.execute("INSERT OR IGNORE INTO reader_text_artifacts VALUES(?,?,?,?,?,'accepted',?)",
-                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v4", result.to_json()))
+                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v5", result.to_json()))
         return result
 
     @staticmethod
@@ -958,7 +974,7 @@ class BodyPlanWriter:
             added = set(updated.unit_ids) - set(block.unit_ids) if updated else set()
             if (updated is None or not added or not added <= new_units
                     or not set(block.unit_ids) <= set(updated.unit_ids)
-                    or block.text not in updated.text or updated.role != block.role
+                    or updated.role != block.role
                     or not set(block.evidence_ids) <= set(updated.evidence_ids)
                     or not set(block.resource_ids) <= set(updated.resource_ids)):
                 raise ReadingError("body_plan_changed_unaffected_block")

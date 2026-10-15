@@ -196,9 +196,25 @@ the verified replacement receipt without another text/decision call. A stale
 read set by itself, an unknown choice, or a replacement that leaves any input
 Observation unresolved cannot terminate the old job.
 
+An accepted `defer` is revisited when the frozen Item catalog or View context
+changes. Existing `proposal_context` jobs retain the planning epochs across
+restart; old accepted artifacts remain immutable. A raw capture/empty EOF or
+unchanged poll alone does not trigger another provider call. Unknown provider
+outcomes still block their original invocation. Rebuild continues later batches
+before revisiting deferred ones, and stops if a full pass makes no progress.
+Live monitoring also lets later knowledge commit; processing receipts and the
+applied checkpoint still require the complete continuous prefix.
+
 Resolver pages contain at most 24 Observations and 30,000 JSON bytes before
 candidate context. Hybrid recall is followed by a complete paginated scan of
 all Item identity scopes. Possible omitted candidates prohibit `CREATE_ITEM`.
+When more than 12 candidates remain possible, bounded six-Item pages examine
+their full or accepted summarized identity context. Uncertain summaries cannot
+establish absence. A still-ambiguous result remains deferred, with its accepted
+pages available for replay. This does not remove the global-scan cost: synthetic
+24/240/4,000-Item catalogs require 1/10/167 coarse decision calls respectively
+when byte limits do not force additional pages. These are actual fake-provider
+call counts, not real-provider latency or a constant-cost live guarantee.
 Selected long Items get accepted, bounded identity-context summaries covering
 all detail parts; these summaries never replace canonical body units. The final
 proposal uses content, View definition, View override and global revisions.
@@ -298,7 +314,20 @@ evidence_ids=..., expected_revision=...)` delegates to the store's atomic claim
 relation API. **From is the new evidence and to is the affected claim.** A
 correction/retraction invalidates that exact witness and recomputes all watches
 reached through directed dependencies, including older Items outside top-k.
-An Item relation alone never retracts a claim.
+An Item relation alone never retracts a claim. A withdrawn predicate propagates
+only to the same typed value and exact qualifier scope within a material, or
+through explicit claim-level `restates`/`replay_same_source` lineage. It does not
+withdraw unrelated propositions from that report. A combined claim can retain
+its unaffected predicates during evaluation; canonical claim bytes are preserved.
+Forwarding speakers are distinct from claim subjects. Material-family and
+restatement dependencies are evaluated across Items before watch selection.
+Evidence-only attachments remain available as intermediate dependency nodes,
+while never supplying an independent condition or temporal-boundary witness.
+
+For `current_state`, incomplete qualifiers still cannot join partial facts into
+a trial. Separately, a same-time or later contrary report with potentially
+overlapping scope makes the old positive witness contested. Explicitly different
+people/cases remain independent, and `occurrence` keeps historical success.
 
 `sync_reader_watch(item_id, preference_revision, wait_text, follow)` is the
 reader bridge. It converts free Chinese waiting text through accepted Text

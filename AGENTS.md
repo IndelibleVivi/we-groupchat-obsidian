@@ -169,8 +169,18 @@
   writes. Unknown provider outcomes stay unknown; never manufacture a successful
   replay. `engine.py` shares extraction/resolution/consolidation between full
   rebuild and live work. Whole-capture membership and every unclassified page
-  must be resolved before semantic ACK. `watches.py` maintains exact temporal
+  must be resolved before semantic ACK. Known defer replans through immutable
+  context jobs only when Item/View dependencies change; unchanged polls make
+  no provider call, and unknown outcomes never become replans. Later batches
+  may commit knowledge while processing receipts/applied cursors wait at the
+  unresolved prefix. Candidate refinement examines every possible scope before
+  ruling it out; ambiguity is never top-k absence. `watches.py` maintains exact temporal
   witnesses and Episodes; time proximity or a shared URL alone is not identity.
+  Material withdrawal is proposition- and scope-specific; explicit claim
+  restatement/replay lineage carries it across Items without revoking unrelated
+  facts in a report. Evidence-only claims may bridge that lineage but cannot
+  become independent witnesses. Nullable case qualifiers never join partial facts, while
+  overlapping newer contrary reports must prevent a certain current-state met.
 - `core/semantic/attribution.py` derives captured speaker identity and display
   name for extraction and reading from the same private source payload. Display
   names never establish identity. Speaker, quoted author and claim subject stay
@@ -208,7 +218,9 @@
 - `projections.py`, `controls.py`, `briefing.py`, `delivery.py` and
   `reader_runtime.py` under `core/semantic/` own the Obsidian reading surface.
   BodyPlan has a unique home for each retained detail; accepted pages are
-  durable before publishing. Markdown tables, lists and attributed quotations
+  durable before publishing. New units may rewrite their receiving block's
+  automatic prose while retaining stable homes, evidence, resources and exact
+  verbatim obligations; unaffected blocks retain exact bytes. Markdown tables, lists and attributed quotations
   retain exact evidence links, unit homes and original words. Manual conflicts retain exact bytes and require
   visible resolution. Properties/actions/query use canonical revisions.
   Only the optional `integrations/obsidian/` plugin provides a verified visible
@@ -502,7 +514,8 @@ requirements below apply to both runtimes.
   acquired only to chown the exact target bundle back to the operator when it
   is not writable; signing itself runs unprivileged against the managed
   keychain, and post-sign verification must require the designated
-  requirement to anchor the managed certificate root and reject ad-hoc
+  requirement to anchor the managed self-signed certificate (root or leaf)
+  and reject ad-hoc
   output. Never restore process-name kill, post-mutation default-app
   discovery or implicit re-sign permission.
 - Scanner execution authority is an immutable private build directory plus a

@@ -38,6 +38,7 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 以及每天一版、可以修订的简报。生成正文保留细节和证据；手改冲突会保留原样备份并显式提示。
 捕获时的成员名字用于清楚归属，稳定来源身份、显示名与被谈论的人物分别处理；同名不能推定同人。
 正文按材料选用条件对照表、步骤列表、要点和带归属的原话引用，不要求每篇套用同一格式。
+新细节可以自然融入原来的自动段落；未受影响的段落、必须保留的原话与手写内容继续受保护。
 可选的[本地 Obsidian 插件](integrations/obsidian/README.md)只为确实可见的页面记录打开事件；
 未装插件时使用手动读过／已知动作。仓库提供插件源码，不自动安装或启用。
 
@@ -143,6 +144,8 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
 
 active generation 选择唯一知识链：raw capture 落库后才提交 captured vector，
 整批语义完成后才提交 applied vector；索引、Obsidian 和通知消费持久 outbox／receipt。
+暂时无法判断的内容可以等待，后续资料仍可先形成知识；Item/View 依据改变后再重判。
+applied 进度不越过待定缺口，普通空轮询不重复调用模型。
 全量迁移和增量处理复用同一 engine，source inventory、密钥恢复、长驻进程授权和资源备份保持既有 owner。
 迁移 journal 留在 generation 外，半切换失败仍有独立恢复证据。
 
@@ -362,8 +365,9 @@ macOS 可能在每只长驻 menu-app process 第一次读取 WeChat App Data 时
 
 这一步可能会退出微信，并要求输入 Mac 登录密码。输入密码时终端不显示字符是正常的。
 
-WGO 已验证 macOS 微信 `4.1.11 (269136)` arm64 的 protected binary
-cipher-context key 读取。Protected-key profile 与精确微信 build 绑定，每个
+WGO 源码支持 macOS 微信 `4.1.11 (269136)` 与 `4.1.15 (270102)` arm64 的
+protected binary cipher-context key 读取。维护者已记录的原生 canary 仍仅覆盖
+4.1.11，见[恢复证据](docs/recovery-acceptance.md)。Protected-key profile 与精确微信 build 绑定，每个
 candidate 都必须通过相应 encrypted DB 的 page-one HMAC 验证才会写入私有
 key cache；未识别的后续 build 会 fail closed 并保留已验证 cache。
 

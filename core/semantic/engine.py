@@ -795,16 +795,52 @@ class SemanticEngine:
             scores.update(accepted["scores"])
             receipts.append(job["job_id"])
         ordered = list(dict.fromkeys(sorted(structural) + ranking + sorted(scores, key=lambda identity: (-scores[identity], identity))))
-        selected = set(ordered[:12]) | structural
         possible = {identity for identity, probability in scores.items() if probability >= .2}
+        refined, refinement_receipts = set(), []
+        if len(possible | structural) > 12:
+            # Coarse scope uncertainty is not a permanent top-k veto. Inspect
+            # every possible Item's full/digested context in bounded pages;
+            # never turn an unexamined or uncertain digest into absence.
+            details = (self._candidate_digest(self._context_item(context, identity))
+                       for identity in sorted(possible | structural))
+            for page in self._pages(details, max_bytes=25000, max_count=6):
+                refinement = self.jobs.ensure("candidate_refinement", {"incoming": incoming, "items": page},
+                    {"contract": "semantic-candidate-refinement-v1", "route": asdict(self.decision_provider.route)})
+                def refine(job_id, page=page):
+                    request = DecisionRequest({"incoming": incoming, "existing_items": page}, tuple(
+                        DecisionQuestion("candidate" + str(index), "noul",
+                            "After examining the full supplied identity evidence, could incoming belong to, "
+                            "continue or correct existing_items[" + str(index) + "]? "
+                            "Keep unresolved identity possible. Reject only when the supplied scope rules it out.")
+                        for index in range(len(page))))
+                    response = self.decision_provider.decide(request, request_id=job_id + ":choice",
+                                                             generation_id=self.store.generation_id)
+                    answers = parse_decision_answers({key: {k: v for k, v in asdict(answer).items() if v is not None}
+                                                      for key, answer in response.answers.items()}, request)
+                    return {"scores": {item["item_id"]: answers["candidate" + str(index)].noul
+                                       for index, item in enumerate(page)}, "route": asdict(response.route)}
+                accepted = self._accepted(refinement, refine)
+                self._finish_artifact(refinement, accepted)
+                refinement_receipts.append(refinement["job_id"])
+                for item in page:
+                    refined.add(item["item_id"])
+                    if accepted["scores"][item["item_id"]] < .2 and not item.get("uncertain"):
+                        possible.discard(item["item_id"])
+                        structural.discard(item["item_id"])
+                    else:
+                        possible.add(item["item_id"])
+        eligible = possible | structural | (set(ranking) - (refined - possible))
+        selected = set([identity for identity in ordered if identity in eligible][:12])
         # Low-scoring catalog entries may still enter via hybrid/structure. No
         # unexamined positive candidate is silently converted into CREATE.
-        omitted = possible - selected
+        omitted = (possible | structural) - selected
         selected = {identity for identity in selected if identity in possible or identity in structural or identity in ranking}
-        resolver_items = {identity: self._candidate_digest(self._context_item(context, identity)) for identity in sorted(selected)}
+        resolver_items = {identity: self._candidate_digest(self._context_item(context, identity))
+                          for identity in sorted(selected)}
         read_set = {**context["read_set"], "items": {identity: items[identity]["content_revision"] for identity in selected}}
         return incoming, resolver_items, read_set, {"complete": len(scores) == len(items), "item_count": len(items),
                                                   "accepted_scan_job_ids": receipts,
+                                                  "accepted_refinement_job_ids": refinement_receipts,
                                                   "omitted_possible_ids": sorted(omitted)}
 
     def process_batch(self, batch_id, *, plan_revision=1):
@@ -836,7 +872,8 @@ class SemanticEngine:
             processing = self.store.complete_batch(batch_id)
         except Exception as exc:
             from core.semantic.contracts import SemanticStoreError
-            if not isinstance(exc, SemanticStoreError) or exc.code != "semantic_batch_incomplete":
+            if not isinstance(exc, SemanticStoreError) or exc.code not in {
+                    "semantic_batch_incomplete", "semantic_prior_batch_incomplete"}:
                 raise
             return {"status": "unclassified", **extracted, "pages": pages, "pending_reason": exc.code}
         if len(pages) == 1:
@@ -844,6 +881,34 @@ class SemanticEngine:
         return {"status": "complete", **extracted, "pages": pages, "processing_receipt": processing}
 
     def _resolve_page(self, batch_id, *, extracted, plan_revision=1, page_no=0, complete_batch=True):
+        # Accepted defer is a known decision, not an unknown provider outcome.
+        # Keep its artifact and revisit only after canonical dependencies change.
+        # Existing context jobs are the durable epoch registry; resume jumps to
+        # their latest revision, while committed supersessions remain readable.
+        for _ in range(3):
+            try:
+                result = self._resolve_page_once(batch_id, extracted=extracted,
+                    plan_revision=plan_revision, page_no=page_no, complete_batch=complete_batch)
+            except Exception as exc:
+                from .contracts import SemanticStoreError
+                if not ((isinstance(exc, SemanticStoreError) and exc.code == "semantic_stale_read_set") or
+                        (isinstance(exc, SemanticValidationError) and exc.code == "semantic_snapshot_changed")):
+                    raise
+                result = {"status": "deferred", **extracted, "dependencies_changed": True}
+            if result.get("status") != "deferred" or not result.get("dependencies_changed"):
+                return result
+            conn = self.store.connect()
+            try:
+                row = conn.execute("SELECT max(json_extract(inputs_json,'$.plan_revision')) FROM jobs "
+                    "WHERE kind='proposal_context' AND json_extract(inputs_json,'$.extraction_job_id')=? "
+                    "AND json_extract(inputs_json,'$.page')=? AND json_extract(inputs_json,'$.views')=?",
+                    (extracted["job_id"], page_no, _json(self.view_ids))).fetchone()
+            finally:
+                conn.close()
+            plan_revision = max(plan_revision + 1, row[0] or 1)
+        return result
+
+    def _resolve_page_once(self, batch_id, *, extracted, plan_revision=1, page_no=0, complete_batch=True):
         observations = extracted["observations"]
         if not observations:
             try:
@@ -885,6 +950,9 @@ class SemanticEngine:
             resolver = self._accepted(resolver_job, lambda _job_id: expected)
         self._finish_artifact(resolver_job, resolver)
         incoming, items, read_set, catalog = (resolver[key] for key in ("incoming", "items", "read_set", "catalog"))
+        if catalog.get("accepted_refinement_job_ids") and catalog["omitted_possible_ids"]:
+            return {"status": "deferred", **extracted, "pending_reason": "semantic_candidate_ambiguity",
+                    "dependencies_changed": self._context_changed(context)}
         views = context["views"]
         observation_ids = [value["observation_id"] for value in observations]
         # Include all members of potential split inputs. Store performs the exact
@@ -976,7 +1044,8 @@ class SemanticEngine:
 
         decision = self._accepted(decision_job, decide)
         if decision["choice"] != "apply":
-            return {"status": "deferred", **extracted, "proposal_job_id": job["job_id"], "decision_job_id": decision_job["job_id"]}
+            return {"status": "deferred", **extracted, "proposal_job_id": job["job_id"],
+                    "decision_job_id": decision_job["job_id"], "dependencies_changed": self._context_changed(context)}
         receipt = self.store.apply_proposal(job["job_id"], proposal_artifact["proposal"]["actions"],
                                             read_set=proposal_artifact["read_set"], decision=decision)
         episodes = self._sync_episodes(receipt)
@@ -985,6 +1054,10 @@ class SemanticEngine:
         if complete_batch:
             result["processing_receipt"] = self.store.complete_batch(batch_id)
         return result
+
+    def _context_changed(self, context):
+        return (context["read_set"]["store_revision"] != self.store.read_revision() and
+                (context["items"] != self._identity_catalog() or context["views"] != self._all_views()))
 
     def reconcile_views(self, run_id):
         """Induce and consolidate navigation from all current Items in pages.

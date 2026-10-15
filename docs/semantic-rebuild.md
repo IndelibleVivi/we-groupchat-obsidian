@@ -219,6 +219,10 @@ Legacy inventory 的身份校验也按 canonical JSON chunks 计算，保持既�
 parallel wave 准备只读取轻量 batch metadata（`batch_id` 与 capture order），再
 逐 batch 读取 core members 计算 overlap-owner wave，不预先解出全部 capture
 receipt 或保留全部 member 副本；它仍不持有 DB 事务或 projection lock。
+某批 accepted decision 为 `defer` 时，coordinator 先处理后续批，再按原顺序回访
+待定批。Item/View 依赖发生变化才生成新规划 revision；整轮无进展仍返回
+`rebuild_semantic_pending`。原 accepted artifacts、unknown outcome 与连续
+processing receipt 约束保持不变，不能用这种重判冒充已完成或跳过输入。
 本地 cosine 的向量保存在私有临时 SQLite 磁盘缓存；索引准备只保留 metadata，
 发布／未索引尾部检索分批读取至多 100 个向量，查询只保留 top-k。
 Canonical embedding 与确认 receipt 仍是恢复依据；普通关闭清理临时缓存，

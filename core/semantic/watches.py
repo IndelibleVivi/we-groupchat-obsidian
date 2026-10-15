@@ -37,6 +37,8 @@ class Claim:
     material_id: str | None = None
     status: str = "active"
     retracts: tuple[str, ...] = ()
+    restates: tuple[str, ...] = ()
+    evidence_only: bool = False
 
     def __post_init__(self):
         _text(self.claim_id)
@@ -140,6 +142,53 @@ def _same_scalar(left, right):
     return type(left) is type(right) and left == right
 
 
+def _effective_claims(claims, revoked):
+    """Filter withdrawn propositions without rewriting canonical claim bytes."""
+    by_id = {claim.claim_id: claim for claim in claims}
+    values = {c.claim_id: {(name, _json(value)) for name, value in c.predicates.items()} for c in claims}
+    families, peers, family_keys = defaultdict(set), defaultdict(set), {}
+    for claim in claims:
+        # A shared report can contain different people, cases and propositions.
+        # Equal missing qualifiers are usable only under this proven material
+        # identity, never as a general case join.
+        if claim.material_id:
+            key = (claim.material_id, *(getattr(claim, field) for field in QUALIFIERS))
+            families[key].add(claim.claim_id)
+            family_keys[claim.claim_id] = key
+        for target in claim.restates:
+            if target in by_id:
+                peers[claim.claim_id].add(target)
+                peers[target].add(claim.claim_id)
+    withdrawn = defaultdict(set)
+    pending = [(identity, values[identity]) for identity in revoked]
+    while pending:
+        identity, predicates = pending.pop()
+        delta = (predicates & values[identity]) - withdrawn[identity]
+        if not delta:
+            continue
+        withdrawn[identity].update(delta)
+        neighbors = peers[identity] | families.get(family_keys.get(identity), set())
+        pending.extend((peer, delta) for peer in neighbors if peer != identity)
+    effective = []
+    for claim in claims:
+        retained = {name: value for name, value in claim.predicates.items()
+                    if (name, _json(value)) not in withdrawn[claim.claim_id]}
+        if not retained:
+            revoked.add(claim.claim_id)
+        effective.append(replace(claim, predicates=retained) if retained else claim)
+    return effective, revoked
+
+
+def _overlapping_current_report(watch, older, newer):
+    return (newer.observed_at >= older.observed_at
+            and all(getattr(older, field) is None or getattr(newer, field) is None
+                    or getattr(older, field) == getattr(newer, field) for field in QUALIFIERS)
+            and any(name in older.predicates and name in newer.predicates
+                    and _same_scalar(older.predicates[name], expected)
+                    and not _same_scalar(newer.predicates[name], expected)
+                    for name, expected in watch.predicates.items()))
+
+
 def _witness(watch, claims, state, boundary=None, reason="condition"):
     claim_ids = tuple(sorted(claim.claim_id for claim in claims))
     if any(claim.status == "contested" for claim in claims):
@@ -187,8 +236,13 @@ def evaluate_watch(watch: WatchSpec, claims: Sequence[Claim], *, coverage_comple
     dependencies = {claim.claim_id: set(claim.retracts) & set(by_id) for claim in claims if claim.status == "active"}
     for targets in dependencies.values():
         revoked.update(targets)
-    revoked_materials = {by_id[identity].material_id for identity in revoked if by_id[identity].material_id}
-    revoked.update(claim.claim_id for claim in claims if claim.material_id in revoked_materials)
+    claims, revoked = _effective_claims(claims, revoked)
+    by_id = {claim.claim_id: claim for claim in claims}
+    # Evidence-only attachments can bridge a proven withdrawal lineage, but
+    # cannot establish (or challenge) an independent condition witness.
+    claims = [claim for claim in claims if not claim.evidence_only]
+    relevant_revoked = any(not by_id[identity].evidence_only and _qualifies(watch, by_id[identity])
+                          and set(watch.predicates) & set(by_id[identity].predicates) for identity in revoked)
     uncertain_case = False
     for claim in claims:
         if (claim.claim_id in revoked or claim.status not in {"active", "contested"}
@@ -274,6 +328,28 @@ def evaluate_watch(watch: WatchSpec, claims: Sequence[Claim], *, coverage_comple
             witnesses.extend(_witness(watch, [claim], "unmet", boundary)
                              for claim in {claim.claim_id: claim for claim in negatives}.values())
 
+    if watch.kind == "current_state":
+        # Keep the strict case key above for joining partial facts. Separately,
+        # an incomplete scope can overlap a newer contrary report: isolation
+        # must not let an old positive certify present truth. This only lowers
+        # certainty; it never combines NULL scopes into a successful trial.
+        possible_reports = [c for c in claims if c.claim_id not in revoked
+                            and c.status in {"active", "contested"}
+                            and (not watch.item_ids or c.item_id in watch.item_ids)
+                            and all(getattr(c, field) is None or getattr(c, field) == value
+                                    for field, value in watch.qualifiers.items())]
+        checked = []
+        for witness in witnesses:
+            challenged = witness.state == "met" and any(
+                newer.claim_id != witness.boundary_claim_id
+                and any(_overlapping_current_report(watch, by_id[old_id], newer)
+                        for old_id in witness.claim_ids)
+                for newer in possible_reports)
+            checked.append(_witness(watch, [by_id[cid] for cid in witness.claim_ids], "contested",
+                                    by_id.get(witness.boundary_claim_id), "overlapping_current_scope")
+                           if challenged else witness)
+        witnesses = checked
+
     # Forwarded copies share a witness family and cannot masquerade as
     # independent support. Retain every source and claim in its one witness.
     witnesses = _coalesce_witnesses(witnesses)
@@ -284,7 +360,7 @@ def evaluate_watch(watch: WatchSpec, claims: Sequence[Claim], *, coverage_comple
     elif negative:
         state = "unmet" if coverage_complete and not missing_boundary and not uncertain_case else "unknown"
     else:
-        state = "unmet" if coverage_complete and not revoked and not watch.after and not uncertain_case else "unknown"
+        state = "unmet" if coverage_complete and not relevant_revoked and not watch.after and not uncertain_case else "unknown"
     change = None
     if previous_state == "met" and state != "met":
         change = "reopened"
@@ -613,19 +689,27 @@ class WatchService:
         watch = self._spec(before["spec"])
         revision = self.store.read_revision()
         claims = []
+        restatements = defaultdict(list)
+        connection = self.store.connect()
+        try:
+            for row in connection.execute("SELECT from_claim_id,to_claim_id FROM claim_relations "
+                                          "WHERE relation IN ('restates','replay_same_source')"):
+                restatements[row[0]].append(row[1])
+        finally:
+            connection.close()
         for row in self.store.list_claims():
             item_ids = row.get("item_ids") or ([row["item_id"]] if row.get("item_id") else [])
+            evidence_only = False
             if "item_roles" in row:
                 item_ids = [identity for identity in item_ids if row["item_roles"].get(identity) == "supports"]
-                if not item_ids and row["item_roles"]:
-                    continue
-            if watch.item_ids and not set(watch.item_ids) & set(item_ids):
-                continue
+                evidence_only = bool(not item_ids and row["item_roles"])
             item_id = next((identity for identity in item_ids if identity in watch.item_ids), None) or (item_ids[0] if item_ids else "unresolved")
             claims.append(Claim(
                 row["claim_id"], item_id, row["predicates"], row["observed_at"], tuple(row["source_ids"]),
                 **{key: row.get(key) for key in QUALIFIERS}, material_id=row.get("material_id"),
                 status=row.get("status", "active"), retracts=tuple(row.get("retracts", ())),
+                restates=tuple(restatements[row["claim_id"]]),
+                evidence_only=evidence_only,
             ))
         coverage = self.store.coverage()
         complete = (coverage.get("source_complete") is True and coverage.get("unread_sources") == 0
@@ -708,7 +792,15 @@ class WatchService:
             pending = list(claim_ids)
             while pending:
                 identity = pending.pop()
-                for row in db.execute("SELECT to_claim_id FROM claim_relations WHERE from_claim_id=?", (identity,)):
+                # Re-evaluate all source-family watches; evaluation below still
+                # revokes only matching propositions. Restatements also reach
+                # copies in another Item/chat whose scoped case IDs differ.
+                rows = db.execute("SELECT to_claim_id FROM claim_relations WHERE from_claim_id=? "
+                    "UNION SELECT from_claim_id FROM claim_relations WHERE to_claim_id=? "
+                    "AND relation IN ('restates','replay_same_source') "
+                    "UNION SELECT claim_id FROM claims WHERE material_id="
+                    "(SELECT material_id FROM claims WHERE claim_id=?)", (identity, identity, identity))
+                for row in rows:
                     if row[0] not in affected:
                         affected.add(row[0])
                         pending.append(row[0])

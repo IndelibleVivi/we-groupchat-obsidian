@@ -274,7 +274,10 @@ class SemanticProcessRetryTests(unittest.TestCase):
              patch.object(self.engine, "process_batch", wraps=self.engine.process_batch) as process:
             receipt = self.runtime.process("batch")
         self.assertEqual(receipt["batch_id"], "batch")
-        self.assertEqual(process.call_args_list, [call("batch", plan_revision=1), call("batch", plan_revision=2)])
+        # Shared engine now owns context epochs for live and rebuild callers.
+        # The durable assertions below still require two distinct contexts and
+        # exactly one extraction, rather than a second runtime wrapper call.
+        process.assert_called_once_with("batch", plan_revision=1)
         with closing(self.store.connect()) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM extraction_receipts").fetchone()[0], 1)
             kinds = dict(conn.execute("SELECT kind,COUNT(*) FROM jobs GROUP BY kind"))

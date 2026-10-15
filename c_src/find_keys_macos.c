@@ -3,7 +3,7 @@
  *
  * Scans WeChat process memory for SQLCipher encryption keys in both the
  * legacy x'<key_hex><salt_hex>' / x'<key_hex>' forms and the protected
- * binary cipher context used by WeChat 4.1.11.
+ * binary cipher contexts used by the exact profiled WeChat builds.
  *
  * Prerequisites:
  *   - WeChat must be ad-hoc signed (or SIP disabled)

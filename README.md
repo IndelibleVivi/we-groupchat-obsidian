@@ -47,7 +47,9 @@ preserve detail and evidence; manual edits produce a visible conflict with exact
 backup bytes. Captured member names remain available for attribution, with stable
 source identities kept separate from display names and people being discussed.
 Bodies can use comparison tables, ordered steps, lists and attributed quotations
-where the material calls for them. The optional [local Obsidian plugin](integrations/obsidian/README.md)
+where the material calls for them. New details can update the original generated
+paragraph naturally; unaffected paragraphs, required original wording and manual
+edits retain their existing protections. The optional [local Obsidian plugin](integrations/obsidian/README.md)
 records only a verified visible open. Without it, use explicit read/known actions.
 The plugin is source-only and is not installed or enabled automatically.
 
@@ -175,6 +177,9 @@ a completed migration and activation are required before using it.
 
 The active generation selects one canonical pipeline. Raw capture commits before
 its captured cursor; accepted semantic work commits before its applied cursor.
+Known deferred input can wait while later knowledge is processed. It replans
+when Item/View evidence changes; applied progress still waits at the unresolved
+gap, and unchanged polling does not spend another model call.
 Indexes, Obsidian files and notifications follow durable outboxes and receipts.
 The same engine serves migration and live increments. Source inventory, key
 recovery, process-lifetime access and selected-resource backup keep their existing
@@ -449,8 +454,10 @@ of relying on LaunchServices discovery:
 ./启动.command --allow-wechat-resign --wechat-app=/Applications/WeChat.app
 ```
 
-WGO has verified protected binary cipher-context key recovery for macOS WeChat
-`4.1.11 (269136)` on arm64. Protected-key profiles are bound to an exact WeChat
+WGO source admits protected binary cipher-context key recovery for macOS WeChat
+`4.1.11 (269136)` and `4.1.15 (270102)` on arm64. The dated maintainer native
+canary remains limited to 4.1.11; see [recovery evidence](docs/recovery-acceptance.md).
+Protected-key profiles are bound to an exact WeChat
 build, and every candidate must pass page-one HMAC verification against its
 encrypted database before entering the private key cache. An unknown future
 build fails closed and preserves the previously verified cache.

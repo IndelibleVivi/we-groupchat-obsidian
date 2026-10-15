@@ -151,7 +151,7 @@ class ProjectionTests(ReadingHarness):
         self.assertIsNone(self.publisher.resolve(snapshot.item_id))
         root = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='large-body'")
         self.assertEqual(root["status"], "accepted")
-        self.assertEqual(root["prompt_version"], "body-paged-v4")
+        self.assertEqual(root["prompt_version"], "body-paged-v5")
         count = len(provider.calls)
         resumed = writer.plan(snapshot, request_id="large-body")
         self.assertEqual(resumed, plan)
@@ -532,6 +532,92 @@ class ProjectionTests(ReadingHarness):
         result = BodyPlanWriter(provider, "generation-one").plan(new, previous=old, request_id="extend")
         self.assertEqual(len(result.blocks), 1)
         self.assertEqual(result.blocks[0].id, old.blocks[0].id)
+
+    def test_new_detail_rewrites_automatic_prose_in_place_small_and_paged(self):
+        for budget in (80000, 9000):
+            with self.subTest(budget=budget):
+                filler = tuple(ReadingUnit("context-" + str(i), "独立的日常记录。" * 30, ("context-e-" + str(i),))
+                               for i in range(30)) if budget == 9000 else ()
+                units = filler + (ReadingUnit("plan", "P卡提供eSIM。", ("plan-e",)),)
+                first = replace(self.snapshot(item_id="plan-" + str(budget), title="P卡 eSIM 激活"), units=units,
+                    evidence=tuple(EvidenceExcerpt(u.evidence_ids[0], u.text) for u in units))
+                previous = self.plan(first)
+                original = self.publisher.publish_item(first, previous)
+                extra = ReadingUnit("activation", "支持在线激活。", ("activation-e",))
+                updated = replace(first, content_revision=2, units=units + (extra,),
+                    evidence=first.evidence + (EvidenceExcerpt("activation-e", extra.text),))
+                self.revisions[first.item_id] = 2
+                def compose(prompt):
+                    data = json.loads(prompt)
+                    indices = {u["id"]: i for i, u in enumerate(data["snapshot"]["units"])}
+                    return {"blocks": [{"id": b["id"], "role": b["role"],
+                        "text": "P卡提供支持在线激活的eSIM。" if "plan" in b["unit_ids"] else b["text"],
+                        "unit_indices": [indices[u] for u in b["unit_ids"]] +
+                                        ([indices["activation"]] if "plan" in b["unit_ids"] else [])}
+                        for b in data["previous"]["blocks"]]}
+                provider = ScriptedTextProvider(compose)
+                writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=budget)
+                plan = writer.plan(updated, previous=previous, request_id="rewrite-" + str(budget))
+                self.assertEqual(plan.blocks[-1].text, "P卡提供支持在线激活的eSIM。")
+                self.assertEqual(plan.blocks[-1].id, previous.blocks[-1].id)
+                self.assertEqual(plan.blocks[:-1], previous.blocks[:-1])
+                self.assertEqual(set(plan.blocks[-1].evidence_ids), {"plan-e", "activation-e"})
+                result = self.publisher.publish_item(updated, plan)
+                self.assertEqual(result.path, original.path)
+                before = self.publisher.read(result.path)
+                self.assertIn("P卡提供支持在线激活的eSIM。", before.decode())
+                self.assertNotIn("P卡提供eSIM。", before.decode())
+                repeated = writer.plan(updated, previous=plan, request_id="unchanged-" + str(budget))
+                self.assertEqual(self.publisher.publish_item(updated, repeated).status, "unchanged")
+                self.assertEqual(self.publisher.read(result.path), before)
+                self.assertEqual(len(provider.calls), 1)
+
+    def test_body_upgrade_cannot_repartition_an_unknown_page_or_fragment(self):
+        # Old versions wrote children before the completed paged aggregate.
+        # A longer prompt or smaller budget can now choose different child IDs.
+        from core.semantic.projections import accepted_text_artifact
+        snapshot = self.snapshot()
+        for suffix in (":page:0", ":group:0:fragment:0", ""):
+            with self.subTest(suffix=suffix):
+                root = "body_%_" + str(len(suffix))
+                old = ScriptedTextProvider(RuntimeError("old request outcome unknown"))
+                with self.assertRaisesRegex(RuntimeError, "old request outcome unknown"):
+                    accepted_text_artifact(self.ledger, old, prompt="old prompt " + suffix,
+                        request_id=root + suffix, prompt_version="body-plan-v4", validate=lambda raw: raw)
+                provider = ScriptedTextProvider(self.paged_response)
+                writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
+                with self.assertRaisesRegex(ReadingError, "text_provider_outcome_unknown"):
+                    writer.plan(snapshot, request_id=root)
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(self.ledger.one(
+                    "SELECT status FROM reader_text_artifacts WHERE request_id=?", (root + suffix,))[0], "unknown")
+        # The identity check is literal and scoped; unrelated requests can work.
+        fresh = ScriptedTextProvider(self.paged_response)
+        BodyPlanWriter(fresh, self.ledger.generation_id, self.ledger).plan(snapshot, request_id="independent-body")
+        self.assertEqual(len(fresh.calls), 1)
+
+    def test_increment_rewrite_keeps_exact_quotes_and_manual_conflict_bytes(self):
+        first = self.snapshot()
+        previous = self.plan(first)
+        published = self.publisher.publish_item(first, previous)
+        extra = ReadingUnit("new", "周六一起吃面。", ("e2",))
+        updated = replace(first, content_revision=2, units=first.units + (extra,),
+                          evidence=first.evidence + (EvidenceExcerpt("e2", extra.text),))
+        self.revisions[first.item_id] = 2
+        changed = replace(previous.blocks[0], text="她把箱子让给了狗，周六一起吃面。",
+                          unit_ids=("story", "new"), evidence_ids=("e1", "e2"))
+        with self.assertRaisesRegex(ReadingError, "body_plan_lost_evidence"):
+            BodyPlanWriter(ScriptedTextProvider(BodyPlan(first.item_id, 2, (changed,)).to_json()),
+                           self.ledger.generation_id).plan(updated, previous=previous, request_id="tampered-quote")
+        valid = replace(changed, text=first.units[0].text + "周六一起吃面。")
+        plan = BodyPlanWriter(ScriptedTextProvider(BodyPlan(first.item_id, 2, (valid,)).to_json()),
+                              self.ledger.generation_id).plan(updated, previous=previous, request_id="exact-quote")
+        target = self.publisher.root / published.path
+        manual = target.read_bytes().replace(first.units[0].text.encode(), "用户手写正文，保留原样。".encode())
+        target.write_bytes(manual)
+        conflict = self.publisher.publish_item(updated, plan)
+        self.assertEqual(conflict.status, "conflict")
+        self.assertEqual(target.read_bytes(), manual)
 
     def test_source_projection_retains_historical_anchor_and_quotes_control_syntax(self):
         snapshot = self.snapshot()

@@ -49,9 +49,13 @@ Optional exact evidence markers add supplied supporting excerpts; unknown refs
 still fail. Model-authored metadata cannot replace these bindings. Existing
 injected full-BodyPlan callers and durable canonical artifacts remain readable,
 and an explicitly wrong full envelope still fails rather than being repaired.
-Every unit has exactly one paragraph home;
-unchanged units retain their previous paragraph bytes. A new immutable unit may
-extend its existing paragraph while preserving the old text, block ID and home.
+Every unit has exactly one paragraph home. A block receiving no new or changed
+units retains its previous bytes. A new immutable unit may be integrated into
+an existing block by rewriting its automatic prose, while preserving the block
+ID, all retained unit homes, evidence and resources. Required verbatim fragments
+and exact grounded quotations remain protected; an unrelated block cannot be
+rewritten just because another block gained detail. This rule also applies to
+bounded pages; oversized lossless continuation retains its exact-text contract.
 Required quotations, steps and counterevidence are bound with unit `verbatim`
 fragments. Retracted/contested claims become structured unit `status` and `reason`
 inputs; their blocks must acknowledge that status and cannot remain current
@@ -114,11 +118,14 @@ reused for a different input or route; a running/unknown result cannot be
 resubmitted under a new ID. A known validation failure can be retried explicitly
 with a fresh request. Calling the pure `plan` helper without a ledger is intended
 for isolated rendering tests, not runtime publication.
-Current Body artifact versions are `body-plan-v4` and `body-paged-v4`; these bind
-the composition response and program-owned metadata rather than reusing earlier
-prompts. The paged aggregate key carries the same version, so a revised prompt
+Current Body artifact versions are `body-plan-v5` and `body-paged-v5`; these bind
+the incremental prose-writing contract and program-owned metadata rather than
+reusing earlier prompts. The paged aggregate key carries the same version, so a revised prompt
 never resumes a paged plan produced by an earlier one.
-The independent rebuild verifier also recognizes retained accepted v2/v3 Body
+Before dispatch, the writer also checks unresolved page/fragment descendants of
+the stable request ID across Body versions. A new prompt or context budget
+cannot bypass an earlier unknown outcome by choosing a different partition.
+The independent rebuild verifier also recognizes retained accepted v2/v3/v4 Body
 artifacts, whose attribution and evidence contracts remain valid; this prompt
 revision does not authorize rewriting accepted historical output.
 

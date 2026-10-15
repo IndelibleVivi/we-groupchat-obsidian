@@ -165,6 +165,40 @@ class RebuildCoordinatorTests(unittest.TestCase):
                                state_store=MonitorStateStore(self.state_path), semantic_runtime=runtime)
         self.assertEqual(monitor._check_once()["status"], "semantic_applied")
 
+    def test_process_all_defers_one_batch_without_blocking_later_context(self):
+        from ai.vector_index import LocalCosineIndex
+        from core.semantic.runtime import SemanticRuntime, ProviderRoles
+        from core.semantic.store import SemanticStore
+        from tests.test_semantic_engine import FakeText, FakeDecision, capture
+        from tests.test_semantic_retrieval import FakeEmbedding
+        class ContextDecision(FakeDecision):
+            def decide(self, request, **kwargs):
+                state = request.state.get("state", {})
+                known = {unit["text"] for item in state.get("items", {}).values() for unit in item.get("units", ())}
+                self.defer = any((o["title"] == "first" and "middle" not in known) or
+                                 (o["title"] == "middle" and "seed" not in known)
+                                 for o in state.get("observations", ()))
+                return super().decide(request, **kwargs)
+        store = SemanticStore(self.root / "defer-generation.sqlite", "defer-generation")
+        capture(store, "first", ["first"])
+        capture(store, "middle", ["middle"])
+        capture(store, "later", ["seed"])
+        text, decision = FakeText(), ContextDecision()
+        runtime = SemanticRuntime(store, ProviderRoles(text, decision, FakeEmbedding(), LocalCosineIndex()),
+                                  self.root / "defer-vault/WGO")
+        with patch.object(runtime, "publish_all", return_value={"complete": True}):
+            self.coordinator._process_all(runtime, run_id="synthetic-defer")
+        self.assertEqual(len(store.list_items()), 1)
+        with closing(store.connect()) as conn:
+            receipts = [json.loads(row[0]) for row in conn.execute("SELECT receipt_json FROM processing_receipts")]
+        self.assertEqual(len(receipts), 3)
+        for receipt in receipts:
+            store.verify_processing_receipt(receipt)
+        counts = len(text.calls), len(decision.calls)
+        with patch.object(runtime, "publish_all", return_value={"complete": True}):
+            self.coordinator._process_all(runtime, run_id="synthetic-defer")
+        self.assertEqual((len(text.calls), len(decision.calls)), counts)
+
     def test_plan_is_source_free_and_grants_precede_config(self):
         self.config_store.update(lambda value: value.update(semantic_provider_limits={
             "text": {"max_inflight": 2, "requests_per_minute": 30}}))

@@ -198,7 +198,10 @@ expected_revision=None)`. Ordinary relatedness does not imply withdrawal:
   families, without creating independent evidence or refreshing semantic time.
 - `related`, replay/restatement, support, scope, time and unresolved relations
   keep their explicit meanings; only the withdrawal/dispute variants above
-  change target status. Corrections invalidate the target's material witnesses.
+  change target status. Watch evaluation propagates a correction to matching
+  typed propositions in the same material and exact scope, or to explicit
+  restatement/replay descendants; unrelated claims in the material remain valid.
+  These derived witness changes do not rewrite other canonical claim rows.
 
 All Item memberships of affected claims and their directed dependencies are
 enumerated without a ranked-search cutoff. Content revisions, snapshots,

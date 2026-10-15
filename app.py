@@ -2110,6 +2110,10 @@ class WeGroupchatObsidianApp(rumps.App):
 
     def _handle_monitor_result(self, result, manual=False, dry_run=False):
         status = result.get("status")
+        if status == "semantic_processing_pending":
+            if manual:
+                _notify("WGO", "等待更多依据", result.get("message", "资料已保存，等待判断"))
+            return True
         if status in {"semantic_applied", "semantic_dry_run"}:
             if manual:
                 _notify("WGO", "语义检查完成", result.get("message", "进度已确认"))

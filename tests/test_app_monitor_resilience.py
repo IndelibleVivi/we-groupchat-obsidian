@@ -212,6 +212,12 @@ class AppMonitorResilienceTests(unittest.TestCase):
         with patch("app._notify"):
             self.assertIs(app._handle_monitor_result({"status": "monitor_pending_policy_changed"}), False)
             self.assertIsNone(app._handle_monitor_result({"status": "monitor_worker_busy"}))
+        with patch.object(app, "_handle_monitor_error", side_effect=AssertionError("known defer is not an app error")), \
+             patch("app._notify") as notify:
+            self.assertIs(app._handle_monitor_result({"status": "semantic_processing_pending"}), True)
+            notify.assert_not_called()
+            self.assertIs(app._handle_monitor_result({"status": "semantic_processing_pending"}, manual=True), True)
+            self.assertEqual(notify.call_args.args[1], "等待更多依据")
 
     def test_canonical_write_refreshes_all_existing_source_day_digests(self):
         app = WeGroupchatObsidianApp.__new__(WeGroupchatObsidianApp)

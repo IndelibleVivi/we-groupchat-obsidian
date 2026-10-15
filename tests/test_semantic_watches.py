@@ -102,6 +102,55 @@ class WatchTests(unittest.TestCase):
         simultaneous = replace(old, observed_at=11)
         self.assertEqual(evaluate_watch(current, [simultaneous, new], coverage_complete=True).state, "contested")
 
+    def test_partial_material_correction_preserves_other_propositions_and_scopes(self):
+        activation = claim("activation", {"activated": True}, material_id="report")
+        sms = claim("sms", {"sms": True}, material_id="report")
+        forward = claim("forward", {"sms": True}, material_id="report", time=20)
+        combined = claim("combined", {"activated": True, "sms": True}, material_id="report")
+        other_case = claim("other", {"sms": True}, person="bob", case="case-b", material_id="report")
+        correction = claim("correction", {"correction": True}, retracts=("sms",))
+        rows = [activation, sms, forward, combined, other_case, correction]
+        active = evaluate_watch(WatchSpec("a", "occurrence", {"activated": True}), rows,
+                                previous_state="met", coverage_complete=True)
+        self.assertEqual(active.state, "met")
+        self.assertEqual(set(active.revoked_claim_ids), {"sms", "forward"})
+        own = evaluate_watch(WatchSpec("s", "occurrence", {"sms": True}, {"subject_id": "alice"}), rows)
+        self.assertNotEqual(own.state, "met")
+        other = evaluate_watch(WatchSpec("o", "occurrence", {"sms": True}, {"subject_id": "bob"}), rows)
+        self.assertEqual(other.state, "met")
+        # Evaluation never changes canonical claim payloads.
+        self.assertEqual(combined.predicates, {"activated": True, "sms": True})
+
+    def test_material_retraction_matches_typed_value_and_exact_scope(self):
+        target = claim("target", {"success": True}, material_id="report")
+        different = claim("different", {"success": 1}, material_id="report")
+        unknown = claim("unknown", {"success": True}, phase=None, material_id="report")
+        correction = claim("correction", {"correction": True}, retracts=("target",))
+        result = evaluate_watch(WatchSpec("w", "follow"), [target, different, unknown, correction])
+        self.assertEqual(result.revoked_claim_ids, ("target",))
+        unrelated = WatchSpec("outside", "occurrence", {"success": True}, item_ids=("other-item",))
+        self.assertEqual(evaluate_watch(unrelated, [target, correction], coverage_complete=True).state, "unmet")
+
+    def test_current_state_missing_scope_retains_uncertainty_without_joining(self):
+        current = WatchSpec("w", "current_state", {"success": True})
+        old = claim("old", {"success": True}, phase=None, time=10)
+        new = claim("new", {"success": False}, phase=None, time=20)
+        for rows in ([old, new], [replace(old, phase="test"), new],
+                     [replace(old, subject_id=None, case_id=None), replace(new, subject_id=None, case_id=None)]):
+            result = evaluate_watch(current, rows, previous_state="met", coverage_complete=True)
+            self.assertEqual(result.state, "contested")
+            self.assertEqual(result.change, "reopened")
+        self.assertEqual(evaluate_watch(replace(current, kind="occurrence"), [old, new]).state, "met")
+        self.assertEqual(evaluate_watch(current, [old, replace(new, subject_id="bob")]).state, "met")
+        self.assertEqual(evaluate_watch(current, [old, replace(new, case_id="other")]).state, "met")
+        self.assertEqual(evaluate_watch(current, [old, replace(new, observed_at=5)]).state, "met")
+        named = replace(current, qualifiers={"phase": "tested"})
+        self.assertEqual(evaluate_watch(named, [replace(old, phase="tested"), new]).state, "contested")
+        self.assertEqual(evaluate_watch(named, [replace(old, phase="tested"), replace(new, phase="other")]).state, "met")
+        multi = WatchSpec("m", "current_state", {"a": True, "b": True})
+        self.assertEqual(evaluate_watch(multi, [claim("a", {"a": True}, phase=None),
+                                               claim("b", {"b": True}, phase=None)]).state, "unknown")
+
     def test_review_after_does_not_expire_and_follow_has_no_deadline(self):
         current = claim("a", {"success": True})
         watch = WatchSpec("w", "occurrence", {"success": True}, review_after=1)
@@ -139,7 +188,8 @@ class WatchTests(unittest.TestCase):
         watch = WatchSpec("w", "occurrence", {"success": True})
         first = claim("original", {"success": True}, material_id="material-a")
         initial = evaluate_watch(watch, [first])
-        forward = claim("forward", {"success": True}, person="bob", case="case-b", material_id="material-a")
+        forward = claim("forward", {"success": True}, material_id="material-a")
+        # The second source is a forward; its speaker is not the claim subject.
         forwarded = evaluate_watch(watch, [first, forward], previous_state="met",
                                    previous_witness_ids=[w.witness_id for w in initial.witnesses])
         self.assertEqual(len(forwarded.witnesses), 1)
@@ -187,6 +237,59 @@ class WatchIntegrationTests(unittest.TestCase):
         self.assertEqual(self.service.changes("watch")[-1]["kind"], "reopened")
         history = self.service.witness_history("watch")
         self.assertTrue(any(not value["active"] and value["state"] == "met" for value in history))
+
+    def test_partial_correction_reaches_cross_chat_restatement_without_revoking_other_fact(self):
+        class MaterialText(FakeText):
+            def generate(self, prompt, **kwargs):
+                result = super().generate(prompt, **kwargs)
+                if not prompt.startswith("The following captured"):
+                    return result
+                value = json.loads(result.text)
+                for observation in value["observations"]:
+                    base = observation["claims"][0]
+                    predicates = ([{"activated": True}, {"sms": True}]
+                                  if observation["title"] == "report" else
+                                  [{"sms": True}] if observation["title"] == "forward" else
+                                  [{"correction": True}])
+                    observation["claims"] = [{**base, "predicates": p} for p in predicates]
+                return replace(result, text=json.dumps(value))
+        engine = SemanticEngine(self.store, MaterialText(claims=True), FakeDecision(possible=0))
+        payload = {"material_id": "report", "subject_anchor": "alice", "case_anchor": "case"}
+        capture(self.store, "report", ["report"], payloads=[payload])
+        engine.process_batch("report")
+        first = self.store.list_claims()
+        activation = next(c for c in first if "activated" in c["predicates"])
+        sms = next(c for c in first if "sms" in c["predicates"])
+        self.store.capture_batch("forward", [{"source_id": "forward", "logical_shard_id": "synthetic-shard",
+            "physical_generation": "synthetic-generation", "source_cursor_token": "1", "source_sent_at": 20,
+            "text": "forward", "payload": payload}], source_namespace="synthetic", chat_id="group-b",
+            inventory_digest="synthetic-inventory", inventory_revision=1, input_cursors={},
+            output_cursors={"synthetic-shard": "1"}, source_eof=True)
+        engine.process_batch("forward")
+        forward = next(c for c in self.store.list_claims() if c["claim_id"] not in {c["claim_id"] for c in first})
+        self.assertNotEqual(sms["case_id"], forward["case_id"])
+        self.store.record_claim_relation(forward["claim_id"], sms["claim_id"], "restates",
+                                         reason="explicit same proposition across chats")
+        self.service.create_watch(WatchSpec("activation", "occurrence", {"activated": True},
+                                            item_ids=tuple(activation["item_ids"])))
+        self.service.create_watch(WatchSpec("forward", "occurrence", {"sms": True},
+                                            item_ids=tuple(forward["item_ids"])))
+        self.assertEqual(self.service.evaluate("activation").state, "met")
+        self.assertEqual(self.service.evaluate("forward").state, "met")
+        capture(self.store, "correction", ["correction"])
+        engine.process_batch("correction")
+        correction = next(c for c in self.store.list_claims() if "correction" in c["predicates"])
+        self.service.record_claim_relation(correction["claim_id"], sms["claim_id"], "corrects_or_retracts",
+            reason="only SMS is withdrawn", evidence_ids=correction["span_ids"],
+            expected_revision=self.store.read_revision())
+        self.assertEqual(self.service.get_watch("activation")["state"], "met")
+        self.assertNotEqual(self.service.get_watch("forward")["state"], "met")
+        rows = {c["claim_id"]: c for c in self.store.list_claims()}
+        self.assertEqual(rows[activation["claim_id"]]["status"], "active")
+        self.assertEqual(rows[forward["claim_id"]]["status"], "active")
+        self.assertEqual(rows[sms["claim_id"]]["status"], "retracted")
+        self.assertTrue(any(not w["active"] and w["state"] == "met"
+                            for w in self.service.witness_history("forward")))
 
     def test_late_attachment_reopens_persistent_episode(self):
         receipt = capture(self.store, "first", ["稍后补充旅行路线文件"])
@@ -395,6 +498,42 @@ class WatchIntegrationTests(unittest.TestCase):
         result = self.service.evaluate("watch")
         self.assertEqual(result.state, "unmet")
         self.assertFalse(any(w.state == "met" for w in result.witnesses))
+
+    def test_withdrawal_crosses_evidence_only_restatement_without_a_material_id(self):
+        capture(self.store, "original", ["success original"])
+        self.engine.process_batch("original")
+        original = self.store.list_claims()[0]
+        class EvidenceOnlyText(FakeText):
+            def generate(self, prompt, **kwargs):
+                result = super().generate(prompt, **kwargs)
+                if not prompt.startswith("Treat all supplied"):
+                    return result
+                value = json.loads(result.text)
+                for action in value["actions"]:
+                    if action["type"] == "MERGE_INTO_ITEM":
+                        action["semantic_effect"] = "none"
+                return replace(result, text=json.dumps(value))
+        capture(self.store, "middle", ["success forwarded"])
+        SemanticEngine(self.store, EvidenceOnlyText(claims=True), FakeDecision()).process_batch("middle")
+        middle = next(c for c in self.store.list_claims() if c["claim_id"] != original["claim_id"])
+        self.assertEqual(set(middle["item_roles"].values()), {"evidence_only"})
+        isolated = SemanticEngine(self.store, FakeText(claims=True), FakeDecision(possible=0))
+        capture(self.store, "latest", ["success last-copy"])
+        isolated.process_batch("latest")
+        latest = next(c for c in self.store.list_claims() if c["claim_id"] not in {original["claim_id"], middle["claim_id"]})
+        for child, parent in ((middle, original), (latest, middle)):
+            self.assertIsNone(child["material_id"])
+            self.store.record_claim_relation(child["claim_id"], parent["claim_id"], "restates",
+                                             reason="explicit synthetic lineage")
+        self.service.create_watch(WatchSpec("watch", "occurrence", {"success": True}, item_ids=tuple(latest["item_ids"])))
+        self.assertEqual(self.service.evaluate("watch").state, "met")
+        capture(self.store, "correction", ["failure correction"])
+        isolated.process_batch("correction")
+        correction = next(c for c in self.store.list_claims() if c["predicates"] == {"success": False})
+        self.service.record_claim_relation(correction["claim_id"], original["claim_id"], "corrects_or_retracts",
+            reason="withdraw original success", evidence_ids=correction["span_ids"], expected_revision=self.store.read_revision())
+        self.assertNotEqual(self.service.get_watch("watch")["state"], "met")
+        self.assertEqual(next(c for c in self.store.list_claims() if c["claim_id"] == latest["claim_id"])["status"], "active")
 
 
 if __name__ == "__main__":

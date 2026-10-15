@@ -476,6 +476,50 @@ class EngineIntegrationTests(unittest.TestCase):
         self.assertEqual(self.store.list_items(), [])
         self.assertEqual(self.store.coverage()["unclassified_sources"], 1)
 
+    def test_accepted_defer_replans_after_later_context_without_replaying_unchanged_poll(self):
+        capture(self.store, "first", ["等待明确的后续案例"])
+        text, decision = FakeText(), FakeDecision(defer=True)
+        engine = SemanticEngine(self.store, text, decision)
+        first = engine.process_batch("first")
+        self.assertEqual(first["status"], "deferred")
+        old = engine.jobs.accepted(first["pages"][0]["decision_job_id"])
+        counts = len(text.calls), len(decision.calls)
+        engine = SemanticEngine(self.store, text, decision)  # Restart has no in-memory epoch.
+        self.assertEqual(engine.process_batch("first")["status"], "deferred")
+        self.assertEqual((len(text.calls), len(decision.calls)), counts)
+        capture(self.store, "later", ["明确的后续案例"])
+        decision.defer = False
+        later = engine.process_batch("later")
+        self.assertEqual(later["status"], "unclassified")  # ACK still cannot pass the gap.
+        self.assertEqual(later["pending_reason"], "semantic_prior_batch_incomplete")
+        self.assertEqual(len(self.store.list_items()), 1)  # Later knowledge can commit.
+        result = engine.process_batch("first")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(engine.jobs.accepted(first["pages"][0]["decision_job_id"]), old)
+        counts = len(text.calls), len(decision.calls)
+        self.assertEqual(engine.process_batch("later")["status"], "complete")
+        self.assertEqual(engine.process_batch("first")["status"], "complete")
+        self.assertEqual((len(text.calls), len(decision.calls)), counts)
+        self.store.verify_processing_receipt(result["processing_receipt"])
+
+    def test_unknown_decision_stays_unknown_when_context_changes(self):
+        class UnknownDecision(FakeDecision):
+            def decide(self, request, **kwargs):
+                if any(q.type == "choice" for q in request.questions):
+                    self.calls.append(kwargs["request_id"])
+                    raise ProviderError("synthetic_unknown_choice", outcome_unknown=True)
+                return super().decide(request, **kwargs)
+        capture(self.store, "unknown", ["必须保留不明请求"])
+        text, decision = FakeText(), UnknownDecision()
+        engine = SemanticEngine(self.store, text, decision)
+        with self.assertRaisesRegex(ProviderError, "synthetic_unknown_choice"):
+            engine.process_batch("unknown")
+        self.store.create_view("new-context", "上下文", "new canonical dependency")
+        counts = len(text.calls), len(decision.calls)
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            SemanticEngine(self.store, text, decision).process_batch("unknown")
+        self.assertEqual((len(text.calls), len(decision.calls)), counts)
+
     def test_same_source_overlap_is_context_and_never_second_observation(self):
         capture(self.store, "batch", ["同一束花"])
         text, decision = FakeText(), FakeDecision()
@@ -507,6 +551,57 @@ class EngineIntegrationTests(unittest.TestCase):
         counts = len(text.calls), len(decision.calls)
         engine.process_batch("new")
         self.assertEqual((len(text.calls), len(decision.calls)), counts)
+
+    def test_more_than_twelve_possible_candidates_receive_complete_detail_refinement(self):
+        from core.semantic.retrieval import HybridRetriever
+        capture(self.store, "catalog", ["independent " + str(i) for i in range(18)],
+                payloads=[{"case_anchor": "shared-case"} for _ in range(18)])
+        text = FakeText(claims=True)
+        SemanticEngine(self.store, text, FakeDecision(possible=0)).process_batch("catalog")
+        target = next(item["item_id"] for item in self.store.list_items() if item["title"] == "independent 17")
+        class RefiningDecision(FakeDecision):
+            def decide(self, request, **kwargs):
+                if "existing_items" not in request.state:
+                    return super().decide(request, **kwargs)
+                self.calls.append(kwargs["request_id"])
+                return DecisionResult({q.id: DecisionAnswer("noul", noul=.9 if item["item_id"] == target else 0)
+                    for q, item in zip(request.questions, request.state["existing_items"])}, self.route)
+        capture(self.store, "new", ["exact continuation of independent 17"], payloads=[{"case_anchor": "shared-case"}])
+        engine = SemanticEngine(self.store, text, RefiningDecision(), retriever=HybridRetriever(self.store))
+        self.assertEqual(engine.process_batch("new")["status"], "complete")
+        self.assertEqual(len(self.store.list_items()), 18)
+        self.assertEqual(len(self.store.get_item(target)["observation_ids"]), 2)
+        with closing(self.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM jobs WHERE kind='candidate_refinement' AND state='done'").fetchone()[0], 3)
+        capture(self.store, "ambiguous", ["unresolved exact identity"])
+        uncertain = FakeDecision()
+        engine = SemanticEngine(self.store, text, uncertain)
+        result = engine.process_batch("ambiguous")
+        self.assertEqual(result["status"], "deferred")
+        self.assertEqual(result["pages"][0]["pending_reason"], "semantic_candidate_ambiguity")
+        calls = len(text.calls), len(uncertain.calls)
+        self.assertEqual(engine.process_batch("ambiguous")["status"], "deferred")
+        self.assertEqual((len(text.calls), len(uncertain.calls)), calls)
+
+    def test_catalog_scale_reports_linear_calls_without_omitting_identity_coverage(self):
+        capture(self.store, "source", ["synthetic scale input"])
+        decision = FakeDecision(possible=0)
+        engine = SemanticEngine(self.store, FakeText(), decision)
+        observations = engine.extract_batch("source")["observations"]
+        for count in (24, 240, 4000):
+            with self.subTest(count=count):
+                items = {"item-" + str(i): {"item_id": "item-" + str(i), "kind": "story",
+                    "title": "case " + str(i), "identity_scope": {"case": str(i)}, "content_revision": 1}
+                    for i in range(count)}
+                context = {"items": items, "read_set": {"store_revision": count, "items": {}, "views": {}}}
+                calls = len(decision.calls)
+                _incoming, selected, _reads, catalog = engine._resolve_candidates(context, observations)
+                self.assertEqual(len(decision.calls) - calls, (count + 23) // 24)
+                self.assertTrue(catalog["complete"])
+                self.assertEqual(catalog["item_count"], count)
+                self.assertEqual(len(catalog["accepted_scan_job_ids"]), (count + 23) // 24)
+                self.assertEqual(selected, {})
+                self.assertEqual(catalog["omitted_possible_ids"], [])
 
     def test_unknown_provider_outcome_is_not_silently_retried(self):
         class UncertainText(FakeText):

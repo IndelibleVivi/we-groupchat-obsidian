@@ -1522,6 +1522,7 @@ class RebuildCoordinator:
         index = runtime.index_all()
         if index.get("complete") is not True:
             raise RebuildError(index.get("code", "rebuild_index_pending"))
+        pending_batches = []
         for batch_id in batch_ids:
             with closing(runtime.store.connect()) as conn:
                 done = conn.execute("SELECT receipt_json FROM processing_receipts WHERE batch_id=?", (batch_id,)).fetchone()
@@ -1540,10 +1541,23 @@ class RebuildCoordinator:
                 if result.get("status") == "stale":
                     continue
                 if result.get("status") != "complete":
-                    raise RebuildError("rebuild_semantic_pending")
+                    pending_batches.append(batch_id)
                 break
             else:
                 raise RebuildError("rebuild_resolution_stale")
+        while pending_batches:
+            before_revision = runtime.store.read_revision()
+            remaining = []
+            for batch_id in pending_batches:
+                try:
+                    runtime.process(batch_id)
+                except SemanticStoreError as exc:
+                    if exc.code != "semantic_processing_pending":
+                        raise
+                    remaining.append(batch_id)
+            if len(remaining) == len(pending_batches) and runtime.store.read_revision() == before_revision:
+                raise RebuildError("rebuild_semantic_pending")
+            pending_batches = remaining
         consolidated = runtime.engine.consolidate(run_id)
         if consolidated.get("status") not in {"complete", "unchanged"}:
             raise RebuildError("rebuild_consolidation_pending")

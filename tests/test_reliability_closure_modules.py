@@ -137,6 +137,52 @@ class SignaturePredicateTests(unittest.TestCase):
         )
         self.assertEqual(result.code, 'wechat_signature_not_stable_identity')
 
+    def test_managed_stable_identity_via_certificate_leaf_is_accepted(self):
+        # codesign expresses a self-signed identity's designated requirement
+        # against either the chain root or the leaf; both carry the managed
+        # hash and must be accepted.
+        path = '/fixture/runtime directory/WeChat.app'
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, '', ''),
+            subprocess.CompletedProcess(
+                [], 0, '',
+                'CodeDirectory v=20500 size=755 flags=0x0(none) hashes=14+2 location=embedded\n'
+                'Signature size=1840\n',
+            ),
+            subprocess.CompletedProcess(
+                [], 0, '',
+                'Executable=/fixture/WeChat\n'
+                'designated => identifier "com.tencent.xinWeChat" and '
+                'certificate leaf = H"0123abcdef"\n',
+            ),
+        ])
+        result = inspect_wechat_signature(
+            path, runner=runner, expected_certificate_root='0123ABCDEF',
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(len(runner.call_args_list), 3)
+
+    def test_foreign_certificate_leaf_is_rejected(self):
+        # A leaf anchor that does not carry the managed hash still fails closed.
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, '', ''),
+            subprocess.CompletedProcess(
+                [], 0, '',
+                'CodeDirectory v=20500 size=755 flags=0x0(none) hashes=14+2 location=embedded\n'
+                'Signature size=8979\n',
+            ),
+            subprocess.CompletedProcess(
+                [], 0, '',
+                'designated => identifier "com.tencent.xinWeChat" and '
+                'certificate leaf = H"deadbeef"\n',
+            ),
+        ])
+        result = inspect_wechat_signature(
+            '/fixture/WeChat.app', runner=runner,
+            expected_certificate_root='0123abcdef',
+        )
+        self.assertEqual(result.code, 'wechat_signature_not_stable_identity')
+
     def test_adhoc_is_rejected_when_stable_identity_is_required(self):
         runner = self.runner('CodeDirectory flags=0x2(adhoc)\nSignature=adhoc\n')
         result = inspect_wechat_signature(

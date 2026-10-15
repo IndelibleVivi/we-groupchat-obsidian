@@ -281,20 +281,30 @@ class SemanticRuntime:
         backoff = monitor._ai_backoff_result(snapshot.data)
         if backoff:
             return backoff
+        pending = False
+        prepared_after_gap = False
         for batch in self._live_batches(username):
             with closing(self.store.connect()) as conn:
                 applied = conn.execute("SELECT 1 FROM semantic_applied_batches WHERE batch_id=?", (batch["batch_id"],)).fetchone()
-            if applied or batch["input_cursors"] != snapshot.data["source_cursors"]:
+            if applied:
                 continue
             if not self._within_capture(batch["output_cursors"], snapshot.data["captured_cursors"]):
                 continue
+            before_processing = self.store.read_revision()
             try:
                 self.process(batch["batch_id"])
             except Exception as exc:
                 from ai.semantic_provider import ProviderError
+                if isinstance(exc, SemanticStoreError) and exc.code == "semantic_processing_pending":
+                    pending = True
+                    prepared_after_gap |= self.store.read_revision() != before_processing
+                    continue
                 if isinstance(exc, ProviderError) and exc.retryable:
                     monitor._commit_retryable_ai_failure(snapshot, exc)
                 raise
+            if batch["input_cursors"] != snapshot.data["source_cursors"]:
+                prepared_after_gap = True
+                continue
             receipt = bridge.processing(snapshot, batch["batch_id"])
             snapshot = monitor.state_store.commit_applied(snapshot.revision, batch["output_cursors"], receipt)
             with self.store.transaction() as conn:
@@ -320,6 +330,19 @@ class SemanticRuntime:
                     "message_count": count, "last_msg_ts": snapshot.data["last_checked_ts"],
                     "semantic_generation_id": self.store.generation_id, "derived_state": downstream,
                     "message": "语义进度已确认"}
+        if pending:
+            downstream = "pending"
+            if prepared_after_gap:
+                try:
+                    index = self.index_all(max_rounds=1)
+                    projection = self.publish_all()
+                    if index["complete"] and projection["complete"]:
+                        downstream = "ready"
+                except Exception:
+                    pass  # Durable outboxes retain downstream work.
+            return {"status": "semantic_processing_pending", "derived_state": downstream,
+                    "semantic_generation_id": self.store.generation_id,
+                    "message": "部分资料等待更多依据；后续资料可继续处理，进度未越过待判断部分"}
         raise SemanticStoreError("semantic_applied_prefix_gap")
 
     def _initialize_selection(self, monitor, snapshot, username):

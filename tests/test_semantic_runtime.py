@@ -88,6 +88,40 @@ class SemanticRuntimeTests(unittest.TestCase):
         with patch.object(self.text, "generate", side_effect=AssertionError("provider in backoff")):
             self.assertEqual(self.monitor._check_once()["status"], "ai_backoff")
 
+    def test_deferred_prefix_allows_later_context_but_ack_waits_for_the_gap(self):
+        class ContextDecision(FakeDecision):
+            def decide(self, request, **kwargs):
+                state = request.state.get("state", {})
+                self.defer = (any(o["title"] == "ambiguous" for o in state.get("observations", ()))
+                              and not state.get("items"))
+                return super().decide(request, **kwargs)
+        self.text.noise = False
+        decision = ContextDecision()
+        self.runtime.engine.decision_provider = decision
+        self.monitor.config["monitor_max_messages_per_run"] = 1
+        self.append("ambiguous")
+        before = self.state.inspect().data["source_cursors"]
+        self.assertEqual(self.monitor._check_once()["status"], "semantic_processing_pending")
+        counts = len(self.text.calls), len(decision.calls)
+        self.assertEqual(self.monitor._check_once()["status"], "semantic_processing_pending")
+        self.assertEqual((len(self.text.calls), len(decision.calls)), counts)
+        self.source.shards["shard"]["messages"].append(raw_message("g", 3, 30, "evidence"))
+        with patch.object(self.runtime, "publish_all", return_value={"complete": True}):
+            self.assertEqual(self.monitor._check_once()["status"], "semantic_processing_pending")
+        self.assertEqual(self.state.inspect().data["source_cursors"], before)
+        self.assertEqual(len(self.store.list_items()), 1)
+        # Restart keeps epoch/accepted artifacts; ACK moves only in raw order.
+        self.runtime.engine = SemanticEngine(self.store, self.text, decision)
+        with patch.object(self.runtime, "publish_all", return_value={"complete": True}):
+            for _ in range(4):
+                self.monitor._check_once()
+        self.assertEqual(self.state.inspect().data["last_checked_ts"], 30)
+        self.assertEqual(len(self.store.list_items()), 1)
+        calls = len(self.text.calls), len(decision.calls)
+        with patch.object(self.runtime, "publish_all", return_value={"complete": True}):
+            self.monitor._check_once()
+        self.assertEqual((len(self.text.calls), len(decision.calls)), calls)
+
     def test_capture_cas_failure_adopts_exact_retained_batch(self):
         self.append()
         with patch.object(self.state, "commit_capture", side_effect=MonitorStateError("monitor_state_conflict")):

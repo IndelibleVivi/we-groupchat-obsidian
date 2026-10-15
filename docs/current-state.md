@@ -66,3 +66,24 @@ Correction attention considers earlier semantic changes even when the same Item
 has a later detail or provenance-only revision before polling. Existing accepted
 or unknown device/channel receipts remain authoritative across later revisions;
 already-known corrections do not become new attention.
+
+Watch evaluation now limits a local correction to the withdrawn predicate and
+its proven scope or explicit restatement lineage, preserving unrelated claims
+from the same material. Incomplete scope cannot combine separate trials, and a
+newer overlapping contrary report prevents an unconditional current-state match.
+Incremental BodyPlans may rewrite automatic prose when new details join its
+stable block; unchanged blocks, exact quotations and manual edits remain
+protected. Current BodyPlan artifacts use v5, while accepted v2–v4 evidence
+remains verifiable. These are candidate source behaviors, not evidence of a
+private generation being repaired, re-rendered or activated.
+
+Known deferred decisions now admit dependency-bound replanning and later-batch
+knowledge processing, while the applied prefix remains blocked until its gap
+is proved complete. More than 12 possible candidates receive bounded detailed
+refinement; remaining ambiguity stays explicit. The full catalog scan still
+has linear model-call cost (167 coarse calls for a synthetic 4,000-Item catalog),
+and real-provider latency has not been established by this source change.
+The candidate also includes the exact 4.1.15/270102/arm64 protected-key profile
+and managed self-signed leaf-anchor compatibility from the main source line;
+the dated native evidence retains its original scope in
+[recovery-acceptance.md](recovery-acceptance.md).
