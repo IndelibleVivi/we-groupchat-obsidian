@@ -52,7 +52,10 @@ and an explicitly wrong full envelope still fails rather than being repaired.
 Every unit has exactly one paragraph home. A block receiving no new or changed
 units retains its previous bytes. A new immutable unit may be integrated into
 an existing block by rewriting its automatic prose, while preserving the block
-ID, all retained unit homes, evidence and resources. Required verbatim fragments
+ID, all retained unit homes, evidence and resources. New details
+that answer or qualify an existing explanation should be integrated at that
+home, not automatically added as another chronological supplement. Other
+independent parts of the Item may still use new blocks. Required verbatim fragments
 and exact grounded quotations remain protected; an unrelated block cannot be
 rewritten just because another block gained detail. This rule also applies to
 bounded pages; oversized lossless continuation retains its exact-text contract.
@@ -75,7 +78,9 @@ valid, and there is no required page template. Tables keep independent cases
 separate and mark missing values unknown. Blockquotes must contain exact supplied
 source wording; readable attribution belongs outside the quotation. Relayed
 words retain their relay relationship and an unknown original author stays
-unknown. Required original wording and steps still belong to one stable unit
+unknown. Separate messages must not be joined into one contiguous purported
+original quotation; each quote keeps its own source citation. Required original
+wording and steps still belong to one stable unit
 home, even when presentation adds quote prefixes.
 
 The publisher owns the note title and frontmatter. The Body prompt therefore asks
@@ -89,6 +94,12 @@ uncertainty or limit is stated only where it materially affects the reader.
 Short conversational replies normally stay inline in the connected scene;
 display blockquotes remain available when their form helps reading. Captured
 resource labels or original filenames remain visible even while bytes are pending.
+Factual prose must stay within the supplied units and evidence: the writer must
+not add general background, feelings, motives or outcomes to pad a short note.
+Questions, guesses and relayed speech keep their original uncertainty and
+attribution. A brief source may remain a brief note without a generic opening
+or a concluding lesson. These are writing constraints, not a claim that the
+structural validator can prove every natural-language statement is grounded.
 
 An optional `{{evidence:<span_id>}}` marker places a citation beside a claim or
 inside a table cell. The program verifies the exact supplied evidence ID and

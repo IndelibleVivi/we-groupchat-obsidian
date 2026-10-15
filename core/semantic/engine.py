@@ -995,6 +995,9 @@ class SemanticEngine:
                 "for CREATE_ITEM/SPLIT outputs. ADD_MEMBERSHIP requires an existing view_id from state.views "
                 "and origin model or rule; if state.views is empty, omit all membership actions. Do not invent "
                 "a default View. Item titles use the material's language, preserving names and technical tokens. "
+                "Titles and relation reasons are reader-visible prose: describe the people, material and "
+                "connection in ordinary words, never internal Item/Observation/claim IDs or their abbreviations. "
+                "Put machine identities only in their typed ID fields. "
                 "A source-grounded experience can establish an Item even while its attachment bytes are pending. "
                 "Observation resolution_status unresolved means it awaits this assignment, not that its supplied "
                 "text is ungrounded. Neither pending media nor the absence of a View alone blocks CREATE.\n"
@@ -1032,7 +1035,16 @@ class SemanticEngine:
             request = DecisionRequest(
                 {"state": state, "proposal": proposal_artifact["proposal"]},
                 (DecisionQuestion("plan", "choice", "Are all supplied exact actions grounded and safe to commit? "
-                                  "Select defer if novelty or Item identity is uncertain; a top-k miss is not novelty.",
+                                  "Select defer if novelty or Item identity is uncertain; a top-k miss is not novelty. "
+                                  "Use the supplied global_catalog coverage: complete=true with no omitted_possible_ids "
+                                  "is a complete scope check, not merely a top-k miss. new_item_ids is a pool of "
+                                  "available identities, not a requirement to create that many Items or a one-to-one "
+                                  "Observation mapping. Each action's observation_ids supplies its exact assignment. "
+                                  "Several Observations may belong to one grounded case/story/question; assess that "
+                                  "shared identity from their content, not their count or broad shared topic alone. "
+                                  "resolution_status unresolved means awaiting this assignment, not ungrounded source. "
+                                  "An attributed account may retain questions, disagreements and missing attachments; "
+                                  "it need not settle every factual question before becoming an Item.",
                                   {"apply": "Apply this exact validated action combination.",
                                    "defer": "Keep captured Observations unresolved for later review."}),),
             )

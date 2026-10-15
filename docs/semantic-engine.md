@@ -218,6 +218,15 @@ call counts, not real-provider latency or a constant-cost live guarantee.
 Selected long Items get accepted, bounded identity-context summaries covering
 all detail parts; these summaries never replace canonical body units. The final
 proposal uses content, View definition, View override and global revisions.
+The final decision receives the same assignment semantics: new identities are
+an available pool, not one required Item per Observation. Each action names its
+exact Observation membership, and several observations may share a grounded
+thread. Complete catalog coverage is distinct from a top-k miss. These prompt
+clarifications do not replace accepted decisions or replay unknown requests;
+existing deferrals still follow the dependency-bound replanning path above.
+Titles and relation reasons are reader-visible prose; the proposer must describe
+their content without internal identity strings or abbreviated IDs. Identities
+belong in the typed fields. Existing accepted reasons remain immutable evidence.
 Its existing-candidate novelty list contains exactly the supplied existing Item
 IDs, separately from unused new identities. Identity scope is an object;
 memberships require an existing View and a model/rule origin. Pending attachment
