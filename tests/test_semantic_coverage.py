@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from ai.semantic_provider import ProviderError, TextResult
 from core.semantic.engine import SemanticEngine, SemanticValidationError
@@ -92,6 +93,54 @@ class CoverageEngineTests(unittest.TestCase):
         with closing(self.store.connect()) as connection:
             self.assertEqual(connection.execute(
                 "SELECT count(*) FROM jobs WHERE kind='extract_coverage'").fetchone()[0], 0)
+
+    def test_coverage_can_cite_a_neighbour_alongside_the_pending_core(self):
+        capture(self.store, "joint", ["晚上老地方见。", "好，就在美术馆门口见。"])
+
+        class JointEvidence(CoverageText):
+            def generate(self, prompt, **kwargs):
+                if "Bounded adjacent context" not in prompt:
+                    return super().generate(prompt, **kwargs)
+                self.calls.append(kwargs['request_id'])
+                data = json.loads(prompt.rsplit('\n', 1)[-1])
+                core = next(source for source in data if source['core'])
+                context = next(source for source in data if not source['core'])
+                return TextResult(json.dumps({'observations': [{
+                    'title': '两人约在美术馆门口见面', 'scene_kind': 'life',
+                    'spans': [{'source_id': source['source_id'], 'span_id': source['spans'][0]['span_id']}
+                              for source in (core, context)],
+                    'units': [{'kind': 'scene', 'text': '双方约好晚上在美术馆门口见面。', 'span_indices': [0, 1]}],
+                    'topics': [], 'claims': []}]}), self.route)
+
+        text = JointEvidence(primary=lambda value: "美术馆" in value)
+        result = SemanticEngine(self.store, text, FakeDecision(possible=0)).process_batch('joint')
+        self.assertEqual(result['status'], 'complete')
+        with closing(self.store.connect()) as connection:
+            job = connection.execute("SELECT inputs_json,artifact_json FROM jobs "
+                "JOIN accepted_job_artifacts USING(job_id) WHERE kind='extract_coverage'").fetchone()
+        inputs, artifact = json.loads(job[0]), json.loads(job[1])
+        cited = {span['source_id'] for span in artifact['observations'][0]['spans']}
+        self.assertTrue(cited & set(inputs['core_source_ids']))
+        self.assertTrue(cited & set(inputs['context_source_ids']))
+        self.assertTrue(inputs['context_span_ids'])
+
+    def test_coverage_prompt_upgrade_cannot_bypass_an_old_unknown_job(self):
+        capture(self.store, 'upgrade', ['An unclear scene', 'An explanatory neighbour'])
+        text = CoverageText(primary=lambda value: False)
+        engine = SemanticEngine(self.store, text, FakeDecision())
+        with patch.object(engine, '_cover_unclassified', side_effect=RuntimeError('synthetic interruption')):
+            with self.assertRaises(RuntimeError):
+                engine.extract_batch('upgrade')
+        with closing(self.store.connect()) as connection:
+            parent = connection.execute("SELECT job_id FROM jobs WHERE kind='extract'").fetchone()[0]
+        old = engine.jobs.ensure('extract_coverage', {'parent_job_id': parent, 'phase': 'bounded-adjacent-context-v1'},
+                                 {'prompt': 'semantic-extraction-coverage-v1'})
+        engine.jobs.claim(old['job_id'], engine.worker_id)
+        engine.jobs.fail(old['job_id'], engine.worker_id, 'synthetic_unknown', unknown=True)
+        sent = list(text.calls)
+        with self.assertRaisesRegex(SemanticValidationError, 'semantic_job_busy_or_unknown'):
+            engine.extract_batch('upgrade')
+        self.assertEqual(text.calls, sent)
 
     def test_coverage_reuses_the_accepted_page_without_resending_the_original_model(self):
         capture(self.store, "reuse", ["第一句含义不明。", "补充说明：指的是美术馆。", "第三句含义同样不明。"])

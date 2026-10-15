@@ -74,11 +74,12 @@ empty pages and messages do not receive that assumption.
 
 Before an unaccepted parent aggregates, every member still `unclassified` gets
 at most one bounded adjacent-context coverage re-read (`extract_coverage`, phase
-`bounded-adjacent-context-v1`). Only the pending members are core and citable;
-the nearest neighbouring messages of the same frozen batch are attached as
-non-citable, character-bounded context text without span identities (at most four
-message sources and 8,000 characters per page), so no earlier terminal
-disposition is overwritten. The coverage pass reuses the shared page generation
+`bounded-adjacent-context-v2`). Only pending members are core. Up to four
+neighbouring messages from the same frozen batch supply their original first
+span as non-core context, with an 8,000-character total limit. Context can be
+cited alongside a pending core member, using its exact source/span pair; it
+cannot support a new Observation alone. No context text is reassigned to a core
+source. The coverage pass reuses the shared page generation
 and known-output correction path, binds exact source/span/context inputs, reuses
 accepted page artifacts byte-for-byte and never reopens the protected WeChat source. It
 contributes a new Observation only when that Observation cites a pending core
@@ -87,7 +88,9 @@ fragment of that member reaches a terminal state. A still-unclassified or unknow
 coverage result keeps the member unread with no processing ACK; a distinct
 coverage job is never re-sent under a new prompt, and no uniform `noise` or
 forced `context_only` disposition may bypass the gap. An already accepted parent
-keeps its exact artifact and receipt.
+keeps its exact artifact and receipt. An unknown coverage job blocks even a
+prompt-version upgrade; an accepted older coverage artifact in an unfinished
+parent requires explicit reconciliation rather than a new parallel interpretation.
 
 Relations describe evidence (`replay_same_source`, `same_material`, `restates`,
 `independent_support`, `refines_scope`, `changes_over_time`, `disputes`,
@@ -139,7 +142,11 @@ exception is not that proof. Sent failures and unknown outcomes retain their
 existing JobStore state; unknown work requires explicit reconciliation. There
 is no automatic provider retry or fallback. Extraction may correct a known
 received JSON validation failure at most twice: each rejected result closes its
-durable attempt, and the next claim uses a distinct physical request ID with
+attempt. Eligibility comes from the exact exception raised while validating that
+received response, rather than an error-name prefix; context-only Observations
+are rejected output too. Provider, prompt-building, claim and acceptance failures
+do not enter this path. Each correction claims a new durable attempt and uses a
+distinct physical request ID with
 the error and rejected JSON as untrusted feedback for the same source spans.
 Accepted pages are reused; unknown outcomes, unsent work and provider failures
 cannot enter this correction loop. Exhaustion still stops extraction without

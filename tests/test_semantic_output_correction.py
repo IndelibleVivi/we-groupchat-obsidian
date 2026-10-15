@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from ai.semantic_provider import ProviderError, TextResult
 from core.semantic.engine import SemanticEngine, SemanticValidationError
@@ -56,6 +57,36 @@ class OutputCorrectionTests(unittest.TestCase):
             self.assertEqual(connection.execute('SELECT COUNT(*) FROM observations').fetchone()[0], 0)
             self.assertEqual(connection.execute('SELECT COUNT(*) FROM accepted_job_artifacts').fetchone()[0], 0)
 
+    def test_context_only_observation_is_a_known_rejected_output(self):
+        self.store.capture_batch('contextual', [
+            {'source_id': str(index), 'logical_shard_id': 'synthetic-shard',
+             'physical_generation': 'synthetic-generation', 'source_cursor_token': str(index + 1),
+             'source_sent_at': 10 + index, 'text': text, 'payload': {}, 'core': index == 0}
+            for index, text in enumerate(['Current scene', 'Previous context'])],
+            source_namespace='synthetic', chat_id='group-a', inventory_digest='synthetic-inventory',
+            inventory_revision=1, input_cursors={}, output_cursors={'synthetic-shard': '2'}, source_eof=True)
+
+        class ContextOnly(FakeText):
+            def generate(self, prompt, **kwargs):
+                if self.calls:
+                    self.correction_prompt = prompt
+                    return super().generate(prompt, **kwargs)
+                self.calls.append(kwargs['request_id'])
+                context = json.loads(prompt.rsplit('\n', 1)[-1])[1]
+                return TextResult(json.dumps({'observations': [{
+                    'title': 'Context alone', 'scene_kind': 'life',
+                    'spans': [{'source_id': context['source_id'], 'span_id': context['spans'][0]['span_id']}],
+                    'units': [{'kind': 'scene', 'text': 'Previous context', 'span_indices': [0]}],
+                    'topics': [], 'claims': []}]}), self.route)
+
+        text = ContextOnly()
+        extracted = SemanticEngine(self.store, text, FakeDecision()).extract_batch('contextual')
+        self.assertEqual(len(text.calls), 2)
+        self.assertIn('semantic_context_without_core', text.correction_prompt)
+        self.assertIn('do not invent a core link', text.correction_prompt)
+        self.assertEqual(len(extracted['observations']), 1)
+        self.assertEqual(extracted['observations'][0]['units'][0]['text'], 'Current scene')
+
     def test_unknown_outcome_is_not_corrected_or_bypassed_on_resume(self):
         class Unknown(FakeText):
             def generate(self, prompt, **kwargs):
@@ -67,6 +98,14 @@ class OutputCorrectionTests(unittest.TestCase):
             engine.extract_batch('batch')
         with self.assertRaisesRegex(SemanticValidationError, 'semantic_job_busy_or_unknown'):
             engine.extract_batch('batch')
+        self.assertEqual(len(text.calls), 1)
+
+    def test_acceptance_failure_is_not_misidentified_as_a_model_rejection(self):
+        text = FakeText()
+        engine = SemanticEngine(self.store, text, FakeDecision())
+        with patch.object(engine.jobs, 'accept', side_effect=SemanticValidationError('semantic_invalid_json')):
+            with self.assertRaisesRegex(SemanticValidationError, 'semantic_invalid_json'):
+                engine.extract_batch('batch')
         self.assertEqual(len(text.calls), 1)
 
     def test_attributed_quote_wrapper_is_corrected_to_the_exact_passage(self):
