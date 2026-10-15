@@ -227,6 +227,12 @@
   active different semantic generation is not an admissible new rebuild plan.
   Source/model grants, budget/account setup, installation and activation are
   separate from source tests; see `docs/semantic-rebuild.md`.
+- `core/semantic/verification.py` owns independent complete-generation checks;
+  `verification_storage.py` supplies disposable private disk snapshots and
+  scoped SQL access. Never restore an in-memory whole-database backup or
+  whole-corpus source/job/artifact/vector payload dictionaries. Snapshot-only
+  indexes and computed scratch must not write the original database; preserve
+  WAL consistency, manifest freezing and cleanup on success or interruption.
 - `core/semantic/rebuild_payloads.py` owns run-bound immutable journal payloads
   and bounded v1-to-v2 journal storage conversion under RebuildJournal's run lock.
   Routine reads/updates must stay compact; do not expand inventories in phase

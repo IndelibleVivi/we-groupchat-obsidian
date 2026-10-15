@@ -67,6 +67,13 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
+        # Disposable verifier databases are still confined to this fixture;
+        # keep the existing sqlite/source guards strict for every other path.
+        temporary_directory = tempfile.TemporaryDirectory
+        scratch = patch("core.semantic.verification_storage.TemporaryDirectory",
+                        side_effect=lambda **kwargs: temporary_directory(dir=self.root, **kwargs))
+        scratch.start()
+        self.addCleanup(scratch.stop)
         self.legacy = LegacyFixture(self.root)
         self.runtime_root = self.root / "runtime"
         # ConfigStore intentionally drops test-only resource_capture_db keys;

@@ -697,6 +697,94 @@ class ReaderRuntimeTests(ReadingHarness):
         self.assertEqual(event.kind, "correction")
         self.assertEqual(self.controls.preference("stable-cat").wait, "")
 
+    def followed_correction(self, *, publish=True):
+        self.floor()
+        self.reader.poll()
+        self.properties(follow=True)
+        self.reader.poll()
+        self.append()
+        self.reader.poll()
+        self.assertEqual(self.notifier.notifications, [])
+        original = next(c for c in self.store.get_item("stable-cat")["claims"] if c["predicates"]["success"])
+        observed, _ = self.append("更正：窗边的是抱枕。", success=False, publish=publish)
+        self.store.record_claim_relation(observed["claims"][0]["claim_id"], original["claim_id"], "corrects_or_retracts",
+            reason="窗边对象后来确认是抱枕。", expected_revision=self.store.read_revision())
+        if publish:
+            self.publish_current()
+        with closing(self.store.connect()) as conn:
+            change_id = conn.execute("SELECT max(change_id) FROM change_events").fetchone()[0]
+        return "correction:" + str(change_id), self.store.get_item("stable-cat")["content_revision"]
+
+    def test_correction_before_later_same_item_detail_delivers_once_across_restart(self):
+        source_event, _ = self.followed_correction()
+        self.append("后续：她又给纸箱铺了一条毯子。")
+        self.reader.poll()
+        self.assertEqual(len(self.notifier.notifications), 1)
+        notification = self.notifier.notifications[0]
+        event = self.runtime.delivery._event(notification.event_id)
+        self.assertEqual(event.source_event_id, source_event)
+        self.assertEqual(event.target_revision, self.store.get_item("stable-cat")["content_revision"])
+        self.reader.poll()
+        self.append("第二天，她把毯子折好。")
+        self.reader.poll()
+        restarted = ReaderRuntime(self.runtime, notifier=self.notifier, device_id="synthetic-device", live=True)
+        restarted.poll()
+        self.assertEqual(len(self.notifier.notifications), 1)
+
+    def test_correction_before_provenance_only_revision_still_delivers(self):
+        self.followed_correction()
+        extra, _ = self.canonical_extract(self.store, "later-proof", "补充来源重复记下那只纸箱。")
+        self.canonical_actions(self.store, [{"action_key": "later-provenance", "type": "MERGE_INTO_ITEM",
+            "item_id": "stable-cat", "observation_ids": [extra["observation_id"]],
+            "modes": ["add_evidence"], "semantic_effect": "none"}])
+        self.publish_current()
+        self.reader.poll()
+        self.assertEqual(len(self.notifier.notifications), 1)
+
+    def test_unknown_correction_is_not_resent_after_later_same_item_detail(self):
+        self.followed_correction()
+        self.notifier.status = "raise"
+        self.reader.poll()
+        previous = self.ledger.one("SELECT * FROM reader_deliveries WHERE status='unknown'")
+        self.assertIsNotNone(previous)
+        self.append("后续：她给纸箱加了一条毯子。")
+        self.reader.poll()
+        self.assertEqual(len(self.notifier.notifications), 1)
+        retained = self.ledger.one("SELECT * FROM reader_deliveries WHERE event_id=?", (previous["event_id"],))
+        self.assertEqual(retained["receipt_id"], previous["receipt_id"])
+        self.assertEqual(retained["status"], "unknown")
+
+    def test_known_correction_is_not_new_attention_after_later_detail(self):
+        _, revision = self.followed_correction()
+        self.controls.mark_known("stable-cat", revision, known_at="2026-10-15T00:00:00+00:00")
+        self.append("后续：她给纸箱加了一条毯子。")
+        self.reader.poll()
+        self.assertEqual(self.notifier.notifications, [])
+
+    def test_marking_correction_known_during_preparation_blocks_notification(self):
+        _, revision = self.followed_correction()
+        self.append("后续：她给纸箱加了一条毯子。")
+        original = self.reader._claim_dependencies
+        def mark_known(*args):
+            result = original(*args)
+            self.controls.mark_known("stable-cat", revision, known_at="2026-10-15T00:00:00+00:00")
+            return result
+        with patch.object(self.reader, "_claim_dependencies", side_effect=mark_known):
+            self.reader.poll()
+        self.assertEqual(self.notifier.notifications, [])
+
+    def test_not_sent_correction_can_use_current_revision_after_publication_recovers(self):
+        source_event, _ = self.followed_correction(publish=False)
+        self.reader.poll()
+        self.assertEqual(self.notifier.notifications, [])
+        self.append("后续：她给纸箱加了一条毯子。", publish=False)
+        self.publish_current()
+        self.reader.poll()
+        self.assertEqual(len(self.notifier.notifications), 1)
+        event = self.runtime.delivery._event(self.notifier.notifications[0].event_id)
+        self.assertEqual(event.source_event_id, source_event)
+        self.assertEqual(event.target_revision, self.store.get_item("stable-cat")["content_revision"])
+
     def brief(self):
         snapshot = self.runtime.adapter.snapshot("stable-cat")
         with closing(self.store.connect()) as conn:

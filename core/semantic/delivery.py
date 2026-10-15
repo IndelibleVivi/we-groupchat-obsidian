@@ -66,6 +66,9 @@ class DeliveryReceipt:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reader_attention_events (
  event_id TEXT PRIMARY KEY,generation_id TEXT NOT NULL,event_json TEXT NOT NULL,disposition TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS reader_attention_source ON reader_attention_events(
+ generation_id,json_extract(event_json,'$.source_event_id'),
+ json_extract(event_json,'$.kind'),json_extract(event_json,'$.target_id'));
 CREATE TABLE IF NOT EXISTS reader_deliveries (
  event_id TEXT NOT NULL,device_id TEXT NOT NULL,channel TEXT NOT NULL,status TEXT NOT NULL,
  receipt_id TEXT NOT NULL,code TEXT NOT NULL,PRIMARY KEY(event_id,device_id,channel));

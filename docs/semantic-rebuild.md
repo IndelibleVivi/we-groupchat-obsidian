@@ -364,6 +364,15 @@ change events 不会补发通知。
 与当前 DB 不再相同，不能把它当作实时健康矩阵。此时使用应用 health；原验收
 receipt 保留其 H1 范围。
 
+独立 verifier 使用 WAL-aware Online Backup 取得私有临时磁盘 snapshot；原库以
+read-only 打开，完整校验在该一致副本上进行。source/job/artifact/receipt 按行或
+当前分组读取，向量与派生校验结果保存在私有 scratch，而非整库载入 RAM。
+需要为 `TMPDIR` 所在卷预留 snapshot（约原 DB 大小）及派生 scratch 的磁盘空间；
+临时目录和文件在写 payload 前即为私有权限，成功或异常退出均清理，重复 verify
+不保留上一轮 payload。存储不可用或磁盘耗尽不产生成功验收。
+manifest 容器会独立冻结而复用不可变字符串，身份集合仍随记录数量增长，单条
+record/artifact 也仍需解码；这不构成整次真实迁移低于某个固定 RAM 上限的保证。
+
 切换前旧 runtime 已恢复的 retry 会重新停止、fresh backup，并迁入间隔期间
 新增的旧 canonical records、完整用户笔记和 Queue history，重新 C0/C1。
 原备份和先前 raw versions 保留；不会只换一次 state CAS。配置或 runtime binding

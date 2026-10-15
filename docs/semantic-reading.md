@@ -340,7 +340,13 @@ Windows DACL and live desktop acceptance are separate gates.
 `deliver_changes()` emits only exact wait met/reopened or explicitly followed
 correction candidates. Ordinary followed updates belong in the brief. Clearing
 follow/wait stops future watch evaluation while retaining history, and mute wins
-over both. `deliver_brief(BriefReceipt)` requires the current successful edition
+over both. Every correction above the delivery floor is considered even when
+the same Item has a later ordinary or provenance-only revision before polling.
+An unsent correction uses the current ready Item and exact claim evidence;
+accepted, rejected, unknown or in-flight delivery retains its original event and
+receipt for that device/channel across later revisions and restarts. A correction
+already covered by the reader's known revision is not new attention.
+`deliver_brief(BriefReceipt)` requires the current successful edition
 receipt and derives its exact contributing Item revisions and evidence from the
 stored successful plan; it never reconstructs those dependencies from links or
 counts. Immediately before delivery, mapped preferences are synchronized again,

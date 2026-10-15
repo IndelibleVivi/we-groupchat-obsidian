@@ -4,11 +4,15 @@ from datetime import datetime, timezone
 from contextlib import closing
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from ai.semantic_provider import EmbeddingProfile
 from ai.vector_index import LocalCosineIndex, VectorRecord
@@ -171,6 +175,117 @@ class SemanticVerificationTests(unittest.TestCase):
 
     def codes(self, report):
         return {issue.code for issue in report.issues}
+
+    @unittest.skipIf(os.name == "nt", "POSIX subprocess RSS evidence")
+    def test_corpus_payload_growth_does_not_become_resident_verifier_memory(self):
+        script = '''
+import json, resource, sqlite3, sys, tempfile
+from pathlib import Path
+from core.semantic.contracts import digest
+from tests.test_semantic_verification import VerificationFixture
+with tempfile.TemporaryDirectory() as directory:
+    fixture = VerificationFixture(Path(directory).resolve())
+    count = int(sys.argv[1])
+    text = 'x' * 32768
+    fixture.manifest['large_frozen_notes'] = [text] * count
+    payload = {'raw': text}
+    with fixture.store.transaction() as db:
+        original = dict(db.execute('SELECT * FROM source_records LIMIT 1').fetchone())
+        columns = list(original)
+        for index in range(count):
+            row = dict(original, source_version_id='bulk-'+str(index), source_id='bulk-'+str(index),
+                text=text, payload_json=json.dumps(payload), revision=1, supersedes_source_version_id=None,
+                native_revision=None, capture_seq=index+3)
+            row['content_hash'] = digest({'text':text,'payload':payload,'kind':row['kind'],
+                'grade':row['provenance_grade'],'sent_at':row['source_sent_at'],'resources':[]})
+            if index == count-1:
+                row['content_hash'] = 'corrupt-tail'
+            db.execute('INSERT INTO source_records('+','.join(columns)+') VALUES ('+','.join('?' for _ in columns)+')',
+                       [row[key] for key in columns])
+            db.execute('INSERT INTO source_heads VALUES (?,?,?,?)',
+                       (row['source_namespace'],row['chat_id'],row['source_id'],row['source_version_id']))
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    report = fixture.verify()
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    unit = 1 if sys.platform == 'darwin' else 1024
+    print(json.dumps({'growth':(peak-before)*unit,'captured':report.counts['captured_versions'],
+                      'issues':sorted(issue.code for issue in report.issues)}))
+'''
+        samples = []
+        for count in (64, 640):
+            result = subprocess.run([sys.executable, "-c", script, str(count)],
+                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            sample = json.loads(result.stdout)
+            self.assertEqual(sample["captured"], count + 2)
+            self.assertIn("source_payload_identity_mismatch", sample["issues"])
+            self.assertIn("unaccounted_source_version", sample["issues"])
+            samples.append(sample["growth"])
+        self.assertLess(samples[1] - samples[0], 24 * 1024 * 1024, samples)
+
+    def test_verifier_observes_uncheckpointed_wal_and_repeated_verification(self):
+        verifier = RebuildVerifier(self.fixture.store.path, self.fixture.manifest,
+                                   projection_root=self.fixture.projections)
+        self.assertTrue(verifier.verify().complete)
+        with closing(sqlite3.connect(self.fixture.store.path)) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("UPDATE source_records SET text='changed in WAL' WHERE source_id='one'")
+            writer.commit()
+            self.assertGreater(Path(str(self.fixture.store.path) + "-wal").stat().st_size, 0)
+            self.assertIn("source_payload_identity_mismatch", self.codes(verifier.verify()))
+
+    def test_nested_manifest_is_frozen_without_retaining_caller_containers(self):
+        verifier = RebuildVerifier(self.fixture.store.path, self.fixture.manifest,
+                                   projection_root=self.fixture.projections)
+        self.fixture.manifest["expected_batches"][0]["member_version_ids"].clear()
+        self.assertTrue(verifier.verify().complete)
+
+    def test_source_write_during_verification_cannot_change_its_snapshot(self):
+        verifier = RebuildVerifier(self.fixture.store.path, self.fixture.manifest,
+                                   projection_root=self.fixture.projections)
+        members = verifier._verify_members
+        def mutate_source():
+            with self.fixture.store.transaction() as db:
+                db.execute("UPDATE source_records SET text='changed after snapshot' WHERE source_id='one'")
+            members()
+        with patch.object(verifier, "_verify_members", side_effect=mutate_source):
+            self.assertTrue(verifier.verify().complete)
+        self.assertIn("source_payload_identity_mismatch", self.codes(verifier.verify()))
+
+    def test_private_verification_scratch_is_removed_after_unexpected_failure(self):
+        verifier = RebuildVerifier(self.fixture.store.path, self.fixture.manifest,
+                                   projection_root=self.fixture.projections)
+        original = sqlite3.connect
+        scratch, connections = [], []
+        def connect(path, *args, **kwargs):
+            result = original(path, *args, **kwargs)
+            connections.append(result)
+            if not str(path).startswith("file:") and str(path) != ":memory:":
+                scratch.append(Path(path))
+                self.assertEqual(Path(path).stat().st_mode & 0o077, 0)
+                self.assertEqual(Path(path).parent.stat().st_mode & 0o077, 0)
+            return result
+        with patch("sqlite3.connect", side_effect=connect), \
+                patch.object(verifier, "_verify_members", side_effect=RuntimeError("synthetic interruption")):
+            with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+                verifier.verify()
+        self.assertTrue(scratch)
+        self.assertTrue(all(not path.parent.exists() for path in scratch))
+        for connection in connections:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
+    def test_unavailable_scratch_cannot_be_a_successful_acceptance(self):
+        for failure in (OSError("synthetic scratch unavailable"), sqlite3.OperationalError("synthetic full")):
+            if isinstance(failure, sqlite3.Error):
+                failure.sqlite_errorcode = 13  # SQLITE_FULL, without filling a real volume.
+            with self.subTest(failure=type(failure).__name__), \
+                    patch("core.semantic.verification.workspace", side_effect=failure):
+                report = self.fixture.verify()
+            self.assertFalse(report.complete)
+            self.assertEqual(self.codes(report), {"verification_input_unavailable"})
 
     def test_complete_requires_actual_receipts_projections_and_index(self):
         report = self.fixture.verify()

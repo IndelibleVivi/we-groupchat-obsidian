@@ -24,6 +24,7 @@ from .attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata, so
 from .legacy import (LegacyError, LegacyInventory, legacy_resources,
                      _checked_path, _read_regular, _relative, _under)
 from .projections import ReadingError, property_value, region_body
+from .verification_storage import GroupMap, RowMap, Rows, ScratchMap, freeze_json, workspace
 
 
 def _json(value):
@@ -66,7 +67,7 @@ class RebuildVerifier:
         self.store_path = store_path
         # Freeze the caller's nested object; validation is reported content-free.
         try:
-            self.manifest = _load(_json(dict(manifest)))
+            self.manifest = freeze_json(dict(manifest))
         except (TypeError, ValueError):
             self.manifest = {}
         self.projection_root = projection_root
@@ -81,97 +82,122 @@ class RebuildVerifier:
         return name in self.tables
 
     def _rows(self, table):
-        return [dict(r) for r in self.db.execute(f'SELECT * FROM "{table}"')]
+        return Rows(self.db, f'SELECT * FROM "{table}"')
 
     def verify(self) -> VerificationReport:
         self._issues.clear()
         self.counts.clear()
-        source = snapshot = None
+        source = None
         try:
             path = _checked_path(self.store_path)
             source = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
             source.execute("PRAGMA query_only=ON")
-            snapshot = sqlite3.connect(":memory:")
-            source.backup(snapshot)
-            snapshot.row_factory = sqlite3.Row
-            snapshot.execute("PRAGMA query_only=ON")
-            self.db = snapshot
-            self.tables = {r[0] for r in snapshot.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            required = {"generation_manifest", "source_records", "source_heads", "capture_batches", "capture_batch_members",
-                        "source_spans", "observations", "observation_evidence", "content_units",
-                        "items", "item_observations", "item_revisions", "source_dispositions",
-                        "accepted_job_artifacts", "extraction_receipts", "processing_receipts",
-                        "action_receipts", "decision_log", "projection_outbox", "index_outbox",
-                        "source_resource_refs", "resource_refs", "canonical_transactions",
-                        "source_core_jobs", "change_events", "jobs"}
-            if not required <= self.tables:
-                self.issue("canonical_schema_missing")
-            else:
-                self._verify_canonical()
-                self._verify_legacy()
+            source.execute("PRAGMA cache_size=-4096")
+            with workspace(source) as (self.db, self.scratch):
+                source.close()
+                source = None
+                self.tables = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                required = {"generation_manifest", "source_records", "source_heads", "capture_batches", "capture_batch_members",
+                            "source_spans", "observations", "observation_evidence", "content_units",
+                            "items", "item_observations", "item_revisions", "source_dispositions",
+                            "accepted_job_artifacts", "extraction_receipts", "processing_receipts",
+                            "action_receipts", "decision_log", "projection_outbox", "index_outbox",
+                            "source_resource_refs", "resource_refs", "canonical_transactions",
+                            "source_core_jobs", "change_events", "jobs"}
+                if not required <= self.tables:
+                    self.issue("canonical_schema_missing")
+                else:
+                    # These indexes exist only on the disposable copy. Point and
+                    # group lookups must not trade corpus RAM for repeated scans.
+                    for table, columns in (("action_receipts", "job_id"), ("canonical_transactions", "job_id"),
+                            ("processing_receipts", "transaction_id"), ("extraction_receipts", "batch_id"),
+                            ("item_observations", "observation_id"), ("legacy_mappings", "legacy_id"),
+                            ("legacy_mappings", "target_id,kind"), ("projection_outbox", "transaction_id"),
+                            ("index_outbox", "transaction_id")):
+                        if table in self.tables:
+                            name = "verification_" + table + "_" + columns.replace(",", "_")
+                            self.db.execute(f'CREATE INDEX IF NOT EXISTS "{name}" ON "{table}"({columns})')
+                    self.db.execute("PRAGMA query_only=ON")
+                    self._verify_canonical()
+                    self._verify_legacy()
         except (LegacyError, OSError):
             self.issue("verification_input_unavailable")
-        except (sqlite3.Error, ValueError, TypeError, KeyError, IndexError, OverflowError, AttributeError):
+        except sqlite3.Error as exc:
+            # SQLite primary codes: NOMEM, IOERR, FULL and CANTOPEN describe
+            # unavailable verification storage rather than invalid evidence.
+            code = (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xff
+            self.issue("verification_input_unavailable" if code in {7, 10, 13, 14}
+                       else "verification_evidence_malformed")
+        except (ValueError, TypeError, KeyError, IndexError, OverflowError, AttributeError):
             self.issue("verification_evidence_malformed")
         finally:
             if source is not None:
                 source.close()
-            if snapshot is not None:
-                snapshot.close()
+            # A retained verifier can be called again, but must not retain the
+            # previous run's rows, decoded payloads, metadata sets or connections.
+            for key in ("db", "scratch", "tables", "generation", "sources", "source_resources", "batches", "members",
+                        "accepted", "extractions", "extraction_inputs", "processing", "transactions", "outboxes",
+                        "dispositions", "actions", "observations", "items", "spans", "evidence", "observed_versions",
+                        "item_observations", "item_content_observations", "projection_id_paths"):
+                self.__dict__.pop(key, None)
         issues = tuple(VerificationIssue(code, category, count)
                        for (category, code), count in sorted(self._issues.items()))
         return VerificationReport(not issues, issues, dict(sorted(self.counts.items())))
 
     def _verify_canonical(self):
-        generations = self._rows("generation_manifest")
+        generations = list(self._rows("generation_manifest"))
         self.generation = self.manifest.get("generation_id")
         if (len(generations) != 1 or not self.generation
                 or generations[0]["generation_id"] != self.generation
                 or generations[0]["schema"] != "we-groupchat-obsidian.semantic.v1"):
             self.issue("generation_binding_mismatch")
-        self.issue("foreign_key_violation", count=len(self.db.execute("PRAGMA foreign_key_check").fetchall()))
+        self.issue("foreign_key_violation", count=sum(1 for _ in self.db.execute("PRAGMA foreign_key_check")))
         if [r[0] for r in self.db.execute("PRAGMA quick_check")] != ["ok"]:
             self.issue("canonical_integrity_failed")
-        self.sources = {r["source_version_id"]: r for r in self._rows("source_records")}
-        self.source_resources = defaultdict(list)
-        for row in self.db.execute("SELECT * FROM source_resource_refs ORDER BY resource_id,occurrence_id"):
+        def rows(table, key, order=""):
+            return RowMap(self.db, f'SELECT * FROM "{table}"' + order, key)
+        self.sources = rows("source_records", "source_version_id")
+        def resource(row):
             value = {k: row[k] for k in ("resource_id", "occurrence_id", "purpose", "status", "location")}
             value["metadata"] = _load(row["metadata_json"])
+            return value
+        for row in self.db.execute("SELECT * FROM source_resource_refs"):
+            value = resource(row)
             if (any(not isinstance(value[k], str) or not value[k].strip()
                     for k in ("resource_id", "occurrence_id", "purpose", "status"))
                     or value["location"] is not None and not isinstance(value["location"], str)
                     or not isinstance(value["metadata"], dict)):
                 self.issue("source_resource_invalid")
-            self.source_resources[row["source_version_id"]].append(value)
-        self.batches = {r["batch_id"]: r for r in self.db.execute("SELECT * FROM capture_batches ORDER BY rowid")}
+        self.source_resources = GroupMap(self.db, "source_resource_refs", "source_version_id",
+                                         order="resource_id,occurrence_id", transform=resource)
+        self.batches = rows("capture_batches", "batch_id", " ORDER BY rowid")
         if not self.batches:
             self.issue("capture_evidence_missing", "source_pending")
-        self.members = defaultdict(list)
-        for row in self.db.execute("SELECT * FROM capture_batch_members ORDER BY batch_id,ordinal"):
-            self.members[row["batch_id"]].append(dict(row))
-        self.accepted = {r["job_id"]: r for r in self._rows("accepted_job_artifacts")}
-        self.extractions = {r["job_id"]: r for r in self._rows("extraction_receipts")}
-        self.extraction_inputs = {}
-        self.processing = {r["batch_id"]: r for r in self._rows("processing_receipts")}
-        self.transactions = {r["transaction_id"]: r for r in self._rows("canonical_transactions")}
-        self.outboxes = {r["outbox_id"]: {**r, "kind": kind} for kind in ("projection", "index")
-                        for r in self._rows(kind + "_outbox")}
-        self.dispositions = {r["source_version_id"]: r for r in self._rows("source_dispositions")}
-        self.actions = {r["action_key"]: r for r in self._rows("action_receipts")}
-        self.observations = {r["observation_id"]: r for r in self._rows("observations")}
-        self.items = {r["item_id"]: r for r in self._rows("items")}
-        self.spans = {r["span_id"]: r for r in self._rows("source_spans")}
-        self.evidence = defaultdict(set)
-        for row in self._rows("observation_evidence"):
-            self.evidence[row["observation_id"]].add(row["span_id"])
-        self.observed_versions = {self.spans[s]["source_version_id"] for spans in self.evidence.values()
-                                  for s in spans if s in self.spans}
-        self.item_observations = defaultdict(set)
-        self.item_content_observations = defaultdict(set)
+        self.members = GroupMap(self.db, "capture_batch_members", "batch_id", order="ordinal")
+        self.accepted = rows("accepted_job_artifacts", "job_id")
+        self.extractions = rows("extraction_receipts", "job_id")
+        self.extraction_inputs = ScratchMap(self.scratch, "extraction_inputs")
+        self.processing = rows("processing_receipts", "batch_id")
+        self.transactions = rows("canonical_transactions", "transaction_id")
+        self.outboxes = RowMap(self.db, "SELECT p.outbox_id,p.owner_id,NULL AS owner_type,p.revision,p.transaction_id,"
+            "p.status,p.receipt_id,'projection' AS kind FROM projection_outbox p WHERE NOT EXISTS "
+            "(SELECT 1 FROM index_outbox i WHERE i.outbox_id=p.outbox_id) UNION ALL "
+            "SELECT outbox_id,owner_id,owner_type,revision,transaction_id,status,receipt_id,'index' AS kind FROM index_outbox",
+            "outbox_id")
+        self.dispositions = rows("source_dispositions", "source_version_id")
+        self.actions = rows("action_receipts", "action_key")
+        self.observations = rows("observations", "observation_id")
+        self.items = rows("items", "item_id")
+        self.spans = rows("source_spans", "span_id")
+        self.evidence = GroupMap(self.db, "observation_evidence", "observation_id",
+                                 transform=lambda r: r["span_id"], collection=set)
+        self.observed_versions = {r[0] for r in self.db.execute("SELECT DISTINCT s.source_version_id "
+            "FROM source_spans s JOIN observation_evidence e USING(span_id)")}
+        self.item_observations = GroupMap(self.db, "item_observations", "item_id",
+                                         transform=lambda r: r["observation_id"], collection=set)
+        self.item_content_observations = GroupMap(self.db, "item_observations", "item_id", clause="role<>'evidence_only'",
+                                                 transform=lambda r: r["observation_id"], collection=set)
         for row in self._rows("item_observations"):
-            self.item_observations[row["item_id"]].add(row["observation_id"])
-            if row["role"] != "evidence_only":
-                self.item_content_observations[row["item_id"]].add(row["observation_id"])
             if row["added_by"] not in self.actions:
                 self.issue("item_action_receipt_missing")
         self.counts.update(captured_versions=len(self.sources), capture_batches=len(self.batches),
@@ -183,8 +209,8 @@ class RebuildVerifier:
         self._verify_actions()
         self._verify_transactions()
         self._verify_prefix()
-        active = [r for r in self.items.values() if r["lifecycle"] == "active"
-                  and self.item_observations[r["item_id"]]]
+        active = RowMap(self.db, "SELECT * FROM items WHERE lifecycle='active' AND EXISTS "
+                        "(SELECT 1 FROM item_observations m WHERE m.item_id=items.item_id)", "item_id").values()
         self._verify_index(active)
         self._verify_projections(active)
         self._verify_brief()
@@ -282,7 +308,8 @@ class RebuildVerifier:
                 or len(members) != len(actual) or {m.get("source_id") for m in members} != actual.keys()):
             self.issue("extraction_input_mismatch")
             return
-        self.extraction_inputs[job["job_id"]] = {m["source_id"]: m for m in members}
+        self.extraction_inputs[job["job_id"]] = {m["source_id"]: {field: m.get(field)
+            for field in ("subject_id", "case_id", "speaker_id")} for m in members}
         for member in members:
             source = self.sources.get(member["source_id"])
             if source is None:
@@ -300,26 +327,33 @@ class RebuildVerifier:
                 self.issue("extraction_input_mismatch")
 
     def _verify_source_versions(self):
-        groups = defaultdict(list)
-        for source in self.sources.values():
-            groups[(source["source_namespace"], source["chat_id"], source["source_id"])].append(source)
-        heads = {(r["source_namespace"], r["chat_id"], r["source_id"]): r["source_version_id"]
-                 for r in self._rows("source_heads")}
-        if heads.keys() != groups.keys():
+        missing_head = self.db.execute("SELECT 1 FROM source_heads h WHERE NOT EXISTS (SELECT 1 FROM source_records s "
+            "WHERE s.source_namespace=h.source_namespace AND s.chat_id=h.chat_id AND s.source_id=h.source_id) LIMIT 1").fetchone() is not None
+        key, previous, position, head = None, None, 0, None
+        # Only lineage metadata crosses this traversal, never source text/payload.
+        for source in self.db.execute("SELECT source_namespace,chat_id,source_id,source_version_id,revision,"
+                "supersedes_source_version_id,content_hash,native_revision FROM source_records "
+                "ORDER BY source_namespace,chat_id,source_id,revision"):
+            current = (source["source_namespace"], source["chat_id"], source["source_id"])
+            if current != key:
+                if previous is not None and head != previous["source_version_id"]:
+                    self.issue("source_head_not_latest")
+                key, previous, position = current, None, 0
+                row = self.db.execute("SELECT source_version_id FROM source_heads WHERE source_namespace=? AND chat_id=? AND source_id=?", key).fetchone()
+                head = row[0] if row else None
+                missing_head |= row is None
+            position += 1
+            if (source["revision"] != position or source["supersedes_source_version_id"] !=
+                    (previous["source_version_id"] if previous else None)):
+                self.issue("source_version_lineage_invalid")
+            if (previous is not None and source["content_hash"] == previous["content_hash"]
+                    and source["native_revision"] == previous["native_revision"]):
+                self.issue("source_repetition_created_version")
+            previous = source
+        if previous is not None and head != previous["source_version_id"]:
+            self.issue("source_head_not_latest")
+        if missing_head:
             self.issue("source_head_set_mismatch")
-        for key, versions in groups.items():
-            versions.sort(key=lambda row: row["revision"])
-            previous = None
-            for revision, source in enumerate(versions, 1):
-                if (source["revision"] != revision or source["supersedes_source_version_id"] !=
-                        (previous["source_version_id"] if previous else None)):
-                    self.issue("source_version_lineage_invalid")
-                if (previous is not None and source["content_hash"] == previous["content_hash"]
-                        and source["native_revision"] == previous["native_revision"]):
-                    self.issue("source_repetition_created_version")
-                previous = source
-            if heads.get(key) != versions[-1]["source_version_id"]:
-                self.issue("source_head_not_latest")
 
     def _verify_evidence(self):
         for sid, span in self.spans.items():
@@ -345,7 +379,7 @@ class RebuildVerifier:
             if not any(self.spans[s]["source_version_id"] in core for s in spans):
                 self.issue("observation_core_evidence_missing")
             if (observation["resolution_status"] == "unresolved" or
-                    not any(oid in values for values in self.item_observations.values())):
+                    not self.db.execute("SELECT 1 FROM item_observations WHERE observation_id=? LIMIT 1", (oid,)).fetchone()):
                 self.issue("observation_resolution_pending", "semantic_pending")
             units = self.db.execute("SELECT * FROM content_units WHERE observation_id=?", (oid,)).fetchall()
             if not units:
@@ -408,8 +442,8 @@ class RebuildVerifier:
                         or scopes[0] != scopes[1] or not scope["observation_ids"]
                         or len(set(scope["observation_ids"])) != len(scope["observation_ids"])
                         or scope["batch_id"] not in self.batches or old_id in decisions
-                        or any(value["job_id"] == old_id for value in self.actions.values())
-                        or any(value["job_id"] == old_id for value in self.transactions.values())):
+                        or bool(self.actions.values().where("job_id=?", (old_id,)))
+                        or bool(self.transactions.values().where("job_id=?", (old_id,)))):
                     raise ValueError
                 old_read, new_read = old["read_set"], new["read_set"]
                 for read, inputs in ((old_read, old_inputs), (new_read, new_inputs)):
@@ -456,8 +490,8 @@ class RebuildVerifier:
                 for oid in scope["observation_ids"]:
                     observation, binding = self.observations[oid], frozen[oid]
                     if (observation["resolution_status"] != "resolved"
-                            or not any(oid in members and self.items[iid]["lifecycle"] == "active"
-                                       for iid, members in self.item_observations.items())):
+                            or not self.db.execute("SELECT 1 FROM item_observations m JOIN items i USING(item_id) "
+                                "WHERE m.observation_id=? AND i.lifecycle='active' LIMIT 1", (oid,)).fetchone()):
                         raise ValueError
                     extraction = self.extractions[observation["accepted_job_id"]]
                     sources = sorted({self.spans[s]["source_version_id"] for s in self.evidence[oid]})
@@ -493,8 +527,8 @@ class RebuildVerifier:
         return valid
 
     def _verify_actions(self):
-        decisions = {r["job_id"]: r for r in self._rows("decision_log")}
-        jobs = {r["job_id"]: r for r in self._rows("jobs")}
+        decisions = RowMap(self.db, "SELECT * FROM decision_log", "job_id")
+        jobs = RowMap(self.db, "SELECT * FROM jobs", "job_id")
         for job in jobs.values():
             if job["kind"] in {"propose", "decision"} and job["state"] == "unknown":
                 self.issue("proposal_outcome_unknown", "semantic_pending")
@@ -524,7 +558,7 @@ class RebuildVerifier:
                     or receipt.get("generation_id") != self.generation):
                 self.issue("action_receipt_invalid")
         for job_id, decision in decisions.items():
-            rows = [a for a in self.actions.values() if a["job_id"] == job_id]
+            rows = list(Rows(self.db, "SELECT * FROM action_receipts WHERE job_id=?", (job_id,)))
             if not rows:
                 self.issue("accepted_action_receipt_missing")
             receipt = _load(decision["receipt_json"])
@@ -559,9 +593,8 @@ class RebuildVerifier:
             elif outbox["status"] == "done" and not outbox["receipt_id"]:
                 self.issue("outbox_receipt_missing")
             elif outbox["status"] == "superseded" and (outbox["kind"] != "projection" or
-                    not outbox["receipt_id"] or not any(new["kind"] == "projection" and
-                    new["owner_id"] == outbox["owner_id"] and new["revision"] > outbox["revision"] and
-                    new["status"] == "done" and new["receipt_id"] == outbox["receipt_id"] for new in self.outboxes.values())):
+                    not outbox["receipt_id"] or not self.outboxes.values().where("kind='projection' AND owner_id=? AND revision>? AND status='done' AND receipt_id=?",
+                        (outbox["owner_id"], outbox["revision"], outbox["receipt_id"]))):
                 self.issue("outbox_supersession_unproved")
         for tx, row in self.transactions.items():
             actions, outboxes = _load(row["actions_json"]), _load(row["outbox_ids_json"])
@@ -572,28 +605,32 @@ class RebuildVerifier:
             if not set(outboxes) <= self.outboxes.keys():
                 self.issue("canonical_outbox_missing")
             if actions[0]["type"] == "COMPLETE_BATCH":
-                if not any(p["transaction_id"] == tx for p in self.processing.values()):
+                if not self.processing.values().where("transaction_id=?", (tx,)):
                     self.issue("processing_transaction_orphaned")
                 continue
             if actions[0]["type"] == "MIGRATION":
                 migration = self.db.execute("SELECT receipt_json FROM semantic_migration_receipts WHERE receipt_id=?",
                                             (tx,)).fetchone() if self._has("semantic_migration_receipts") else None
                 receipt = _load(migration[0]) if migration else {}
-                processing = {p["receipt_id"]: _load(p["receipt_json"]) for p in self.processing.values()}
+                processing = RowMap(self.db, "SELECT * FROM processing_receipts", "receipt_id")
                 references = receipt.get("processing_receipt_ids", [])
                 if (not migration or receipt.get("semantic_generation_id") != self.generation
                         or any(receipt.get(k) != tx for k in ("receipt_id", "migration_id", "canonical_receipt_id", "outbox_receipt_id"))
                         or len(references) != len(set(references)) or not set(references) <= processing.keys()):
                     self.issue("migration_receipt_invalid")
                     continue
-                capture_ids = [cid for pid in references for cid in processing[pid]["capture_receipt_ids"]]
-                borrowed = sorted({oid for pid in references for oid in processing[pid]["outbox_ids"]})
+                capture_ids, borrowed_ids = [], set()
+                for pid in references:
+                    proof = _load(processing[pid]["receipt_json"])
+                    capture_ids.extend(proof["capture_receipt_ids"])
+                    borrowed_ids.update(proof["outbox_ids"])
+                borrowed = sorted(borrowed_ids)
                 expected = {"type": "MIGRATION", "receipt_id": tx,
                             "processing_receipt_ids": references, "capture_receipt_ids": capture_ids}
                 if receipt.get("capture_receipt_ids") != capture_ids or actions != [expected] or outboxes != borrowed:
                     self.issue("migration_proof_membership_mismatch")
                 continue
-            actual = {o["outbox_id"] for o in self.outboxes.values() if o["transaction_id"] == tx}
+            actual = {o["outbox_id"] for o in self.outboxes.values().where("transaction_id=?", (tx,))}
             if set(outboxes) != actual:
                 self.issue("canonical_outbox_membership_mismatch")
             if row["job_id"] is not None:
@@ -618,8 +655,8 @@ class RebuildVerifier:
                         self.issue("canonical_action_membership_mismatch")
             for revision in self.db.execute("SELECT * FROM item_revisions WHERE transaction_id=?", (tx,)):
                 for kind in ("projection", "index"):
-                    if not any(o["kind"] == kind and o["owner_id"] == revision["item_id"] and
-                               o["revision"] == revision["revision"] and o["transaction_id"] == tx for o in self.outboxes.values()):
+                    if not self.outboxes.values().where("kind=? AND owner_id=? AND revision=? AND transaction_id=?",
+                            (kind, revision["item_id"], revision["revision"], tx)):
                         self.issue("item_transaction_outbox_missing")
                 if not self.db.execute("SELECT 1 FROM change_events WHERE item_id=? AND revision=? AND transaction_id=?",
                     (revision["item_id"], revision["revision"], tx)).fetchone():
@@ -631,7 +668,7 @@ class RebuildVerifier:
             self.issue("processing_proof_missing")
             return
         core, observed = [], set()
-        extraction_ids = {r["receipt_id"] for r in self.extractions.values() if r["batch_id"] == batch["batch_id"]}
+        extraction_ids = {r[0] for r in self.db.execute("SELECT receipt_id FROM extraction_receipts WHERE batch_id=?", (batch["batch_id"],))}
         if not extraction_ids:
             self.issue("processing_extraction_receipt_missing")
         for member in self.members[batch["batch_id"]]:
@@ -731,9 +768,9 @@ class RebuildVerifier:
                            or bid in declared_legacy for bid in ids)):
                 self.issue("legacy_capture_pass_invalid")
                 continue
-            rows = [self.batches[bid] for bid in ids]
-            if (any(v[1] != (0, 0) for v in self._vector(_load(rows[0]["input_cursors_json"])).values())
-                    or rows[-1]["source_eof"] != 1):
+            first, last = self.batches[ids[0]], self.batches[ids[-1]]
+            if (any(v[1] != (0, 0) for v in self._vector(_load(first["input_cursors_json"])).values())
+                    or last["source_eof"] != 1):
                 self.issue("legacy_capture_pass_incomplete")
             for bid in ids:
                 passes[bid] = {"receipt_id": "legacy:" + receipt["receipt_id"], "h1": []}
@@ -748,23 +785,24 @@ class RebuildVerifier:
         groups = defaultdict(list)
         for batch in self.batches.values():
             pass_id = passes.get(batch["batch_id"], {}).get("receipt_id", "continuous")
-            groups[(batch["source_namespace"], batch["chat_id"], pass_id)].append(batch)
+            groups[(batch["source_namespace"], batch["chat_id"], pass_id)].append(batch["batch_id"])
         h1 = self.manifest.get("h1")
         if not isinstance(h1, list):
             self.issue("source_h1_missing", "source_pending")
             h1 = []
         expected = {(r["source_namespace"], r["chat_id"]): r for r in h1}
-        live_groups = {key[:2] for key, rows in groups.items() if any(r["purpose"] != "legacy_import" for r in rows)}
+        live_groups = {key[:2] for key, rows in groups.items() if any(self.batches[bid]["purpose"] != "legacy_import" for bid in rows)}
         if len(expected) != len(h1) or expected.keys() != live_groups:
             self.issue("source_h1_chat_set_mismatch", "source_pending")
         positions = {bid: position for position, bid in enumerate(self.batches)}
-        ordered_groups = sorted(groups.items(), key=lambda pair: positions[pair[1][-1]["batch_id"]])
-        last_group = {key[:2]: key for key, rows in ordered_groups if any(r["purpose"] != "legacy_import" for r in rows)}
+        ordered_groups = sorted(groups.items(), key=lambda pair: positions[pair[1][-1]])
+        last_group = {key[:2]: key for key, rows in ordered_groups if any(self.batches[bid]["purpose"] != "legacy_import" for bid in rows)}
         for key, batches in groups.items():
             previous, applied = None, None
             gap = False
             seen_versions = set()
-            for batch in batches:
+            for bid in batches:
+                batch = self.batches[bid]
                 incoming, outgoing = _load(batch["input_cursors_json"]), _load(batch["output_cursors_json"])
                 a, b = self._vector(incoming), self._vector(outgoing)
                 if a.keys() != b.keys() or any(a[s][0] != b[s][0] or a[s][1] > b[s][1] for s in a):
@@ -813,7 +851,7 @@ class RebuildVerifier:
                 a, b = self._vector(applied), self._vector(previous)
                 if a.keys() != b.keys() or any(a[s][0] != b[s][0] or a[s][1] > b[s][1] for s in a):
                     self.issue("applied_exceeds_captured")
-            tail = batches[-1]
+            tail = self.batches[batches[-1]]
             pass_receipt = passes.get(tail["batch_id"])
             pass_h1 = {(r["source_namespace"], r["chat_id"]): r for r in pass_receipt["h1"]} if pass_receipt else {}
             cutoff = expected.get(key[:2]) if last_group.get(key[:2]) == key else pass_h1.get(key[:2])
@@ -867,20 +905,20 @@ class RebuildVerifier:
             groups = defaultdict(list)
             for bid in ids:
                 row = self.batches[bid]
-                groups[(row["source_namespace"], row["chat_id"])].append(row)
+                groups[(row["source_namespace"], row["chat_id"])].append(bid)
                 by_batch[bid] = receipt
             boundaries = receipt.get("h1", [])
             h1 = {(r["source_namespace"], r["chat_id"]): r for r in boundaries}
             if len(h1) != len(boundaries) or h1.keys() != groups.keys():
                 self.issue("capture_pass_h1_chat_set_mismatch")
             for key, rows in groups.items():
-                initial = _load(rows[0]["input_cursors_json"])
+                initial = _load(self.batches[rows[0]]["input_cursors_json"])
                 if any(position[1] != (0, 0) for position in self._vector(initial).values()):
                     self.issue("capture_pass_initial_cursor_invalid")
                 if any(_load(row.get("start_cursor", "[0,0]")) != [0, 0] for row in initial.values()):
                     self.issue("capture_pass_initial_cursor_invalid")
                 boundary = h1.get(key)
-                tail = rows[-1]
+                tail = self.batches[rows[-1]]
                 if (boundary is None or tail["source_eof"] != 1
                         or _load(tail["output_cursors_json"]) != boundary["cursors"]
                         or tail["inventory_digest"] != boundary["inventory_digest"]
@@ -915,13 +953,14 @@ class RebuildVerifier:
             groups = defaultdict(list)
             for bid in ids:
                 row = self.batches[bid]
-                groups[(row["source_namespace"], row["chat_id"])].append(row)
+                groups[(row["source_namespace"], row["chat_id"])].append(bid)
                 by_batch[bid] = {"receipt_id": identity, "h1": [],
                     "source_inventory": {"complete": False, "digest": row["inventory_digest"], "revision": row["inventory_revision"]}}
             for rows in groups.values():
-                if any(position[1] != (0, 0) for position in self._vector(_load(rows[0]["input_cursors_json"])).values()):
+                if any(position[1] != (0, 0) for position in self._vector(_load(self.batches[rows[0]]["input_cursors_json"])).values()):
                     self.issue("abandoned_capture_pass_initial_cursor_invalid")
-                if any(row["inventory_digest"] != rows[0]["inventory_digest"] or row["inventory_revision"] != rows[0]["inventory_revision"] for row in rows):
+                if any(self.batches[bid]["inventory_digest"] != self.batches[rows[0]]["inventory_digest"]
+                       or self.batches[bid]["inventory_revision"] != self.batches[rows[0]]["inventory_revision"] for bid in rows):
                     self.issue("abandoned_capture_pass_inventory_changed")
         if any(row["purpose"].startswith("snapshot:") and bid not in by_batch for bid, row in self.batches.items()):
             self.issue("capture_pass_undeclared_reset")
@@ -949,7 +988,7 @@ class RebuildVerifier:
         except (ProviderError, TypeError, ValueError):
             self.issue("embedding_profile_invalid")
             return
-        confirmed = {}
+        confirmed = ScratchMap(self.scratch, "confirmed_vectors")
         for row in self.db.execute("SELECT * FROM semantic_index_receipts WHERE profile_id=? AND generation_id=? AND index_identity=? ORDER BY sequence",
                                    (profile_id, self.generation, index_id)):
             if row["status"] != "indexed" or row["receipt_json"] is None:
@@ -1055,14 +1094,19 @@ class RebuildVerifier:
 
     def _verify_projections(self, items):
         self.projection_id_paths = defaultdict(list)
-        body_artifacts = defaultdict(list)
+        self.scratch.execute("CREATE TABLE body_artifact_refs(item_id TEXT,request_id TEXT)")
+        self.scratch.execute("CREATE INDEX body_artifact_item ON body_artifact_refs(item_id)")
         if self.manifest.get("rebuild_reading_required") and self._has("reader_text_artifacts"):
             for row in self.db.execute("SELECT * FROM reader_text_artifacts WHERE generation_id=?", (self.generation,)):
                 if not row["artifact_json"]:
                     continue
                 body = _load(row["artifact_json"])
                 if isinstance(body, dict) and isinstance(body.get("item_id"), str) and "blocks" in body:
-                    body_artifacts[body["item_id"]].append((row, body))
+                    self.scratch.execute("INSERT INTO body_artifact_refs VALUES (?,?)", (body["item_id"], row["request_id"]))
+        def body_artifacts(item_id):
+            for reference in self.scratch.execute("SELECT request_id FROM body_artifact_refs WHERE item_id=?", (item_id,)):
+                row = self.db.execute("SELECT * FROM reader_text_artifacts WHERE request_id=?", (reference[0],)).fetchone()
+                yield row, _load(row["artifact_json"])
         if (items or self.manifest.get("legacy_inventory") or self.manifest.get("required_brief")) and self.projection_root is not None:
             try:
                 root = _checked_path(self.projection_root, directory=True)
@@ -1096,7 +1140,7 @@ class RebuildVerifier:
                 if expected is not None and (expected.get("item_id") != iid or expected.get("content_revision") != revision):
                     self.issue("body_plan_binding_mismatch")
                     expected = None
-                for artifact, body in body_artifacts[iid] if expected is not None else ():
+                for artifact, body in body_artifacts(iid) if expected is not None else ():
                     old_revision = body.get("content_revision")
                     # An unchanged body can be carried to a later Item revision
                     # without another provider call. Preserve exact blocks and
@@ -1104,7 +1148,7 @@ class RebuildVerifier:
                     if (type(old_revision) is int and 0 < old_revision <= revision
                             and body == {**expected, "content_revision": old_revision}
                             and artifact["provider_route"] == self.manifest.get("required_brief", {}).get("provider_route")):
-                        matches.append(artifact)
+                        matches.append({key: artifact[key] for key in ("status", "prompt_version")})
                 if not matches or not any(a["status"] == "accepted" for a in matches):
                     self.issue("body_provider_artifact_missing", "semantic_pending")
                 elif not any(a["status"] == "accepted" and a["prompt_version"] in {
@@ -1376,11 +1420,10 @@ class RebuildVerifier:
         if not {"legacy_mappings", "annotation_preservation"} <= self.tables:
             self.issue("legacy_conservation_tables_missing")
             return
-        mappings = self._rows("legacy_mappings")
-        by_legacy = defaultdict(list)
-        for mapping in mappings:
-            mapping["metadata"] = _load(mapping["metadata_json"])
-            by_legacy[mapping["legacy_id"]].append(mapping)
+        def legacy_row(row):
+            return {**dict(row), "metadata": _load(row["metadata_json"])}
+        mappings = Rows(self.db, "SELECT * FROM legacy_mappings", transform=legacy_row)
+        by_legacy = GroupMap(self.db, "legacy_mappings", "legacy_id", transform=legacy_row)
         for record in inventory.records:
             targets = [r for r in by_legacy[record.legacy_ref] if r["target_type"] == "source_version"]
             valid = False
@@ -1399,7 +1442,7 @@ class RebuildVerifier:
             if not valid:
                 self.issue("legacy_record_unaccounted")
         for external in inventory.external_files:
-            targets = [r for r in mappings if r["kind"] == "external_file" and r["target_id"] == external["sha256"]
+            targets = [r for r in mappings.where("kind='external_file' AND target_id=?", (external["sha256"],)) if r["kind"] == "external_file" and r["target_id"] == external["sha256"]
                        and r["metadata"].get("file") == external and r["disposition"] == "preserved_in_place"]
             if not targets:
                 self.issue("legacy_external_file_unaccounted")
@@ -1411,13 +1454,14 @@ class RebuildVerifier:
                     self.issue("legacy_external_bytes_changed")
             except LegacyError:
                 self.issue("legacy_external_backup_missing", "projection_pending")
-        selection = [r for r in mappings if r["kind"] == "selection" and r["legacy_id"] == inventory.namespace
+        selection = [r for r in mappings.where("kind='selection' AND legacy_id=?", (inventory.namespace,)) if r["kind"] == "selection" and r["legacy_id"] == inventory.namespace
                      and r["target_id"] == manifest_id and r["disposition"] == "preserved_no_subscription"]
         if not any(r["metadata"] == inventory.selection_snapshot for r in selection):
             self.issue("legacy_selection_unaccounted")
         for file in inventory.files:
             if not any(r["kind"] == "file" and r["target_id"] == file.sha256
-                       and r["metadata"].get("file") == _load(_json(asdict(file))) for r in mappings):
+                       and r["metadata"].get("file") == _load(_json(asdict(file)))
+                       for r in mappings.where("kind='file' AND target_id=?", (file.sha256,))):
                 self.issue("legacy_file_unaccounted")
             try:
                 root = _checked_path(inventory.managed_root, directory=True)
@@ -1470,7 +1514,7 @@ class RebuildVerifier:
                         label = label.replace("<", "&lt;").replace(">", "&gt;").replace("\n", " ")
                         if body.count("- " + label + " ^queue-" + record.legacy_ref[:20]) != 1:
                             self.issue("legacy_queue_transition_unaccounted")
-                    receipts = [r for r in mappings if r["kind"] == "queue_navigation"
+                    receipts = [r for r in mappings.where("kind='queue_navigation'") if r["kind"] == "queue_navigation"
                                 and r["metadata"].get("manifest_id") == inventory.manifest_id
                                 and r["metadata"].get("queue") == queue]
                     if not any(self._projection_ready(r["target_id"], r["metadata"]["receipt"]["content_revision"]) for r in receipts):
@@ -1502,8 +1546,8 @@ class RebuildVerifier:
                                topic in r.payload.get("topic_refs", ())}
             allowed_versions = set().union(*(captured_versions[ref] for ref in family))
             if not targets:
-                dispositions = {r["source_version_id"]: r for r in self._rows("source_dispositions")}
-                history = [r for r in mappings if r["kind"] == "topic" and r["legacy_id"] == topic
+                dispositions = self.dispositions
+                history = [r for r in mappings.where("legacy_id=?", (topic,)) if r["kind"] == "topic" and r["legacy_id"] == topic
                            and r["target_type"] == "history_topic" and r["disposition"] == "history_preserved"]
                 valid = bool(allowed_versions) and any(
                     set(_load(r["metadata_json"]).get("source_version_ids", ())) == allowed_versions
@@ -1516,12 +1560,12 @@ class RebuildVerifier:
                         valid = False
                 if not valid:
                     self.issue("legacy_history_disposition_missing")
-            current = {r["target_id"] for r in mappings if r["kind"] == "topic" and r["legacy_id"] == topic
+            current = {r["target_id"] for r in mappings.where("legacy_id=?", (topic,)) if r["kind"] == "topic" and r["legacy_id"] == topic
                        and r["target_type"] == "item" and r["disposition"] == "resolved"}
             if current != set(targets):
                 self.issue("legacy_topic_mapping_cardinality_mismatch")
             for target in targets:
-                links = [r for r in mappings if r["legacy_id"] == topic and r["target_type"] == "item"
+                links = [r for r in mappings.where("legacy_id=?", (topic,)) if r["legacy_id"] == topic and r["target_type"] == "item"
                          and r["target_id"] == target and r["disposition"] == "resolved"]
                 if not links:
                     self.issue("legacy_topic_mapping_receipt_missing")
@@ -1568,7 +1612,8 @@ class RebuildVerifier:
                 current = self._projection_bytes(page["navigation_path"]).decode()
                 if navigation.strip() != current.strip() and region_body(current, "body") != "\n" + navigation.strip("\n") + "\n":
                     self.issue("legacy_navigation_content_mismatch")
-                published = [r for r in mappings if r["kind"] == "navigation" and r["target_type"] == "projection"
+                published = [r for r in mappings.where("kind='navigation' AND target_type='projection' "
+                    "AND json_extract(metadata_json,'$.page.old_path')=?", (page["old_path"],)) if r["kind"] == "navigation" and r["target_type"] == "projection"
                              and _load(r["metadata_json"]).get("page") == page
                              and _load(r["metadata_json"]).get("manifest_id") == inventory.manifest_id]
                 if not any(self._projection_ready(r["target_id"],

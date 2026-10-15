@@ -249,7 +249,7 @@ class ReaderRuntime:
             raise ReadingError("attention_evidence_missing")
         return tuple(bindings.values()), tuple(EvidenceTarget(*pair) for pair in sorted(evidence))
 
-    def _send(self, event):
+    def _send(self, event, *, source_revision=None):
         with self.publisher.locked():
             # Observe a property edit made during watch/editor work before
             # crossing the notifier boundary. Binding checks then fail closed.
@@ -257,6 +257,23 @@ class ReaderRuntime:
                 if self.ledger.one("SELECT 1 FROM reader_property_maps WHERE generation_id=? AND object_id=?",
                                     (self.store.generation_id, binding.item_id)):
                     self.controls.sync_properties(binding.item_id)
+            if source_revision is not None and self.controls.preference(event.target_id).known_revision >= source_revision:
+                return None
+            if event.kind == "correction":
+                # An ordinary later revision may give an as-yet-unsent correction
+                # a current target, but never another send for a dispatched one.
+                # Reuse the exact durable event/receipt across target revisions,
+                # including events registered before source-level lookup existed.
+                previous = self.ledger.one("SELECT a.event_id FROM reader_attention_events a "
+                    "JOIN reader_deliveries d USING(event_id) WHERE a.generation_id=? "
+                    "AND json_extract(a.event_json,'$.source_event_id')=? "
+                    "AND json_extract(a.event_json,'$.kind')='correction' "
+                    "AND json_extract(a.event_json,'$.target_id')=? AND d.device_id=? AND d.channel=? "
+                    "AND d.status IN ('accepted','unknown','sending','rejected') ORDER BY a.rowid LIMIT 1",
+                    (self.store.generation_id, event.source_event_id, event.target_id, self.device_id, self.CHANNEL))
+                if previous:
+                    return self.delivery.deliver(previous["event_id"], device_id=self.device_id, channel=self.CHANNEL,
+                                                 notifier=self.notifier, live=self.live)
             identity = fingerprint(json_text([self.store.generation_id, event.source_event_id,
                                                event.kind, event.target_id, event.target_revision]))
             previous = self.ledger.one("SELECT 1 FROM reader_attention_events WHERE event_id=? AND generation_id=?",
@@ -272,18 +289,22 @@ class ReaderRuntime:
         """Bridge exact canonical/watch changes; never performs a source read."""
         with self._lock:
             changes = self._new_changes()
-            latest = {change["item_id"]: change for change in changes}
+            by_item = {}
+            for change in changes:
+                by_item.setdefault(change["item_id"], []).append(change)
             receipts = []
             for item in self.store.list_items():
                 item_id = item["item_id"]
-                change = latest.get(item_id)
-                if change is None or change["revision"] != item["content_revision"]:
+                item_changes = by_item.get(item_id, ())
+                if not item_changes:
                     continue
+                change = item_changes[-1]
                 pref = self.controls.preference(item_id)
                 if pref.mute or pref.known_revision >= item["content_revision"] or not (pref.follow or pref.wait):
                     continue
                 status = self.watches.reader_watch_status(item_id)
-                if status and status.get("preference_revision") == pref.revision and status.get("status") != "stopped":
+                if (change["revision"] == item["content_revision"] and status
+                        and status.get("preference_revision") == pref.revision and status.get("status") != "stopped"):
                     watch = self.watches.get_watch(status["watch_id"]) if status.get("watch_id") else None
                     for watch_change in status.get("changes", ())[-1:]:
                         if watch_change["kind"] not in {"met", "reopened"} or not pref.wait:
@@ -310,18 +331,25 @@ class ReaderRuntime:
                                             else "。支持原结论的证据发生变化，现为 " + current_eval.get("state", "unknown") + "。")
                         receipts.append(self._send(AttentionEvent("watch:" + watch_change["change_id"], item_id,
                             item["content_revision"], title, body, "wait_" + watch_change["kind"], bindings, evidence)))
-                corrections = []
-                for action in json.loads(change["actions_json"]):
-                    relations = [action] if action.get("type") == "CLAIM_RELATION" else action.get("claim_relations", ())
-                    corrections.extend(r for r in relations if r.get("relation") in {
-                        "corrects_or_retracts", "corrects", "retracts", "disputes", "contradicts"}
-                        and r.get("to_claim_id") in item["claim_ids"])
-                if corrections:
+                for correction_change in item_changes:
+                    if correction_change["revision"] <= pref.known_revision:
+                        continue
+                    corrections = []
+                    for action in json.loads(correction_change["actions_json"]):
+                        relations = [action] if action.get("type") == "CLAIM_RELATION" else action.get("claim_relations", ())
+                        corrections.extend(r for r in relations if r.get("relation") in {
+                            "corrects_or_retracts", "corrects", "retracts", "disputes", "contradicts"}
+                            and r.get("to_claim_id") in item["claim_ids"])
+                    if not corrections:
+                        continue
                     ids = {r[key] for r in corrections for key in ("from_claim_id", "to_claim_id")}
                     bindings, evidence = self._claim_dependencies(item_id, ids)
                     reasons = "；".join(dict.fromkeys(r.get("reason") or "相关证据改变了原来的结论" for r in corrections))
-                    receipts.append(self._send(AttentionEvent("correction:" + str(change["change_id"]), item_id,
-                        item["content_revision"], item["title"] + "：关注的内容有更正", reasons, "correction", bindings, evidence)))
+                    receipt = self._send(AttentionEvent("correction:" + str(correction_change["change_id"]), item_id,
+                        item["content_revision"], item["title"] + "：关注的内容有更正", reasons, "correction", bindings, evidence),
+                        source_revision=correction_change["revision"])
+                    if receipt is not None:
+                        receipts.append(receipt)
             return receipts
 
     def deliver_brief(self, receipt):

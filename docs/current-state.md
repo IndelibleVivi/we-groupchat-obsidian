@@ -54,3 +54,15 @@ whole-migration RAM bound or real private-data acceptance.
 Full-rebuild extraction preparation also releases each durable artifact rather
 than collecting every batch's observations in the scheduler's result list.
 Resolution reads the accepted result for one batch at a time.
+
+Independent verification now uses a private temporary disk snapshot and scoped
+SQL reads instead of an in-memory database and whole-corpus payload dictionaries.
+Computed vectors and receipt anchors use disposable disk scratch. This preserves
+complete checks and WAL consistency; caller manifest metadata, identity sets and
+the largest individual record still contribute memory. Temporary disk capacity
+and full private-run acceptance remain separate operational requirements.
+
+Correction attention considers earlier semantic changes even when the same Item
+has a later detail or provenance-only revision before polling. Existing accepted
+or unknown device/channel receipts remain authoritative across later revisions;
+already-known corrections do not become new attention.

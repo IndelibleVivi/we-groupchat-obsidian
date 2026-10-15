@@ -230,6 +230,7 @@ owner keeps its portable storage boundary, including v3 capture/applied receipts
 | `core/semantic/source.py` | `deferred-w1+` | Shared source capture and exact receipt bridge preserve the checkpoint owner; actual Windows message source activation remains W1+. |
 | `core/semantic/store.py` | `deferred-w0.2` | Canonical SQLite generation owner uses private-directory services but current file creation/admission still needs native Windows file/DACL acceptance. |
 | `core/semantic/verification.py` | `deferred-w0.2` | Independent generation/rebuild evidence checks reuse current legacy/projection filesystem contracts; no Windows cutover acceptance. |
+| `core/semantic/verification_storage.py` | `deferred-w0.2` | Disposable private SQLite snapshots, scoped row access and computed verification scratch; POSIX privacy is tested, Windows DACL/storage acceptance remains deferred. |
 | `core/semantic/watches.py` | `deferred-w1+` | Evidence/status-aware watch evaluation over canonical claims; no Windows background watcher or notification activation. |
 | `core/source_adapter.py` | `windows-import-safe` | Canonical read-source protocol and shared capability, cursor, inventory, page and error helpers; no durable-state ownership. |
 | `core/source_contract.py` | `windows-import-safe` | Generated Markdown provenance helpers; unrelated to WeChat source reading. |
