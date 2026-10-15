@@ -207,7 +207,8 @@ hashes bind the complete canonical attribution array, and v2 compaction page
 coverage includes its non-null strings. Writer/selection/compaction versions
 must match that input contract. The previous Brief v2 contract is checked as
 its exact historical shape, never treated as attribution-aware input.
-Full rebuild also requires an accepted `body-plan-v2` or `body-paged-v2` artifact
+Full rebuild also requires an accepted Body artifact (`body-plan-v4` or
+`body-paged-v4`; retained v2/v3 artifacts remain supported)
 for each current Item body. An unchanged body can reuse an earlier accepted
 revision under the same generation/provider route only when its blocks and
 unit fingerprints are identical. Missing, unknown or conflicting versions

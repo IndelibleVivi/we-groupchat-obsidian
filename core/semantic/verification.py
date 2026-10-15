@@ -1107,7 +1107,9 @@ class RebuildVerifier:
                         matches.append(artifact)
                 if not matches or not any(a["status"] == "accepted" for a in matches):
                     self.issue("body_provider_artifact_missing", "semantic_pending")
-                elif not any(a["status"] == "accepted" and a["prompt_version"] in {"body-plan-v2", "body-paged-v2"} for a in matches):
+                elif not any(a["status"] == "accepted" and a["prompt_version"] in {
+                        "body-plan-v2", "body-paged-v2", "body-plan-v3", "body-paged-v3",
+                        "body-plan-v4", "body-paged-v4"} for a in matches):
                     self.issue("body_provider_version_conflict", "semantic_pending")
             required_spans = set().union(*(self.evidence[oid] for oid in self.item_observations[iid]))
             if required_spans and not self._has("reader_source_locations"):

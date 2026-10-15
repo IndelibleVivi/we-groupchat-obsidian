@@ -202,6 +202,12 @@ all Item identity scopes. Possible omitted candidates prohibit `CREATE_ITEM`.
 Selected long Items get accepted, bounded identity-context summaries covering
 all detail parts; these summaries never replace canonical body units. The final
 proposal uses content, View definition, View override and global revisions.
+Its existing-candidate novelty list contains exactly the supplied existing Item
+IDs, separately from unused new identities. Identity scope is an object;
+memberships require an existing View and a model/rule origin. Pending attachment
+bytes, an unresolved assignment flag or an absent View alone do not prevent a
+source-grounded textual experience from establishing an Item. Validators still
+reject invented identities, Views and malformed action fields.
 View creation and membership are separate recoverable stages: the program
 binds the already accepted View choice to its exact mechanical membership
 actions after refreshing the read set. User definitions and overrides survive.

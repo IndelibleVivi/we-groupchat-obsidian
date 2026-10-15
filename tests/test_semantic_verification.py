@@ -224,7 +224,7 @@ class SemanticVerificationTests(unittest.TestCase):
         report = self.fixture.verify()
         self.assertTrue(report.complete, report.to_dict())
         with self.fixture.store.transaction() as db:
-            db.execute("UPDATE reader_text_artifacts SET prompt_version='body-plan-unrecognized' WHERE prompt_version='body-plan-v2'")
+            db.execute("UPDATE reader_text_artifacts SET prompt_version='body-plan-unrecognized' WHERE prompt_version='body-plan-v4'")
         self.assertIn("body_provider_version_conflict", self.codes(self.fixture.verify()))
 
     def test_navigation_revision_can_reuse_exact_accepted_body_without_provider(self):

@@ -119,6 +119,25 @@ def wikilink(path: str, alias: str = "", *, block: str = "", embed: bool = False
     return ("!" if embed else "") + "[[" + target + (separator + label if label else "") + "]]"
 
 
+def _drop_duplicate_title_heading(body: str, title: str, *, verbatim=()) -> str:
+    """Remove a leading H1 that only repeats the publisher-owned note title.
+
+    The publisher writes the note title itself, so a model-echoed H1 at the
+    very start of the body is redundant. Only an exact leading match is
+    dropped; other headings, blockquoted headings, indented code and fenced
+    code stay untouched.
+    """
+    heading = re.sub(r"\s+", " ", title).strip()
+    if not body or not heading:
+        return body
+    first, newline, rest = body.partition("\n")
+    if not first.startswith("# "):
+        return body
+    if first[2:].strip() != heading or any(first in fragment for fragment in verbatim):
+        return body
+    return rest.lstrip("\n") if newline else ""
+
+
 @dataclass(frozen=True)
 class EvidenceExcerpt:
     id: str
@@ -180,7 +199,33 @@ def _quote_groups(text):
     return groups
 
 
-def _quote_references(text, group):
+def _named_attribution_ids(line, excerpts):
+    """Cited evidence ids when a following line attributes the quote by name.
+
+    ``—— 阿甲{{evidence:e1}}`` is a conventional attributed quotation: the
+    prose names the captured speaker of that exact supplied excerpt, so the
+    quotation binds to the cited evidence. Only supplied ``speaker_name``
+    labels qualify, so an ordinary following sentence that merely carries a
+    citation stays a separate claim instead of becoming quote attribution.
+    """
+    if not excerpts:
+        return frozenset()
+    cited = {match[1] for match in EVIDENCE_MARKER.finditer(line)}
+    if not cited:
+        return frozenset()
+    label = (EVIDENCE_MARKER.sub("", line).strip().lstrip("—–-·•* \u3000")
+             .rstrip("：:，,。. \u3000"))
+    if not label or any(mark in label for mark in "。！？!?；;"):
+        return frozenset()
+    names = {excerpt.speaker_name for excerpt in excerpts.values() if excerpt.speaker_name}
+    if label not in names:
+        return frozenset()
+    if any(excerpts[id_].speaker_name != label for id_ in cited):
+        raise ReadingError("markdown_quote_attribution_mismatch")
+    return frozenset(cited)
+
+
+def _quote_references(text, group, excerpts=None):
     quoted = "\n".join(line for _, line in group)
     references = {match[1] for match in EVIDENCE_MARKER.finditer(quoted)}
     # A citation-only line immediately after a quotation is its attribution.
@@ -189,6 +234,8 @@ def _quote_references(text, group):
     next_line = next((line for line in following if line.strip()), "")
     if not EVIDENCE_MARKER.sub("", next_line).strip(" ·"):
         references.update(match[1] for match in EVIDENCE_MARKER.finditer(next_line))
+    else:
+        references.update(_named_attribution_ids(next_line, excerpts))
     return references
 
 
@@ -277,7 +324,7 @@ def validate_markdown_evidence(text, excerpts, *, check_quotes=True):
     if check_quotes:
         for group in _quote_groups(text):
             quote = EVIDENCE_MARKER.sub("", "\n".join(line for _, line in group)).strip()
-            refs = _quote_references(text, group)
+            refs = _quote_references(text, group, excerpts)
             candidates = [excerpts[id_] for id_ in refs] if refs else excerpts.values()
             supported = [quote in redact_urls_in_text(excerpt.text) for excerpt in candidates]
             if quote and not (all(supported) if refs else any(supported)):
@@ -305,7 +352,7 @@ def render_markdown_evidence(text, excerpts, resolve, *, block_anchor=""):
         if index in groups:
             group = groups[index]
             quoted = "\n".join(value for _, value in group)
-            if _quote_references(text, group):
+            if _quote_references(text, group, excerpts):
                 continue
             quoted = quoted.strip()
             matches = [id_ for id_, excerpt in excerpts.items() if quoted and quoted in redact_urls_in_text(excerpt.text)]
@@ -448,7 +495,11 @@ class CanonicalReadingAdapter:
         resources_by_observation: dict[str, list[str]] = {}
         for resource in resources:
             metadata = json.loads(resource["metadata_json"])
-            converted = ReadingResource(resource["resource_id"], str(metadata.get("label") or resource["purpose"] or "关联资源"),
+            label = next((metadata[key] for key in ("label", "original_name")
+                          if isinstance(metadata.get(key), str) and metadata[key].strip()), None)
+            label = label or {"file": "文件", "image": "图片附件", "link": "链接", "voice": "语音", "video": "视频"}.get(
+                resource["purpose"], resource["purpose"] or "关联资源")
+            converted = ReadingResource(resource["resource_id"], label,
                                         resource["location"], resource["status"])
             previous = resource_by_id.get(converted.id)
             if previous is None or (previous.status != "available" and converted.status == "available"):
@@ -630,19 +681,39 @@ class BodyPlanWriter:
     def _prompt(snapshot, previous, unchanged, **context):
         prompt = {
             "task": "Write an evolving readable Item, treating life stories and technical work equally. "
-                    "Return JSON BodyPlan only. Each unit has one stable block home. Preserve original "
-                    "quotations, steps and counterevidence. Amend affected paragraphs; do not repeat "
-                    "the same content as summary, facts and state. Keep stable block IDs. "
+                    "Return exactly {blocks:[...]} using the response schema below. Choose unit_indices from "
+                    "writing_units; snapshot.units supplies their content in the same order. Do not return "
+                    "item_id, content_revision, unit_ids, evidence_ids, resource_ids, "
+                    "primary_home or unit_statuses. The program owns those bindings. Each "
+                    "block is one reader-visible Markdown block; units are internal homes, not reader "
+                    "sections, so do not emit a heading, label or summary paragraph per unit. The publisher "
+                    "already owns the note title and metadata: never repeat the Item title, frontmatter or a "
+                    "top-level H1 heading inside a block. Write one coherent, natural entry that combines "
+                    "complementary summary and quotation units in the same block without repeating the same "
+                    "detail as summary, facts and state. Preserve original quotations, steps, conditions and "
+                    "counterevidence, and write prose in the dominant language of the supplied material "
+                    "(Chinese material -> Chinese prose) while keeping names, code and technical tokens as "
+                    "written. Attribute speech naturally with captured names; a short exact phrase may stay "
+                    "inline while a substantial exact passage belongs in a display blockquote with its "
+                    "attribution outside. Use lists or tables only when the content clearly benefits. "
+                    "Prefer inline quotes for short conversational replies; do not enlarge every one-line "
+                    "reaction into a display blockquote. A brief exchange can form one or two connected "
+                    "paragraphs combining the event, exact replies and speakers. Do not add commentary that "
+                    "merely explains or paraphrases the preceding quotes, or explain the same method again "
+                    "before and after its original wording. Use source time where needed to place an event; "
+                    "semantic_at is the revision time, not necessarily the event time. "
+                    "Reader-facing prose must not expose internal processing, schema, unit or evidence ids, or "
+                    "processing caveats; state a real uncertainty or limit only where it materially affects "
+                    "the reader. Each unit has one stable block home. Keep stable block IDs. "
                     "Unchanged blocks supplied below keep exact bytes unless extended with newly supplied "
                     "units. Such an extension keeps its old paragraph text verbatim and adds the detail "
                     "inside the same block. Retracted/contested units remain historical quoted evidence, never "
-                    "current conclusions: use correction/historical/counterevidence role and bind unit_statuses. "
+                    "current conclusions: use correction/historical/counterevidence role. "
                     "Keep old block IDs and the home of retained units when correcting their explanation. "
                     + MARKDOWN_CONTRACT,
-            "schema": {"item_id": snapshot.item_id, "content_revision": snapshot.content_revision,
-                       "blocks": [{"id": "stable-block-id", "role": "narrative",
-                                   "text": "complete Markdown block", "unit_ids": [], "evidence_ids": [],
-                                   "resource_ids": [], "primary_home": snapshot.item_id, "unit_statuses": {}}]},
+            "schema": {"blocks": [{"id": "stable-block-id", "role": "narrative",
+                                   "text": "complete Markdown block", "unit_indices": [0]}] if snapshot.units else []},
+            "writing_units": [{"index": index, "unit_id": unit.id} for index, unit in enumerate(snapshot.units)],
             "snapshot": asdict(snapshot),
             "previous": asdict(previous) if previous else None,
             "immutable_blocks": list(unchanged),
@@ -650,12 +721,45 @@ class BodyPlanWriter:
         }
         return redact_urls_in_text(json_text(prompt))
 
+    @staticmethod
+    def _response(snapshot, raw, *, check_markdown=True):
+        """Bind a composition choice to the supplied canonical snapshot.
+
+        Full BodyPlans remain readable for durable replay and existing injected
+        callers. The smaller writer response selects unit positions only; it
+        cannot choose canonical identity, revision, evidence or resource metadata.
+        """
+        try:
+            value = json.loads(raw)
+            if not isinstance(value, dict) or set(value) != {"blocks"}:
+                return BodyPlan.from_json(raw)
+            if not isinstance(value["blocks"], list):
+                raise ValueError
+            blocks = []
+            for block in value["blocks"]:
+                if not isinstance(block, dict) or set(block) != {"id", "role", "text", "unit_indices"}:
+                    raise ValueError
+                indices = block["unit_indices"]
+                if not isinstance(indices, list) or any(type(i) is not int or not 0 <= i < len(snapshot.units) for i in indices):
+                    raise ValueError
+                units = [snapshot.units[i] for i in indices]
+                markers = ({m[1] for line, code in _markdown_lines(block["text"]) if not code
+                            for m in EVIDENCE_MARKER.finditer(line)} if check_markdown else set())
+                blocks.append(BodyBlock(block["id"], block["role"], block["text"],
+                    tuple(unit.id for unit in units),
+                    tuple(dict.fromkeys([e for unit in units for e in unit.evidence_ids] + sorted(markers))),
+                    tuple(dict.fromkeys(r for unit in units for r in unit.resource_ids)), snapshot.item_id,
+                    {unit.id: unit.status for unit in units if unit.status != "current"}))
+            return BodyPlan(snapshot.item_id, snapshot.content_revision, tuple(blocks))
+        except (ValueError, TypeError, KeyError, AttributeError, IndexError) as exc:
+            raise ReadingError("invalid_body_plan") from exc
+
     def _invoke(self, snapshot, previous, current_fingerprints, unchanged, prompt_text, request_id, ledger,
                 *, exact_fragment=None, canonical_new_ids=False):
         if len(prompt_text.encode("utf-8")) > self.max_input_bytes:
             raise ReadingError("body_context_budget_exceeded")
         def validate(raw):
-            plan = BodyPlan.from_json(raw)
+            plan = self._response(snapshot, raw, check_markdown=exact_fragment is None)
             if canonical_new_ids:
                 retained = {b.id for b in previous.blocks} if previous else set()
                 plan = replace(plan, blocks=tuple(b if b.id in retained else replace(b,
@@ -667,7 +771,7 @@ class BodyPlanWriter:
             return result.to_json()
         if ledger is not None:
             artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
-                                              prompt_version="body-plan-v2", validate=validate)
+                                              prompt_version="body-plan-v4", validate=validate)
             return BodyPlan.from_json(artifact)
         route = provider_binding(self.provider)
         result = self.provider.generate(prompt_text, request_id=request_id, generation_id=self.generation_id)
@@ -686,7 +790,7 @@ class BodyPlanWriter:
         binding = fingerprint(json_text(asdict(snapshot)))
         route = provider_binding(self.provider)
         aggregate_key = fingerprint(json_text([binding, asdict(previous) if previous else None,
-                                               route, self.max_input_bytes, "body-paged-v2"]))
+                                               route, self.max_input_bytes, "body-paged-v4"]))
         if ledger:
             reused = ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request_id,))
             if reused and (reused["generation_id"] != self.generation_id or reused["job_key"] != aggregate_key):
@@ -760,7 +864,7 @@ class BodyPlanWriter:
         if ledger:
             with ledger.transaction() as conn:
                 conn.execute("INSERT OR IGNORE INTO reader_text_artifacts VALUES(?,?,?,?,?,'accepted',?)",
-                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v2", result.to_json()))
+                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v4", result.to_json()))
         return result
 
     @staticmethod
@@ -1649,9 +1753,11 @@ class ProjectionPublisher:
         remaining_resources = [r for r in snapshot.resources if r.id not in placed_resources]
         if remaining_resources:
             paragraphs.append("## 关联资源\n\n" + "\n".join("- " + self._resource_text(r) for r in remaining_resources))
+        body = _drop_duplicate_title_heading("\n\n".join(paragraphs), snapshot.title,
+            verbatim=tuple(fragment for unit in snapshot.units for fragment in unit.verbatim))
         receipt = self.publish_document(
             object_id=snapshot.item_id, path=f"条目/{_token(snapshot.item_id)}.md", title=snapshot.title,
-            body="\n\n".join(paragraphs), content_revision=snapshot.content_revision,
+            body=body, content_revision=snapshot.content_revision,
             semantic_at=snapshot.semantic_at,
             is_current=lambda: self.current_revision(snapshot.item_id) == snapshot.content_revision)
         return receipt

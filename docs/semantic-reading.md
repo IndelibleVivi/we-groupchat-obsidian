@@ -40,8 +40,16 @@ snapshot containing canonical Item ID/content revision, semantic time, units,
 evidence excerpts, available resource locations and typed relations. The
 upstream caller supplies these fields from the canonical snapshot; these
 dataclasses do not create Item/source schemas. `BodyPlanWriter` calls the
-injected `TextProvider.generate(prompt, request_id=..., generation_id=...)` and
-validates its JSON `BodyPlan`. Every unit has exactly one paragraph home;
+injected `TextProvider.generate(prompt, request_id=..., generation_id=...)`.
+Its composition response contains only `blocks` with a stable `id`, `role`,
+Markdown `text`, and `unit_indices` into the supplied ordered units. The program
+binds Item identity/revision, unit IDs, evidence/resource associations and claim
+statuses from the immutable snapshot, then validates the canonical `BodyPlan`.
+Optional exact evidence markers add supplied supporting excerpts; unknown refs
+still fail. Model-authored metadata cannot replace these bindings. Existing
+injected full-BodyPlan callers and durable canonical artifacts remain readable,
+and an explicitly wrong full envelope still fails rather than being repaired.
+Every unit has exactly one paragraph home;
 unchanged units retain their previous paragraph bytes. A new immutable unit may
 extend its existing paragraph while preserving the old text, block ID and home.
 Required quotations, steps and counterevidence are bound with unit `verbatim`
@@ -66,12 +74,32 @@ words retain their relay relationship and an unknown original author stays
 unknown. Required original wording and steps still belong to one stable unit
 home, even when presentation adds quote prefixes.
 
+The publisher owns the note title and frontmatter. The Body prompt therefore asks
+for one coherent, reader-first entry, not a reader section per internal unit: a
+leading H1 that merely repeats the note title is dropped from the published body
+before writing (an exact match only, so required verbatim source headings, other
+headings, blockquoted headings and fenced code are untouched). The prompt asks for the dominant language of the
+supplied material, natural attribution of short inline quotes and substantial
+display blockquotes, and no internal processing or schema commentary. A real
+uncertainty or limit is stated only where it materially affects the reader.
+Short conversational replies normally stay inline in the connected scene;
+display blockquotes remain available when their form helps reading. Captured
+resource labels or original filenames remain visible even while bytes are pending.
+
 An optional `{{evidence:<span_id>}}` marker places a citation beside a claim or
 inside a table cell. The program verifies the exact supplied evidence ID and
 resolves it to a ready source page; wikilink aliases inside tables use `\|`.
 Quoted wording is checked against its explicit citation, or against the block's
 supplied evidence when no inline citation is present. In the latter case the
 renderer adds a nearby source link with the captured speaker's display name.
+A conventional named attribution line such as `—— 阿甲{{evidence:e1}}`, whose
+prose names the supplied `speaker_name` of a cited excerpt, binds the quotation
+to that exact citation: the renderer keeps the one explicit link instead of
+adding a second source link, and a named quote whose cited excerpt does not
+contain the words fails validation. An ordinary following sentence that merely
+carries a citation stays a separate claim, never quote attribution. A captured
+name on that attribution line must match the cited excerpt's captured speaker;
+matching quoted words from another speaker do not repair an incorrect attribution.
 Code fences preserve literal code, including text resembling citation markers.
 Unclosed fences, invented references, ungrounded quotations, executable links
 and machine-control markers fail validation. Ordinary headings, lists and quotes
@@ -86,8 +114,13 @@ reused for a different input or route; a running/unknown result cannot be
 resubmitted under a new ID. A known validation failure can be retried explicitly
 with a fresh request. Calling the pure `plan` helper without a ledger is intended
 for isolated rendering tests, not runtime publication.
-Current Body artifact versions are `body-plan-v2` and `body-paged-v2`; these bind
-the attribution and Markdown contract rather than reusing earlier prompts.
+Current Body artifact versions are `body-plan-v4` and `body-paged-v4`; these bind
+the composition response and program-owned metadata rather than reusing earlier
+prompts. The paged aggregate key carries the same version, so a revised prompt
+never resumes a paged plan produced by an earlier one.
+The independent rebuild verifier also recognizes retained accepted v2/v3 Body
+artifacts, whose attribution and evidence contracts remain valid; this prompt
+revision does not authorize rewriting accepted historical output.
 
 `BodyPlanWriter(..., max_input_bytes=80000)` keeps small Items in one coherent
 writing call. Larger inputs use bounded pages of consecutive units and existing

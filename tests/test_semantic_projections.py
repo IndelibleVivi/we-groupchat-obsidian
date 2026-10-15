@@ -151,6 +151,7 @@ class ProjectionTests(ReadingHarness):
         self.assertIsNone(self.publisher.resolve(snapshot.item_id))
         root = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='large-body'")
         self.assertEqual(root["status"], "accepted")
+        self.assertEqual(root["prompt_version"], "body-paged-v4")
         count = len(provider.calls)
         resumed = writer.plan(snapshot, request_id="large-body")
         self.assertEqual(resumed, plan)
@@ -199,6 +200,88 @@ class ProjectionTests(ReadingHarness):
             with self.subTest(code=code), self.assertRaisesRegex(ReadingError, code):
                 validate_body_plan(snapshot, plan(bad))
 
+    def test_named_quote_attribution_binds_citation_and_keeps_one_source_link(self):
+        quote, later = "猫在纸箱里睡着了。", "今天下雨了。"
+        snapshot = replace(self.snapshot(item_id="named-quote"),
+            units=(ReadingUnit("story", quote, ("e1",), role="quote", verbatim=(quote,)),),
+            evidence=(EvidenceExcerpt("e1", quote, "此前刚搬家。", speaker_name="阿甲"),
+                      EvidenceExcerpt("e2", later, speaker_name="阿甲")))
+        def plan(text):
+            return BodyPlan(snapshot.item_id, snapshot.content_revision, (BodyBlock(
+                "quoted", "narrative", text, ("story",), ("e1", "e2"), primary_home=snapshot.item_id),))
+        valid = "> " + quote + "\n\n—— 阿甲{{evidence:e1}}"
+        accepted = validate_body_plan(snapshot, plan(valid))
+        self.assertEqual(accepted.blocks[0].text, valid)
+        receipt = self.publisher.publish_item(snapshot, accepted)
+        body = region_body(self.publisher.read(receipt.path).decode(), "body")
+        self.assertIn("—— 阿甲", body)
+        self.assertEqual(body.count("#^" + anchor("e1")), 1)
+        # The same named speaker citing a different excerpt must reject, not pass
+        # because the quotation happens to match some other supplied evidence.
+        with self.assertRaisesRegex(ReadingError, "markdown_quote_not_grounded"):
+            validate_body_plan(snapshot, plan("> " + quote + "\n\n—— 阿甲{{evidence:e2}}"))
+        misnamed = replace(snapshot, evidence=(snapshot.evidence[0], replace(snapshot.evidence[1], text=quote, speaker_name="阿乙")))
+        with self.assertRaisesRegex(ReadingError, "markdown_quote_attribution_mismatch"):
+            validate_body_plan(misnamed, plan("> " + quote + "\n\n—— 阿甲{{evidence:e2}}"))
+        # An ordinary following claim keeps its own citation and is not silently
+        # adopted as the quotation's attribution.
+        claim = "> " + quote + "\n\n阿甲后来提到另一件事{{evidence:e2}}"
+        self.assertEqual(validate_body_plan(snapshot, plan(claim)).blocks[0].text, claim)
+        # Unknown authors stay supported: an unattributable following line is not
+        # mistaken for a captured display name.
+        unknown = replace(snapshot, evidence=(EvidenceExcerpt("e1", quote),))
+        vague = "> " + quote + "\n\n—— {{evidence:e1}}"
+        validate_body_plan(unknown, BodyPlan(unknown.item_id, unknown.content_revision, (BodyBlock(
+            "quoted", "narrative", vague, ("story",), ("e1",), primary_home=unknown.item_id),)))
+
+    def test_duplicate_publisher_title_heading_drops_only_an_exact_title_line(self):
+        def body_of(item_id, text, *, title="箱猫"):
+            snapshot = self.snapshot(item_id=item_id, text="周五，她把箱子让给了猫。", title=title)
+            plan = self.plan(snapshot)
+            plan = replace(plan, blocks=(replace(plan.blocks[0], text=text),))
+            receipt = self.publisher.publish_item(snapshot, plan)
+            return self.publisher.read(receipt.path).decode()
+
+        echoed = body_of("dup-heading", "# 箱猫\n\n周五，她把箱子让给了猫。")
+        self.assertEqual(echoed.count("# 箱猫"), 1)
+        self.assertNotIn("# 箱猫", region_body(echoed, "body"))
+        self.assertIn("周五，她把箱子让给了猫。", region_body(echoed, "body"))
+
+        other = body_of("other-heading", "# 另一个标题\n\n周五，她把箱子让给了猫。")
+        self.assertIn("# 另一个标题", region_body(other, "body"))
+
+        fenced = body_of("fenced-title", "```text\n# 箱猫\n周五，她把箱子让给了猫。\n```")
+        self.assertIn("```text\n# 箱猫\n周五，她把箱子让给了猫。\n```", region_body(fenced, "body"))
+        source_heading = self.snapshot(item_id="source-heading", text="# 箱猫\n\n这是原文标题。")
+        receipt = self.publish(source_heading)
+        self.assertIn(source_heading.units[0].text, region_body(self.publisher.read(receipt.path).decode(), "body"))
+
+    def test_composition_response_binds_snapshot_metadata_and_replays_canonical_plan(self):
+        snapshot = replace(self.snapshot(revision=7), resources=(ReadingResource("photo", "照片", None, "pending"),))
+        snapshot = replace(snapshot, units=(replace(snapshot.units[0], resource_ids=("photo",)),))
+        response = {"blocks": [{"id": "story-home", "role": "narrative", "text": snapshot.units[0].text,
+                                 "unit_indices": [0]}]}
+        provider = ScriptedTextProvider(response)
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+        plan = writer.plan(snapshot, request_id="composition")
+        self.assertEqual((plan.item_id, plan.content_revision), (snapshot.item_id, 7))
+        block = plan.blocks[0]
+        self.assertEqual((block.unit_ids, block.evidence_ids, block.resource_ids, block.primary_home),
+                         (("story",), ("e1",), ("photo",), snapshot.item_id))
+        self.assertEqual(writer.plan(snapshot, request_id="composition"), plan)
+        self.assertEqual(len(provider.calls), 1)
+        row = self.ledger.one("SELECT artifact_json FROM reader_text_artifacts WHERE request_id='composition'")
+        self.assertEqual(BodyPlan.from_json(row[0]), plan)
+        for indices in ([True], [-1], [1], [0, 0], []):
+            wrong = {"blocks": [{**response["blocks"][0], "unit_indices": indices}]}
+            with self.subTest(indices=indices), self.assertRaises(ReadingError):
+                BodyPlanWriter(ScriptedTextProvider(wrong), self.ledger.generation_id).plan(snapshot, request_id="bad")
+        # A full caller-supplied envelope is never silently corrected.
+        wrong_revision = json.loads(plan.to_json())
+        wrong_revision["content_revision"] = 8
+        with self.assertRaisesRegex(ReadingError, "stale_body_plan"):
+            BodyPlanWriter(ScriptedTextProvider(wrong_revision), self.ledger.generation_id).plan(snapshot, request_id="stale")
+
     def test_single_table_list_and_quote_anchor_the_body_and_remain_embeddable(self):
         formats = (("table", "项目 | 值 | 来源\n--- | --- | ---\n观察 | 未知 | {{evidence:e1}}", "观察 | 未知 |"),
                    ("list", "1. 打开笔记。\n2. 阅读原话。", "2. 阅读原话。"),
@@ -232,7 +315,12 @@ class ProjectionTests(ReadingHarness):
         text = "## 本地步骤\n\n1. 保留完整示例。\n\n```text\n" + "连续记录不能截断。\n" * 1500 + "```"
         snapshot = replace(self.snapshot(), units=(ReadingUnit("fenced", text, ("e1",), role="step", verbatim=(text,)),),
                            evidence=(EvidenceExcerpt("e1", text, speaker_name="阿岚"),))
-        provider = ScriptedTextProvider(*([self.paged_response] * 500))
+        def compose(prompt):
+            partial = json.loads(prompt)["snapshot"]
+            return {"blocks": [{"id": "fragment-" + str(index), "role": unit["role"],
+                                "text": unit["text"], "unit_indices": [index]}
+                               for index, unit in enumerate(partial["units"])]}
+        provider = ScriptedTextProvider(*([compose] * 500))
         writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=12000)
         plan = writer.plan(snapshot, request_id="fenced-continuations")
         self.assertEqual(plan.blocks[0].text, text)
@@ -499,6 +587,18 @@ class ProjectionTests(ReadingHarness):
         self.assertEqual(result.status, "success")
         self.assertIn("stable-cat", query_path.read_text())
         self.assertIn("检索覆盖仍有未完成部分", query_path.read_text())
+
+    def test_pending_file_keeps_captured_filename_in_reading_surface(self):
+        store, observation, _span = self.canonical_story()
+        with store.transaction() as conn:
+            conn.execute("INSERT INTO resource_refs VALUES(?,?,?,?,?,?,?,?)", (
+                "song", observation["observation_id"], "stable-cat", "file-occurrence", "file",
+                "ready_metadata", None, json.dumps({"original_name": "写给猫的歌.mp3"})))
+        snapshot = CanonicalReadingAdapter(store).snapshot("stable-cat")
+        self.assertEqual(snapshot.resources[0].label, "写给猫的歌.mp3")
+        publisher = ProjectionPublisher.for_store(store, self.base / "filename-WGO", file_lock=MacOSFileLock())
+        receipt = publisher.publish_item(snapshot, self.plan(snapshot))
+        self.assertIn("写给猫的歌.mp3（附件待到达）", publisher.read(receipt.path).decode())
 
     def test_adapter_names_are_captured_labels_not_cross_source_identity(self):
         from core.semantic.store import SemanticStore
