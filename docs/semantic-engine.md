@@ -71,6 +71,11 @@ dispositions can finish a source with zero Observations. Empty
 `legacy_resource` and `legacy_metadata` rows receive the program disposition
 `unsupported_type` because their complete private metadata remains captured;
 empty pages and messages do not receive that assumption.
+The reader's already filtered, empty system envelopes (exact integer types
+`10000` and `10002`) retain their captured metadata as `unsupported_type` without
+inventing text spans. This does not classify an ordinary empty message or a
+readable system message, and does not bypass unknown child jobs. Existing page
+artifacts remain unchanged when their parent applies this metadata disposition.
 
 Before an unaccepted parent aggregates, every member still `unclassified` gets
 at most one bounded adjacent-context coverage re-read (`extract_coverage`, phase

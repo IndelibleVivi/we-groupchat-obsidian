@@ -5,7 +5,6 @@ in the canonical SemanticStore; provider calls occur outside SQLite transactions
 """
 from __future__ import annotations
 
-from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 import json
 import math
@@ -338,6 +337,10 @@ class SemanticEngine:
         sources = tuple(sources)
         retained_metadata = {member["source_version_id"] for member in batch["members"]
                              if member.get("kind") in {"legacy_resource", "legacy_metadata"} and member["text"] == ""}
+        filtered_system = {member["source_version_id"] for member in batch["members"]
+                           if member.get("kind") == "message" and member["text"] == ""
+                           and type((member.get("payload") or {}).get("type")) is int
+                           and member["payload"]["type"] in {10000, 10002}}
         generation = self.store.generation_id
         namespace = generation
         job = self.jobs.ensure("extract", {"batch_id": batch_id, "members": [asdict(source) for source in sources]},
@@ -345,6 +348,16 @@ class SemanticEngine:
                                 "route": asdict(self.text_provider.route)})
         connection = self.store.connect()
         try:
+            # Pending work remains binding even if a known metadata disposition
+            # removes the need for a new coverage pass.
+            children = list(connection.execute("SELECT j.kind,j.state,j.versions_json,a.job_id FROM jobs j "
+                "LEFT JOIN accepted_job_artifacts a USING(job_id) WHERE j.kind IN ('extract_page','extract_coverage') "
+                "AND json_extract(j.inputs_json,'$.parent_job_id')=?", (job["job_id"],)))
+            if any(row["state"] == "unknown" for row in children):
+                raise SemanticValidationError("semantic_job_busy_or_unknown")
+            if any(row["kind"] == "extract_coverage" and row["job_id"] is not None
+                   and json.loads(row["versions_json"]).get("prompt") != COVERAGE_PROMPT_VERSION for row in children):
+                raise SemanticValidationError("semantic_coverage_version_conflict")
             # Each parallel extraction needs only its own members' owners.
             # Loading the complete corpus here multiplies its metadata by the
             # number of concurrent provider preparations.
@@ -364,6 +377,9 @@ class SemanticEngine:
         def extract_pages():
             program_dispositions = {source.source_id: {"status": "unsupported_type", "reason": "metadata_retained_in_canonical_ledger"}
                                     for source in sources if source.core and source.source_id in retained_metadata}
+            program_dispositions.update({source.source_id: {"status": "unsupported_type",
+                "reason": "filtered_system_message_metadata_retained"}
+                for source in sources if source.core and source.source_id in filtered_system})
             input_sources = tuple(source for source in sources if source.source_id not in retained_metadata)
             if not any(source.core for source in input_sources):
                 return {"observations": [], "dispositions": program_dispositions, "route": None}
@@ -518,16 +534,6 @@ class SemanticEngine:
         and no accepted artifact is re-sent.
         """
         unresolved_ids = {source.source_id for source in unresolved}
-        # A prompt/schema upgrade cannot hide dispatched or accepted older work.
-        with closing(self.store.connect()) as connection:
-            prior = list(connection.execute("SELECT j.state,j.versions_json,a.job_id FROM jobs j "
-                "LEFT JOIN accepted_job_artifacts a USING(job_id) WHERE j.kind='extract_coverage' "
-                "AND json_extract(j.inputs_json,'$.parent_job_id')=?", (job["job_id"],)))
-        if any(row["state"] == "unknown" for row in prior):
-            raise SemanticValidationError("semantic_job_busy_or_unknown")
-        if any(row["job_id"] is not None and json.loads(row["versions_json"]).get("prompt") != COVERAGE_PROMPT_VERSION
-               for row in prior):
-            raise SemanticValidationError("semantic_coverage_version_conflict")
         cited_spans = {span["span_id"] for observation in observations.values() for span in observation["spans"]}
         packets = [asdict(span) for span in prepare_spans(unresolved, namespace=namespace)
                    if span.span_id not in cited_spans]
@@ -606,7 +612,7 @@ class SemanticEngine:
         coverage_covered = set(coverage_covered)
         dispositions = dict(program_dispositions)
         for source in input_sources:
-            if not source.core:
+            if not source.core or source.source_id in program_dispositions:
                 continue
             identity = source.source_id
             parts = fragment_dispositions.get(identity, [])
@@ -1233,6 +1239,8 @@ def extraction_prompt(sources: Sequence[CapturedSource], *, namespace="semantic"
         "\"observed_at\":number,\"predicates\":{str:scalar},\"span_indices\":[int]}]}]}. "
         "Spans and their boundaries are already assigned by the program. Select only supplied IDs; "
         "do not create IDs or offsets. "
+        "An input with an empty spans list has no citable text: never create a null or invented span_id. "
+        "Give it a reasoned disposition instead of inventing an observation. "
         "All units and claims need exact source spans. A quote unit's text is only the contiguous "
         "verbatim words of one cited message: never add a speaker label or name, never wrap it in "
         "quotation marks or a Markdown '>' blockquote marker, and never join separate messages. "

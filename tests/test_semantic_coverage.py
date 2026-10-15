@@ -94,6 +94,29 @@ class CoverageEngineTests(unittest.TestCase):
             self.assertEqual(connection.execute(
                 "SELECT count(*) FROM jobs WHERE kind='extract_coverage'").fetchone()[0], 0)
 
+    def test_filtered_system_envelope_is_conserved_without_fabricating_a_span(self):
+        for batch_id, body, message_type, expected in (
+                ('filtered', '', 10000, 'unsupported_type'),
+                ('readable-system', 'A readable system event', 10000, 'observed'),
+                ('empty-ordinary', '', 1, None)):
+            with self.subTest(batch_id=batch_id):
+                record = capture(self.store, batch_id, [body], payloads=[{'type': message_type}])
+                text = CoverageText(primary=bool, coverage=bool)
+                result = SemanticEngine(self.store, text, FakeDecision(possible=0)).process_batch(batch_id)
+                source_id = record['member_version_ids'][0]
+                self.assertEqual(self.dispositions().get(source_id), expected)
+                self.assertEqual(self.store.get_source(source_id)['payload'], {'type': message_type})
+                if expected is not None:
+                    self.assertEqual(result['status'], 'complete')
+                    self.assertTrue(result['processing_receipt'])
+                else:
+                    self.assertEqual(result['status'], 'unclassified')
+                if expected == 'unsupported_type':
+                    self.assertFalse(text.coverage_prompts)
+                    with closing(self.store.connect()) as connection:
+                        self.assertEqual(connection.execute(
+                            'SELECT count(*) FROM source_spans WHERE source_version_id=?', (source_id,)).fetchone()[0], 0)
+
     def test_coverage_can_cite_a_neighbour_alongside_the_pending_core(self):
         capture(self.store, "joint", ["晚上老地方见。", "好，就在美术馆门口见。"])
 
