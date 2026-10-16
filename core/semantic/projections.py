@@ -543,7 +543,12 @@ class CanonicalReadingAdapter:
                 status = ("retracted" if any(c["status"] == "retracted" for c in affected_claims)
                           else "contested" if affected_claims else "current")
                 reason = "；".join(dict.fromkeys(claim_reasons.get(c["claim_id"], "") for c in affected_claims)).strip("；")
-                retained = (unit["text"],) if unit["kind"] in {"quote", "step", "counterevidence"} or affected_claims else ()
+                # A quote unit identifies source wording, not an obligation to
+                # copy an entire chat message into the reading body. Its exact
+                # excerpt is already retained in the source projection. Keep
+                # literal procedural/correction requirements separate from the
+                # writer's choice of a meaningful quotation or paraphrase.
+                retained = (unit["text"],) if unit["kind"] in {"step", "counterevidence"} or affected_claims else ()
                 units.append(ReadingUnit(unit["unit_id"], unit["text"], tuple(unit["span_ids"]),
                                          observation_resources if index == 0 else (),
                                          "counterevidence" if affected_claims else unit["kind"], retained, status, reason))
@@ -695,52 +700,36 @@ class BodyPlanWriter:
     @staticmethod
     def _prompt(snapshot, previous, unchanged, **context):
         prompt = {
-            "task": "Write an evolving readable Item, treating life stories and technical work equally. "
-                    "Return exactly {blocks:[...]} using the response schema below. Choose unit_indices from "
-                    "writing_units; snapshot.units supplies their content in the same order. Do not return "
-                    "item_id, content_revision, unit_ids, evidence_ids, resource_ids, "
-                    "primary_home or unit_statuses. The program owns those bindings. Each "
-                    "block is one reader-visible Markdown block; units are internal homes, not reader "
-                    "sections, so do not emit a heading, label or summary paragraph per unit. The publisher "
-                    "already owns the note title and metadata: never repeat the Item title, frontmatter or a "
-                    "top-level H1 heading inside a block. Write one coherent, natural entry that combines "
-                    "complementary summary and quotation units in the same block without repeating the same "
-                    "detail as summary, facts and state. Preserve original quotations, steps, conditions and "
-                    "counterevidence, and write prose in the dominant language of the supplied material "
-                    "(Chinese material -> Chinese prose) while keeping names, code and technical tokens as "
-                    "written. Attribute speech naturally with captured names; a short exact phrase may stay "
-                    "inline while a substantial exact passage belongs in a display blockquote with its "
-                    "attribution outside. Use lists or tables only when the content clearly benefits. "
-                    "Prefer inline quotes for short conversational replies; do not enlarge every one-line "
-                    "reaction into a display blockquote. A brief exchange can form one or two connected "
-                    "paragraphs combining the event, exact replies and speakers. Do not add commentary that "
-                    "merely explains or paraphrases the preceding quotes, or explain the same method again "
-                    "before and after its original wording. Use source time where needed to place an event; "
-                    "semantic_at is the revision time, not necessarily the event time. Keep supplied timezones "
-                    "explicit when giving a clock time; do not guess local time or a time of day. "
-                    "Use only the supplied units and evidence for factual content. Do not invent scene-setting "
-                    "generalizations, background facts, feelings, motives or outcomes to make a short note longer. "
-                    "Preserve whether a source is asking, guessing, reporting experience or relaying another "
-                    "person's words; a question or hearsay must not become an established fact. A short "
-                    "source may produce a short note without an introduction or concluding lesson. "
-                    "Reader-facing prose must not expose internal processing, schema, unit or evidence ids, or "
-                    "processing caveats; state a real uncertainty or limit only where it materially affects "
-                    "the reader. Each unit has one stable block home. Keep stable block IDs. "
-                    "Unchanged blocks supplied below keep exact bytes unless they incorporate newly supplied "
-                    "units. For that affected block, integrate new detail by rewriting automatic prose naturally "
-                    "at the same stable home; do not repeat the old sentence just to append a supplement. "
-                    "Before creating a new block, check whether a new unit answers, qualifies or explains a "
-                    "point already discussed in an existing block. If it does, place it in that existing block "
-                    "and revise the explanation there; do not turn one continuing explanation into a dated "
-                    "append-only transcript. New blocks are for genuinely distinct parts of the same Item. "
-                    "Retain every old unit, evidence and resource, and preserve required verbatim fragments "
-                    "and exact quotations. Every assigned unit.verbatim fragment must occur in full in that "
-                    "block's text, with its exact wording; a shorter quote or a paraphrase does not cover it. "
-                    "Integrate those complete fragments naturally instead of also repeating their summary. "
-                    "Blocks receiving no new or changed units keep their exact bytes. "
-                    "Retracted/contested units remain historical quoted evidence, never "
-                    "current conclusions: use correction/historical/counterevidence role. "
-                    "Keep old block IDs and the home of retained units when correcting their explanation. "
+            "task": "Compose one evolving readable Item. Life stories and technical discussions deserve equal care. "
+                    "Return exactly {blocks:[...]} with the schema below. unit_indices select snapshot.units "
+                    "in their supplied order; the program binds all identities, revisions, evidence, resources "
+                    "and statuses. Assign every unit exactly once to a stable block home. A unit is a content "
+                    "responsibility, not a sentence to copy: combine overlapping facts and quotations into one "
+                    "explanation or scene. Do not print units, internal IDs or processing commentary. The publisher "
+                    "owns title and metadata; omit frontmatter and top-level H1 headings.\n"
+                    "For technical material, lead with the supported answer or mechanism and its scope, then "
+                    "explain the useful conditions and details. For stories, compose connected scenes and revealing "
+                    "exchanges while keeping different people's experiences distinct. Preserve concrete details, "
+                    "steps, counterevidence, key phrases and resources. Use the material's language and retain "
+                    "names, code and technical terms. Let content choose prose, a list or a table, not a fixed "
+                    "summary/facts/state template. A brief exchange may be one connected paragraph.\n"
+                    "Exact messages remain on source pages. A quote-role unit may be faithfully paraphrased; "
+                    "select the exact phrases whose wording carries detail, voice or a turn in the story. Do not "
+                    "copy chat wrappers such as [回复] into prose. Keep short quotes inline and substantial "
+                    "passages in blockquotes. Integrate quotations without also repeating their summary. Explicit "
+                    "unit.verbatim fragments, however, must occur in full at their block home, without shortening.\n"
+                    "Use only supplied evidence for facts. Preserve questions, guesses and hearsay as such, with "
+                    "natural captured-name attribution. Do not invent background, feelings, motives, outcomes or "
+                    "a concluding lesson. State uncertainty where it changes understanding. Exact timestamps belong "
+                    "on source pages; mention dates/times only to explain an event or change. semantic_at is revision "
+                    "time, not event time. If a clock time matters, retain its supplied timezone without guessing.\n"
+                    "Incremental writing: retain old block IDs and the homes of all retained units, evidence and "
+                    "resources. A new detail that answers or qualifies an existing point belongs at that home: "
+                    "rewrite the affected automatic prose naturally instead of appending a dated supplement. "
+                    "New blocks are for distinct parts or genuine new scenes. Unchanged blocks keep exact bytes "
+                    "unless they receive new units; unrelated paragraphs must not be polished again. Retracted "
+                    "or contested units require correction/historical/counterevidence role and their original "
+                    "wording with the changed status; never leave them as current conclusions. "
                     + MARKDOWN_CONTRACT,
             "schema": {"blocks": [{"id": "stable-block-id", "role": "narrative",
                                    "text": "complete Markdown block", "unit_indices": [0]}] if snapshot.units else []},
@@ -802,7 +791,7 @@ class BodyPlanWriter:
             return result.to_json()
         if ledger is not None:
             artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
-                                              prompt_version="body-plan-v5", validate=validate)
+                                              prompt_version="body-plan-v6", validate=validate)
             return BodyPlan.from_json(artifact)
         route = provider_binding(self.provider)
         result = self.provider.generate(prompt_text, request_id=request_id, generation_id=self.generation_id)
@@ -821,7 +810,7 @@ class BodyPlanWriter:
         binding = fingerprint(json_text(asdict(snapshot)))
         route = provider_binding(self.provider)
         aggregate_key = fingerprint(json_text([binding, asdict(previous) if previous else None,
-                                               route, self.max_input_bytes, "body-paged-v5"]))
+                                               route, self.max_input_bytes, "body-paged-v6"]))
         if ledger:
             reused = ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request_id,))
             if reused and (reused["generation_id"] != self.generation_id or reused["job_key"] != aggregate_key):
@@ -895,7 +884,7 @@ class BodyPlanWriter:
         if ledger:
             with ledger.transaction() as conn:
                 conn.execute("INSERT OR IGNORE INTO reader_text_artifacts VALUES(?,?,?,?,?,'accepted',?)",
-                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v5", result.to_json()))
+                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v6", result.to_json()))
         return result
 
     @staticmethod
@@ -1763,8 +1752,12 @@ class ProjectionPublisher:
                     text += "\n\n" + label + ("：" + redact_urls_in_text(unit.reason) if unit.reason else "，请结合本段更正和来源阅读。")
             refs = [self.evidence_link(snapshot.item_id, e, alias=evidence_alias(evidence[e]))
                     for e in block.evidence_ids if e not in placed]
-            refs.extend(self._resource_text(resources[r]) for r in block.resource_ids)
-            paragraphs.append(text + ("\n\n" + " · ".join(refs) if refs else ""))
+            if len(refs) > 1:
+                text += f"\n\n> [!quote]- 本段来源（{len(refs)} 条）\n" + "\n".join("> - " + ref for ref in refs)
+            elif refs:
+                text += "\n\n" + refs[0]
+            resource_refs = [self._resource_text(resources[r]) for r in block.resource_ids]
+            paragraphs.append(text + ("\n\n" + " · ".join(resource_refs) if resource_refs else ""))
         if snapshot.relations:
             lines = ["## 关联"]
             for relation in snapshot.relations:

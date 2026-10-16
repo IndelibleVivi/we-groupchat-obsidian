@@ -151,7 +151,7 @@ class ProjectionTests(ReadingHarness):
         self.assertIsNone(self.publisher.resolve(snapshot.item_id))
         root = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='large-body'")
         self.assertEqual(root["status"], "accepted")
-        self.assertEqual(root["prompt_version"], "body-paged-v5")
+        self.assertEqual(root["prompt_version"], "body-paged-v6")
         count = len(provider.calls)
         resumed = writer.plan(snapshot, request_id="large-body")
         self.assertEqual(resumed, plan)
@@ -685,6 +685,45 @@ class ProjectionTests(ReadingHarness):
         publisher = ProjectionPublisher.for_store(store, self.base / "filename-WGO", file_lock=MacOSFileLock())
         receipt = publisher.publish_item(snapshot, self.plan(snapshot))
         self.assertIn("写给猫的歌.mp3（附件待到达）", publisher.read(receipt.path).decode())
+
+    def test_canonical_quote_can_be_composed_without_copying_chat_scaffolding(self):
+        from core.semantic.store import SemanticStore
+        store = SemanticStore(self.base / "composition.sqlite", "composition-generation")
+        original = "[回复] 可以的，本来就是给云笺和叶页做的"
+        observation, span = self.canonical_extract(store, "answer", original,
+            payload={"sender": "木桥"}, unit_kind="quote")
+        self.canonical_actions(store, [{"action_key": "answer-item", "type": "CREATE_ITEM", "item_id": "answer",
+            "kind": "technical", "title": "云笺和叶页的支持", "identity_scope": {"feature": "客户端支持"},
+            "observation_ids": [observation["observation_id"]]}])
+        snapshot = CanonicalReadingAdapter(store).snapshot("answer")
+        text = "木桥确认支持云笺和叶页，称它“本来就是给云笺和叶页做的”。"
+        provider = ScriptedTextProvider({"blocks": [{"id": "support", "role": "narrative", "text": text,
+                                                    "unit_indices": [0]}]})
+        publisher = ProjectionPublisher.for_store(store, self.base / "composition-WGO", file_lock=MacOSFileLock())
+        receipt = publisher.publish_canonical_item(store, "answer", BodyPlanWriter(provider, store.generation_id),
+                                                   request_id="compose-answer")
+        body = region_body(publisher.read(receipt.path).decode(), "body")
+        self.assertIn(text, body)
+        self.assertNotIn("[回复]", body)
+        self.assertIn(original, publisher.read("来源/answer-0001.md").decode())
+        self.assertIn(publisher.evidence_link("answer", span, alias="木桥的消息"), body)
+        plan = publisher.load_plan("answer")
+        self.assertEqual(plan.blocks[0].unit_ids, (snapshot.units[0].id,))
+        self.assertEqual(plan.blocks[0].evidence_ids, (span,))
+        with self.assertRaisesRegex(ReadingError, "markdown_quote_not_grounded"):
+            validate_body_plan(snapshot, replace(plan, blocks=(replace(plan.blocks[0], text="> 已实测全部客户端"),)))
+
+    def test_many_evidence_links_are_collapsed_without_losing_exact_targets(self):
+        snapshot = self.snapshot()
+        snapshot = replace(snapshot, evidence=tuple(EvidenceExcerpt("e" + str(i), "猫在箱子里。", speaker_name="小禾")
+            for i in range(1, 5)), units=(replace(snapshot.units[0], evidence_ids=("e1", "e2", "e3", "e4")),))
+        receipt = self.publish(snapshot)
+        body = region_body(self.publisher.read(receipt.path).decode(), "body")
+        self.assertIn("> [!quote]- 本段来源（4 条）", body)
+        for excerpt in snapshot.evidence:
+            link = self.publisher.evidence_link(snapshot.item_id, excerpt.id, alias="小禾的消息")
+            self.assertIn("> - " + link, body)
+            self.assertIn("^" + anchor(excerpt.id), self.publisher.read("来源/box-cat-0001.md").decode())
 
     def test_adapter_names_are_captured_labels_not_cross_source_identity(self):
         from core.semantic.store import SemanticStore

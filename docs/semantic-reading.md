@@ -59,8 +59,14 @@ independent parts of the Item may still use new blocks. Required verbatim fragme
 and exact grounded quotations remain protected; an unrelated block cannot be
 rewritten just because another block gained detail. This rule also applies to
 bounded pages; oversized lossless continuation retains its exact-text contract.
-Required quotations, steps and counterevidence are bound with unit `verbatim`
-fragments. Retracted/contested claims become structured unit `status` and `reason`
+Explicit required wording, steps and counterevidence are bound with unit `verbatim`
+fragments. The canonical adapter does not make every `quote` unit's whole message
+mandatory body text: the writer may select a meaningful exact phrase or faithfully
+paraphrase it, retaining attribution, uncertainty and the unit's evidence home.
+Full original excerpts remain on the source pages. This avoids forcing chat
+wrappers and repeated acknowledgments into prose; it does not drop canonical
+units, evidence or resources. Injected explicit `verbatim` requirements remain
+enforced. Retracted/contested claims become structured unit `status` and `reason`
 inputs; their blocks must acknowledge that status and cannot remain current
 conclusions. Original statements and evidence remain available. An
 `evidence_only` observation contributes source evidence without adding new
@@ -129,14 +135,14 @@ reused for a different input or route; a running/unknown result cannot be
 resubmitted under a new ID. A known validation failure can be retried explicitly
 with a fresh request. Calling the pure `plan` helper without a ledger is intended
 for isolated rendering tests, not runtime publication.
-Current Body artifact versions are `body-plan-v5` and `body-paged-v5`; these bind
-the incremental prose-writing contract and program-owned metadata rather than
+Current Body artifact versions are `body-plan-v6` and `body-paged-v6`; these bind
+the composed prose/source distinction, incremental writing and program-owned metadata rather than
 reusing earlier prompts. The paged aggregate key carries the same version, so a revised prompt
 never resumes a paged plan produced by an earlier one.
 Before dispatch, the writer also checks unresolved page/fragment descendants of
 the stable request ID across Body versions. A new prompt or context budget
 cannot bypass an earlier unknown outcome by choosing a different partition.
-The independent rebuild verifier also recognizes retained accepted v2/v3/v4 Body
+The independent rebuild verifier also recognizes retained accepted v2/v3/v4/v5 Body
 artifacts, whose attribution and evidence contracts remain valid; this prompt
 revision does not authorize rewriting accepted historical output.
 
@@ -162,6 +168,9 @@ fail closed. `resolve(id)` and `ready(id, revision)` recheck disk state.
 Structured body anchors sit on their own line with blank lines around them,
 immediately after the actual table, list, quote or code block, before generated
 source footers. This follows Obsidian's [block-link rules](https://obsidian.md/help/links).
+Multiple unplaced citations use a collapsed native Obsidian source callout below
+their block. Each exact evidence link remains available when expanded; explicitly
+placed citations and actual resource links remain in their reading positions.
 A single supported Markdown block can be [embedded](https://obsidian.md/help/embeds)
 in a View, with source links beside the embed. A compound BodyBlock containing
 several Markdown blocks uses a stable navigation link instead: one block ID

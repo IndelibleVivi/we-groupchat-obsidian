@@ -273,7 +273,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
                         "paragraphs": [{"text": c["after"], "change_ids": [c["id"]],
                             "evidence_refs": [{"item_id": c["item_id"], "evidence_id": e} for e in c["evidence_ids"]],
                             "scopes": [], "corrections": []} for c in changes]}), self.route)
-                if prompt.startswith("{") and json.loads(prompt).get("task", "").startswith("Write an evolving"):
+                if prompt.startswith("{") and {"snapshot", "writing_units", "previous"} <= json.loads(prompt).keys():
                     snapshot = json.loads(prompt)["snapshot"]
                     blocks = [{"id": "unit-" + unit["id"], "role": "narrative", "text": unit["text"],
                                "unit_ids": [unit["id"]], "evidence_ids": unit["evidence_ids"],

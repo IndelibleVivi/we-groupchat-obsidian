@@ -726,6 +726,57 @@ class EngineIntegrationTests(unittest.TestCase):
         self.assertEqual(engine.process_batch("long")["processing_receipt"], result["processing_receipt"])
         self.assertEqual((len(text.calls), len(decision.calls)), calls)
 
+    def test_page_context_keeps_earlier_subject_in_order_without_duplicate_core(self):
+        messages = ["普通接话 " + str(i) for i in range(30)]
+        messages[16] = "我做了红茶冻，又烤了饼干。"
+        messages[24] = "两样都做糊了。"
+        capture(self.store, "conversation", messages)
+        seen = []
+        class InspectText(FakeText):
+            def generate(self, prompt, **kwargs):
+                seen.append(json.loads(prompt.rsplit("\n", 1)[-1]))
+                return super().generate(prompt, **kwargs)
+        provider = InspectText()
+        result = SemanticEngine(self.store, provider, FakeDecision()).extract_batch("conversation")
+        self.assertEqual(len(seen), 2)
+        second = seen[1]
+        context = [s for s in second if not s["core"]]
+        self.assertIn(messages[16], [span["excerpt"] for source in context for span in source["spans"]])
+        self.assertEqual([s["occurred_at"] for s in second], sorted(s["occurred_at"] for s in second))
+        self.assertLessEqual(len(context), 24)
+        self.assertEqual(sum(s["core"] for page in seen for s in page), len(messages))
+        self.assertEqual(len(result["observations"]), len(messages))
+        self.assertLess(max(provider.prompt_sizes), 100000)
+
+    def test_existing_page_keeps_its_frozen_two_message_context(self):
+        from core.semantic.attribution import EXTRACTION_PROMPT_VERSION
+        capture(self.store, "frozen-context", ["日常消息 " + str(i) for i in range(30)])
+        batch = self.store.get_batch("frozen-context")
+        sources = tuple(CapturedSource(m["source_version_id"], m["text"], occurred_at=m["source_sent_at"],
+            **captured_source_metadata(batch["source_namespace"], batch["chat_id"], m["payload"])) for m in batch["members"])
+        seen = []
+        class InspectText(FakeText):
+            def generate(self, prompt, **kwargs):
+                seen.append(json.loads(prompt.rsplit("\n", 1)[-1]))
+                return super().generate(prompt, **kwargs)
+        provider = InspectText()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        parent = engine.jobs.ensure("extract", {"batch_id": "frozen-context", "members": [asdict(s) for s in sources]},
+            {"prompt": EXTRACTION_PROMPT_VERSION, "generation": self.store.generation_id, "route": asdict(provider.route)})
+        spans = prepare_spans(sources, namespace=self.store.generation_id)
+        old = engine.jobs.ensure("extract_page", {"parent_job_id": parent["job_id"], "page": 1,
+            "span_ids": [s.span_id for s in spans[22:]], "source_ids": sorted(s.source_id for s in sources[22:]),
+            "core_source_ids": [s.source_id for s in sources[24:]]}, {"prompt": "semantic-extraction-pages-v2-attribution"})
+        engine.extract_batch("frozen-context")
+        self.assertEqual({s["source_id"] for s in seen[1] if not s["core"]}, {s.source_id for s in sources[22:24]})
+        self.assertEqual([s["source_id"] for s in seen[1]], [s.source_id for s in sources[24:] + sources[22:24]])
+        with closing(self.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT state FROM jobs WHERE job_id=?", (old["job_id"],)).fetchone()[0], "done")
+            self.assertEqual(db.execute("SELECT count(*) FROM jobs WHERE kind='extract_page'").fetchone()[0], 2)
+        calls = len(provider.calls)
+        engine.extract_batch("frozen-context")
+        self.assertEqual(len(provider.calls), calls)
+
     def test_extraction_page_crash_reuses_already_accepted_pages(self):
         class InterruptedText(FakeText):
             failed = False

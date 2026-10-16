@@ -14,6 +14,14 @@ offsets, or excerpts. The engine assigns stable unit, claim and Observation IDs.
 Facts, steps, quotations, scenes,
 counterevidence and resources retain provenance. Unknown claim qualifiers stay
 unknown; matching names do not establish entity identity.
+Observation boundaries follow a specific experience, question or connected
+conversation, not individual messages or speaker changes. A scene can cite many
+messages and preserve each person's different position. Distinctive quotations
+may have their own units; copying every acknowledgment into a quote unit is not
+required for preservation. Exact source spans remain available independently.
+Resolution can assign several such Observations to one grounded Item; an
+Observation is not an obligation to create another page. A shared broad topic,
+entity or timestamp still cannot merge independent cases.
 For a quote unit, the model selects `span_indices` and omits `text`. The program
 copies those complete, contiguous source spans from one message verbatim before
 persisting the accepted artifact; canonical units still always have `text`.
@@ -74,8 +82,12 @@ from the canonical input binding.
 
 Long captures use accepted `extract_page` artifacts, with input span packets
 bounded to 22,000 JSON bytes per page. A source may span several pages. Previous
-message context is marked non-core and cannot independently produce another
-Observation. The parent extraction artifact aggregates validated pages before
+page context is marked non-core and cannot independently produce another
+Observation. New pages retain the entire preceding bounded page, in source
+order, so a pronoun or reply can still see a subject more than two messages
+back. Core page limits remain unchanged; overlap grants no identity proof.
+An existing page job keeps its exact frozen context and accepted/unknown
+outcome on resume, including earlier two-message overlap. The parent extraction artifact aggregates validated pages before
 canonical commit. An unclassified fragment keeps its whole source unread even
 when other fragments produced Observations. Only explicit supported terminal
 dispositions can finish a source with zero Observations. Empty

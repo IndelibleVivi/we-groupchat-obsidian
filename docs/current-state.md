@@ -73,9 +73,18 @@ from the same material. Incomplete scope cannot combine separate trials, and a
 newer overlapping contrary report prevents an unconditional current-state match.
 Incremental BodyPlans may rewrite automatic prose when new details join its
 stable block; unchanged blocks, exact quotations and manual edits remain
-protected. Current BodyPlan artifacts use v5, while accepted v2–v4 evidence
+protected. Current BodyPlan artifacts use v6, while accepted v2–v5 evidence
 remains verifiable. These are candidate source behaviors, not evidence of a
 private generation being repaired, re-rendered or activated.
+The canonical reading adapter now separates quote provenance from mandatory
+full-message body wording. Connected exchanges can be composed with selected
+quotations while every source remains reachable; remaining citations use a
+collapsible source callout. Extraction and resolution guidance retains whole
+scenes without treating message or Observation counts as required page counts.
+Structural checks do not establish editorial quality or owner acceptance.
+New extraction pages include the preceding bounded page as ordered non-core
+context instead of only its last two messages. Existing page jobs keep their
+frozen inputs and outcomes; this change does not silently re-extract old work.
 
 Known deferred decisions now admit dependency-bound replanning and later-batch
 knowledge processing, while the applied prefix remains blocked until its gap

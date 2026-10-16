@@ -176,6 +176,8 @@
   unresolved prefix. Candidate refinement examines every possible scope before
   ruling it out; ambiguity is never top-k absence. `watches.py` maintains exact temporal
   witnesses and Episodes; time proximity or a shared URL alone is not identity.
+  New extraction pages carry the preceding bounded page as ordered non-core
+  context; resumed page jobs retain their exact frozen context and outcome.
   Material withdrawal is proposition- and scope-specific; explicit claim
   restatement/replay lineage carries it across Items without revoking unrelated
   facts in a report. Evidence-only claims may bridge that lineage but cannot
@@ -223,6 +225,11 @@
   verbatim obligations; unaffected blocks retain exact bytes. Markdown tables, lists and attributed quotations
   retain exact evidence links, unit homes and original words. Manual conflicts retain exact bytes and require
   visible resolution. Properties/actions/query use canonical revisions.
+  A canonical `quote` unit does not force its whole message into body prose:
+  exact source excerpts remain on source pages; meaningful quotation and faithful
+  paraphrase can share one content home. Explicit `verbatim`, procedural and
+  correction obligations remain enforced. Do not restore transcript copying as
+  a substitute for evidence preservation.
   Only the optional `integrations/obsidian/` plugin provides a verified visible
   open event; no plugin means manual known/read controls, not assumed reading.
   Historical rebuild does not notify. Brief opening, item reading, knowing and

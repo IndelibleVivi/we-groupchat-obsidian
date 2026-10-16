@@ -53,6 +53,10 @@ edits retain their existing protections. The optional [local Obsidian plugin](in
 records only a verified visible open. Without it, use explicit read/known actions.
 The plugin is source-only and is not installed or enabled automatically.
 
+The body can combine an exchange into a coherent explanation and select its
+key quotations; complete original excerpts remain on linked source pages.
+Multiple remaining source links are grouped in a collapsible source callout.
+
 SQLite remains the canonical store. Embeddings can use an explicitly configured
 loopback model service or Cloudflare BGE-M3; derived retrieval can use the local
 cosine index or Cloudflare Vectorize. Text generation and typed decisions have
