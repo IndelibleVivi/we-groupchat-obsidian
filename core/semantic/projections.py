@@ -424,12 +424,14 @@ LEGACY_READING_POLICY = "derived-verbatim-v1"
 CONTENT_READING_POLICY = "content-responsibility-v1"
 SOURCE_READING_POLICY = "source-composition-v1"
 EDITORIAL_READING_POLICY = "editorial-composition-v1"
+EDITORIAL_V2_READING_POLICY = "editorial-composition-v2"
 
 
 def reading_policy(binding) -> str:
     """Missing metadata is the frozen derived-wording contract, never an upgrade."""
     value = binding.get("reading_policy", LEGACY_READING_POLICY)
-    if value not in (LEGACY_READING_POLICY, CONTENT_READING_POLICY, SOURCE_READING_POLICY, EDITORIAL_READING_POLICY):
+    if value not in (LEGACY_READING_POLICY, CONTENT_READING_POLICY, SOURCE_READING_POLICY,
+                     EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY):
         raise ReadingError("reading_policy_invalid")
     return value
 
@@ -495,7 +497,8 @@ def _snapshot_reading_policy(snapshot):
 
 def _body_prompt_version(snapshot, *, paged=False):
     policy = _snapshot_reading_policy(snapshot)
-    version = ("v14" if policy == EDITORIAL_READING_POLICY else "v13" if policy == SOURCE_READING_POLICY
+    version = ("v15" if policy == EDITORIAL_V2_READING_POLICY else "v14" if policy == EDITORIAL_READING_POLICY
+               else "v13" if policy == SOURCE_READING_POLICY
                else "v12" if policy == CONTENT_READING_POLICY else "v11")
     return ("body-paged-" if paged else "body-plan-") + version
 
@@ -647,7 +650,7 @@ class CanonicalReadingAdapter:
         return ReadingSnapshot(item_id, item["content_revision"], item["title"], self._time(item["semantic_updated_at"]),
                                tuple(units), tuple(excerpts.values()), tuple(resource_by_id.values()),
                                tuple(relations), item["kind"], generation_metadata.get("reading_policy"),
-                               item["identity_scope"] if policy in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY) else None)
+                               item["identity_scope"] if policy in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY) else None)
 
 
 @dataclass(frozen=True)
@@ -762,7 +765,7 @@ class BodyPlanWriter:
         if ledger is not None and ledger.generation_id != self.generation_id:
             raise ReadingError("reading_generation_mismatch")
         policy = _snapshot_reading_policy(snapshot)
-        if policy in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY):
+        if policy in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY):
             material = {e.id for e in snapshot.evidence if e.text or e.context}
             resources = {r.id for r in snapshot.resources}
             if any(not (set(u.evidence_ids) & material or set(u.resource_ids) & resources or any(u.verbatim)) for u in snapshot.units):
@@ -804,6 +807,8 @@ class BodyPlanWriter:
 
     @staticmethod
     def _prompt(snapshot, previous, unchanged, **context):
+        if _snapshot_reading_policy(snapshot) == EDITORIAL_V2_READING_POLICY:
+            return BodyPlanWriter._editorial_v2_prompt(snapshot, previous, unchanged, **context)
         if _snapshot_reading_policy(snapshot) == EDITORIAL_READING_POLICY:
             return BodyPlanWriter._editorial_prompt(snapshot, previous, unchanged, **context)
         if _snapshot_reading_policy(snapshot) == SOURCE_READING_POLICY:
@@ -918,6 +923,61 @@ class BodyPlanWriter:
             # context for that material rather than generic demonstrations.
             prompt.pop("input_semantics")
             prompt.pop("writing_examples")
+        return redact_urls_in_text(json_text(prompt))
+
+    @staticmethod
+    def _editorial_v2_prompt(snapshot, previous, unchanged, **context):
+        # V14 remains byte-frozen, including its demonstration text. V15 uses
+        # the same complete payload/binding and single composition response.
+        prompt = json.loads(BodyPlanWriter._editorial_prompt(snapshot, previous, unchanged, **context))
+        _intro, instructions = prompt["task"].split("\n", 1)
+        schema, instructions = instructions.split("\n", 1)
+        # Repair replaces only the generic prefix before the JSON instruction.
+        # Keep the concrete editorial contract after it so repair retains it.
+        prompt["task"] = (
+            "依据完整来源写成值得再读的 Obsidian 正文，直接围绕事情本身成文。\n" + schema + "\n"
+            "把材料写成事情本身的说明或故事，让读者直接理解具体对象、问题与经历。技术正文从问题对象和症状进入，"
+            "把候选原因与支持它的证据范围写在一起，再分清可尝试的办法和已经观察到的结果。"
+            "句子的骨架是现象、条件、方案及其适用范围；人名在区分实际经历、实测归属或判断来源有意义的位置自然出现。"
+            "生活正文沿具体经历、场景和反应连成段落，保留不同人的处境与有意味的接话。\n"
+            "短材料自然合成少数连续段落，合并重叠的含义；只为独立问题分节，内容单元不是章节或人物报告清单。"
+            "例如围绕导出故障解释表现、可能原因和可试方案，而不以‘各人碰到的情况/谁担心什么/谁提出什么’作为骨架。\n"
+            "来源只有并列建议时，用并列句或无序列表呈现可选办法，各自保留条件与限制；只有来源明确给出必要先后或前置依赖时，"
+            "才用有序步骤表达操作顺序。发言先后和单元序号不构成操作依赖。建议保持‘可尝试’的性质；"
+            "实测结果只覆盖原文实际验证的对象和条件，不把建议或局部成功写成已普遍奏效。\n" + instructions)
+        if "writing_examples" in prompt:
+            prompt["writing_examples"] = [
+                {"kind": "technical", "illustrative_only": True,
+                 "source_excerpts": [
+                     {"speaker_name": "澄雨", "text": "大表用 X 格式导出，总在一半停住。"},
+                     {"speaker_name": "洛杉", "text": "可能是内存压力，我还没有日志。"},
+                     {"speaker_name": "洛杉", "text": "可以缩小单次导出的数据量。"},
+                     {"speaker_name": "余晴", "text": "改用 Y 格式也可以试试，大表上还没有结果。"},
+                     {"speaker_name": "澄雨", "text": "我只在小表试过 Y，能导完。"}],
+                 "units": [
+                     {"role": "fact", "text": "X 格式的大表导出中途停止。", "evidence_indices": [0], "verbatim": []},
+                     {"role": "fact", "text": "内存压力是缺少日志支持的候选原因。", "evidence_indices": [1], "verbatim": []},
+                     {"role": "step", "text": "可尝试缩小单次导出量。", "evidence_indices": [2], "verbatim": []},
+                     {"role": "step", "text": "换 Y 格式是另一项建议，大表尚无实测结果。", "evidence_indices": [3], "verbatim": []},
+                     {"role": "fact", "text": "澄雨只验证过 Y 格式小表导出成功。", "evidence_indices": [4], "verbatim": []}],
+                 "response": {"blocks": [
+                     {"id": "export-problem", "role": "narrative", "unit_indices": [0, 1],
+                      "text": "X 格式的大表导出会在中途停止。内存压力是一个候选原因，目前还没有日志支持这一判断。"},
+                     {"id": "export-options", "role": "narrative", "unit_indices": [2, 3, 4],
+                      "text": "可尝试的办法包括：\n\n- 缩小单次导出的数据量。\n- 改用 Y 格式。\n\n"
+                              "Y 格式已在澄雨的小表上完成导出，大表上的效果仍无实测结果。"}]}},
+                {"kind": "life", "illustrative_only": True,
+                 "source_excerpts": [
+                     {"speaker_name": "澄雨", "text": "雨声一大，我家猫就钻纸箱。"},
+                     {"speaker_name": "澄雨", "text": "那箱子是搬家剩的。"},
+                     {"speaker_name": "洛杉", "text": "我家那只听到大雨就躲洗衣篮。"}],
+                 "units": [
+                     {"role": "scene", "text": "澄雨家的猫在雨声很大时钻进纸箱。", "evidence_indices": [0], "verbatim": []},
+                     {"role": "fact", "text": "澄雨的纸箱是搬家留下的。", "evidence_indices": [1], "verbatim": []},
+                     {"role": "scene", "text": "洛杉家的猫在大雨声中躲进洗衣篮。", "evidence_indices": [2], "verbatim": []}],
+                 "response": {"blocks": [{"id": "rain", "role": "narrative", "unit_indices": [0, 1, 2],
+                     "text": "雨声一大，澄雨家的猫就钻进搬家留下的纸箱；洛杉家的猫则躲进洗衣篮。"}]}},
+            ]
         return redact_urls_in_text(json_text(prompt))
 
     @staticmethod
@@ -1152,7 +1212,7 @@ class BodyPlanWriter:
     def _partial(snapshot, units, *, include_supplemental=False):
         evidence = {id_ for unit in units for id_ in unit.evidence_ids}
         resources = {id_ for unit in units for id_ in unit.resource_ids}
-        source = _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY)
+        source = _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY)
         if source and include_supplemental:
             evidence.update(e.id for e in snapshot.evidence if not any(e.id in unit.evidence_ids for unit in snapshot.units))
             resources.update(r.id for r in snapshot.resources if not any(r.id in unit.resource_ids for unit in snapshot.units))
@@ -1194,7 +1254,7 @@ class BodyPlanWriter:
             by_group[key].append(unit)
         accepted, pending, page_number = [], [], 0
         supplemental_unit = None
-        if _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY):
+        if _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY):
             # Supplemental sources/resources go to the first group that needs
             # writing, even when preceding stable groups bypass the provider.
             supplemental_unit = next((group[0].id for key, group in groups
@@ -1267,7 +1327,7 @@ class BodyPlanWriter:
                                *, include_supplemental=False):
         """Pack adjacent complete sources into bounded windows at one home.
 
-        V13 omits derived prose; v14 supplies editable responsibility slices in
+        V13 omits derived prose; v14/v15 supply editable responsibility slices in
         these same continuations. Core windows require the model's unit_indices
         mapping. Context-only tails have no required units or narrative output.
         """
@@ -1281,7 +1341,7 @@ class BodyPlanWriter:
         covered = {u for u in previous.unit_ids} if preserve_previous else set()
         delivered_resources, counter = set(), 0
         limit = max(128, (self.max_input_bytes - 5000) // 4)
-        editorial = _snapshot_reading_policy(snapshot) == EDITORIAL_READING_POLICY
+        editorial = _snapshot_reading_policy(snapshot) in (EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY)
         # Long editable responsibilities share these same source continuations;
         # consume successive slices, never a meaning x source cross product.
         # A short responsibility remains available beside each source window.
@@ -1456,7 +1516,7 @@ class BodyPlanWriter:
         literal obligations use exact continuation. Every evidence/context
         segment is still supplied, including pages with no narrative output.
         """
-        if _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY):
+        if _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY):
             return self._source_fragment_group(snapshot, units, previous, preserve_previous, binding, request_id, ledger,
                                                include_supplemental=include_supplemental)
         legacy = _snapshot_reading_policy(snapshot) == LEGACY_READING_POLICY

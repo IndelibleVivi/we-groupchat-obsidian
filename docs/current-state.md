@@ -79,19 +79,23 @@ from the same material. Incomplete scope cannot combine separate trials, and a
 newer overlapping contrary report prevents an unconditional current-state match.
 Incremental BodyPlans may rewrite automatic prose when new details join its
 stable block; unchanged blocks, exact quotations and manual edits remain
-protected. Fresh rebuild plans freeze `reading_policy="editorial-composition-v1"`
-and use Body v14. The writer receives complete editable content responsibilities,
+protected. Fresh rebuild plans freeze `reading_policy="editorial-composition-v2"`
+and use Body v15. The writer receives complete editable content responsibilities,
 source evidence and context, attribution, typed obligations and unit mappings.
 Complete source objects follow reliable source timestamps; undated evidence has
 no inferred chronology. Item identity classification, commit times and provenance
 labels stay out of the editorial input while canonical snapshots, fingerprints,
 validation and stable-home binding keep their full data. Explicit verbatim
 obligations and source quotations retain their exact-word checks.
+V15's positive examples organize the thing itself as connected prose. They keep
+candidate causes and untested actions distinct from observed results; parallel
+advice cannot become a required order. Editorial-composition-v1 retains its v14
+inputs and examples unchanged.
 `source-composition-v1` plans/generations retain Body v13 and its exact source-only
 inputs; `content-responsibility-v1` retains Body v12. Missing fields
 keep `derived-verbatim-v1`, Body v11 and their frozen inputs. A policy can first
 bind only an empty generation. Verification checks the manifest/generation
-binding and accepts the policy's versions: v14, v13, v12, or retained v2-v11.
+binding and accepts the policy's versions: v15, v14, v13, v12, or retained v2-v11.
 These are candidate source behaviors, not evidence of a private generation
 being repaired, re-rendered or activated.
 Frozen v11/v12 composition prompts distinguish derived text from source

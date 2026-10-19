@@ -13,7 +13,7 @@ from core.semantic.projections import (
     BodyBlock, BodyPlan, BodyPlanWriter, CanonicalReadingAdapter, EvidenceExcerpt, ProjectionPublisher,
     ReadingError, ReadingLedger, ReadingRelation, ReadingResource, ReadingSnapshot,
     ReadingUnit, anchor, fingerprint, property_value, region_body, validate_body_plan, wikilink,
-    bind_reading_policy, CONTENT_READING_POLICY, SOURCE_READING_POLICY, EDITORIAL_READING_POLICY,
+    bind_reading_policy, CONTENT_READING_POLICY, SOURCE_READING_POLICY, EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY,
 )
 
 
@@ -266,6 +266,84 @@ class ProjectionTests(ReadingHarness):
             prompt = BodyPlanWriter._prompt(snapshot, prior, fixed, **context)
             self.assertEqual((len(prompt.encode()), fingerprint(prompt)), (size, expected))
 
+    def test_v14_prompt_bytes_remain_frozen_for_ordinary_previous_pages_and_continuations(self):
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY)
+        previous = self.plan(snapshot)
+        cases = ((None, {}, {}, 6203, "0dc13b42a54ced2c64d280bfaeff99eab6d5253b584ddd0be5cc1747be07d30c"),
+                 (previous, {b.id: b for b in previous.blocks}, {}, 4755,
+                  "de0c43b4316fb28cc019e7917137a2531f84112326079f6b898709df0b9033ac"),
+                 (None, {}, {"phase": "body_page_v1", "snapshot_binding": "synthetic-binding"}, 6226,
+                  "7f5807ff4d06d3618e6971b0891e44c8e3d5478070c5f7fbc259d71b65c301eb"),
+                 (None, {}, {"phase": "body_source_fragment_v1", "snapshot_binding": "synthetic-binding",
+                             "continuation": {"index": 0, "core_evidence_ids": ["e1"]}}, 4648,
+                  "6ee0716037e140612f3b84acbd0636c35461bf5468b6e449dc129c0f219fab1a"),
+                 (None, {}, {"phase": "body_literal_fragment_v1", "snapshot_binding": "synthetic-binding",
+                             "continuation": {"index": 0}}, 4622,
+                  "fa344e50d142dde54ecf865ce9d6909359caccbb92a1ad2640e19ef58be6c261"))
+        for prior, fixed, context, size, expected in cases:
+            prompt = BodyPlanWriter._prompt(snapshot, prior, fixed, **context)
+            self.assertEqual((len(prompt.encode()), fingerprint(prompt)), (size, expected))
+
+    def test_v14_actual_paged_and_fragment_requests_preserve_frozen_inputs_and_accepted_replay(self):
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY,
+            units=tuple(ReadingUnit("u" + str(i), "内容责任" + str(i), ("e" + str(i),)) for i in range(8)),
+            evidence=tuple(EvidenceExcerpt("e" + str(i), "来源内容与范围。" * 40 + str(i), source_time="2026-10-09T12:00:00+08:00") for i in range(8)))
+        provider = ScriptedTextProvider(*([self.source_response] * 100))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
+        plan = writer.plan(snapshot, request_id="v14-paged-baseline")
+        self.assertEqual([fingerprint(call[0]) for call in provider.calls], [
+            "1b58cbee0ead2d43d3e3438b97d01acefc743b4dfeba1d8deb7b5d20aff8b7cd",
+            "c9a572ee2badb28ee8b8b44ec0b18b34c9d91e1958c4069e6520a2e4fe392474",
+            "9f948121712ff14300b83e5db00535526cd75051b907fffb23b5ca361fee9b24",
+            "3ad8547bbe30fc25c399700e3b7e41cd0af214005133feb2a7cf624a757fda80"])
+        rows = [dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")]
+        self.assertEqual(writer.plan(snapshot, request_id="v14-paged-baseline"), plan)
+        self.assertEqual(len(provider.calls), 4)
+        self.assertEqual([dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")], rows)
+        fragment = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY,
+            units=(ReadingUnit("whole", "完整保留操作与限制。" * 100, ("e",), verbatim=("显式原文。" * 100,)),),
+            evidence=(EvidenceExcerpt("e", "真实来源与限定。" * 300, "此前与后续上下文。" * 100, "2026-10-09T12:00:00+08:00"),))
+        provider = ScriptedTextProvider(*([self.source_response] * 100))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000)
+        plan = writer.plan(fragment, request_id="v14-fragment-baseline")
+        self.assertEqual(len(provider.calls), 19)
+        self.assertEqual(fingerprint(json.dumps([call[0] for call in provider.calls], ensure_ascii=False, sort_keys=True, separators=(",", ":"))),
+                         "f601c0bbec4b7a25dda7281714d93a60bc15ae414d35ddf5eb1dd968b05659fa")
+        rows = [dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")]
+        self.assertEqual(writer.plan(fragment, request_id="v14-fragment-baseline"), plan)
+        self.assertEqual(len(provider.calls), 19)
+        self.assertEqual([dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")], rows)
+
+    def test_v15_examples_compose_the_thing_with_parallel_options_and_scoped_results(self):
+        snapshot = replace(self.snapshot(), reading_policy="editorial-composition-v2")
+        prompt = json.loads(BodyPlanWriter._prompt(snapshot, None, {}))
+        retained = json.loads(BodyPlanWriter._prompt(replace(snapshot, reading_policy=EDITORIAL_READING_POLICY), None, {}))
+        self.assertEqual({k: v for k, v in prompt.items() if k not in {"task", "writing_examples"}},
+                         {k: v for k, v in retained.items() if k not in {"task", "writing_examples"}})
+        examples = prompt["writing_examples"]
+        technical = next(e for e in examples if e["kind"] == "technical")
+        life = next(e for e in examples if e["kind"] == "life")
+        self.assertIn("并列建议", prompt["task"])
+        self.assertIn("来源明确", prompt["task"])
+        technical_text = "\n".join(block["text"] for block in technical["response"]["blocks"])
+        self.assertRegex(technical_text, r"候选|可能")
+        self.assertIn("可尝试", technical_text)
+        self.assertIn("小表", technical_text)
+        self.assertNotRegex(technical_text, r"(?m)^\s*\d+[.)、]")
+        self.assertLess(len(technical["response"]["blocks"]), len(technical["units"]))
+        self.assertEqual(len(life["response"]["blocks"]), 1)
+        for example in examples:
+            from core.semantic.engine import UNIT_KINDS
+            self.assertTrue({unit["role"] for unit in example["units"]} <= UNIT_KINDS)
+            evidence = tuple(EvidenceExcerpt("e" + str(i), source["text"], speaker_name=source["speaker_name"])
+                             for i, source in enumerate(example["source_excerpts"]))
+            units = tuple(ReadingUnit("u" + str(i), unit["text"], tuple("e" + str(e) for e in unit["evidence_indices"]),
+                                      role=unit["role"], verbatim=tuple(unit["verbatim"])) for i, unit in enumerate(example["units"]))
+            local = replace(snapshot, units=units, evidence=evidence)
+            plan = BodyPlanWriter(ScriptedTextProvider(example["response"]), self.ledger.generation_id).plan(local, request_id="v15-example")
+            self.assertEqual({u for block in plan.blocks for u in block.unit_ids}, {u.id for u in units})
+            self.assertEqual({e for block in plan.blocks for e in block.evidence_ids}, {e.id for e in evidence})
+
     def test_missing_policy_v11_prompt_bytes_remain_frozen(self):
         snapshot = self.snapshot()
         previous = self.plan(snapshot)
@@ -359,11 +437,17 @@ class ProjectionTests(ReadingHarness):
         self.assertEqual(len(provider.calls), count)
 
     def test_editorial_long_meaning_is_sliced_once_with_complete_sources_and_strict_literals(self):
+        self.check_editorial_long_meaning(EDITORIAL_READING_POLICY)
+
+    def test_v15_long_meaning_sources_and_explicit_literals_use_the_same_bounded_home(self):
+        self.check_editorial_long_meaning(EDITORIAL_V2_READING_POLICY)
+
+    def check_editorial_long_meaning(self, policy):
         meaning = "".join("派生报告包装：步骤" + str(i) + "需要先验证条件与限定。" for i in range(160))
         source = EvidenceExcerpt("long-source", "来源核心事实与操作顺序。" * 300, "仅在这个范围验证。" * 150,
                                  "2026-10-09T12:00:00+08:00", speaker_name="甲")
         literal = "显式原文的术语与标点。" * 150
-        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY,
+        snapshot = replace(self.snapshot(), reading_policy=policy,
             units=(ReadingUnit("long-meaning", meaning, (source.id,), ("log",), role="step", verbatim=(literal,)),),
             evidence=(source,), resources=(ReadingResource("log", "日志"),))
         def compose(prompt):
@@ -400,8 +484,17 @@ class ProjectionTests(ReadingHarness):
         self.assertEqual(len(provider.calls), count)
 
     def test_editorial_policy_binding_is_empty_only_and_old_bindings_do_not_upgrade(self):
+        self.check_editorial_binding(EDITORIAL_READING_POLICY)
+
+    def test_v15_empty_binding_does_not_upgrade_populated_or_explicit_v14(self):
+        self.check_editorial_binding(EDITORIAL_V2_READING_POLICY)
+
+    def check_editorial_binding(self, policy):
         from core.semantic.store import SemanticStore
-        for previous in (None, CONTENT_READING_POLICY, SOURCE_READING_POLICY):
+        prior_policies = (None, CONTENT_READING_POLICY, SOURCE_READING_POLICY)
+        if policy == EDITORIAL_V2_READING_POLICY:
+            prior_policies += (EDITORIAL_READING_POLICY,)
+        for previous in prior_policies:
             store = SemanticStore(self.base / (str(previous) + ".sqlite"), "binding")
             ReadingLedger(store.connect, store.generation_id)
             with store.transaction() as conn:
@@ -412,21 +505,21 @@ class ProjectionTests(ReadingHarness):
                         "binding", "existing", "existing", "synthetic", "body-plan-v11", "unknown", ""))
                 before = conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]
                 with self.assertRaisesRegex(ReadingError, "reading_policy_mismatch"):
-                    bind_reading_policy(conn, {"reading_policy": EDITORIAL_READING_POLICY})
+                    bind_reading_policy(conn, {"reading_policy": policy})
                 self.assertEqual(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0], before)
         store = SemanticStore(self.base / "editorial-binding.sqlite", "editorial-binding")
         with store.transaction() as conn:
-            bind_reading_policy(conn, {"reading_policy": EDITORIAL_READING_POLICY})
+            bind_reading_policy(conn, {"reading_policy": policy})
         observation, span = self.canonical_extract(store, "fresh", "先停止服务，再备份。", unit_kind="step", unit_text="派生说明：先停止服务，再执行备份。")
         self.canonical_actions(store, [{"action_key": "create", "type": "CREATE_ITEM", "item_id": "procedure", "title": "服务备份",
             "kind": "technical", "identity_scope": {"topic": "服务备份"}, "observation_ids": [observation["observation_id"]]}])
         snapshot = CanonicalReadingAdapter(store).snapshot("procedure")
-        self.assertEqual(snapshot.reading_policy, EDITORIAL_READING_POLICY)
+        self.assertEqual(snapshot.reading_policy, policy)
         self.assertEqual(snapshot.units[0].text, "派生说明：先停止服务，再执行备份。")
         self.assertEqual(snapshot.units[0].verbatim, ())
         with store.transaction() as conn:
             before = conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]
-            self.assertEqual(bind_reading_policy(conn, {"reading_policy": EDITORIAL_READING_POLICY})["reading_policy"], EDITORIAL_READING_POLICY)
+            self.assertEqual(bind_reading_policy(conn, {"reading_policy": policy})["reading_policy"], policy)
             self.assertEqual(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0], before)
 
     def test_editorial_minimal_identity_envelope_separates_distinct_items(self):
@@ -449,13 +542,26 @@ class ProjectionTests(ReadingHarness):
         self.assertEqual(len(provider.calls), 2)
 
     def test_editorial_repair_exhaustion_and_cross_version_unknown_trees_are_durable(self):
-        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY)
-        provider = ScriptedTextProvider({"blocks": []}, self.source_response)
+        self.check_editorial_repair_and_unknown(EDITORIAL_READING_POLICY, "v14")
+
+    def test_v15_repairs_stay_bounded_and_unknown_v14_or_v15_never_reissues(self):
+        self.check_editorial_repair_and_unknown(EDITORIAL_V2_READING_POLICY, "v15")
+
+    def check_editorial_repair_and_unknown(self, policy, version_suffix):
+        snapshot = replace(self.snapshot(), reading_policy=policy)
+        def repair(prompt):
+            if policy == EDITORIAL_V2_READING_POLICY:
+                task = json.loads(prompt)["task"]
+                self.assertIn("并列建议", task)
+                self.assertIn("只有来源明确", task)
+                self.assertIn("不把建议或局部成功写成已普遍奏效", task)
+            return self.source_response(prompt)
+        provider = ScriptedTextProvider({"blocks": []}, repair)
         writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
         plan = writer.plan(snapshot, request_id="editorial-repair")
         before = [dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")]
         self.assertEqual([row["status"] for row in before], ["failed", "accepted"])
-        self.assertTrue(all(row["prompt_version"] == "body-plan-v14" for row in before))
+        self.assertTrue(all(row["prompt_version"] == "body-plan-" + version_suffix for row in before))
         self.assertEqual(writer.plan(snapshot, request_id="editorial-repair"), plan)
         self.assertEqual(len(provider.calls), 2)
         exhausted = replace(snapshot, item_id="exhausted")
@@ -465,7 +571,7 @@ class ProjectionTests(ReadingHarness):
             with self.assertRaises(ReadingError):
                 failing.plan(exhausted, request_id="editorial-exhausted")
         self.assertEqual(len(bad.calls), 2)
-        for version in ("body-plan-v11", "body-plan-v12", "body-plan-v13", "body-plan-v14"):
+        for version in ("body-plan-v11", "body-plan-v12", "body-plan-v13", "body-plan-v14", "body-plan-v15"):
             for suffix in ("", ":page:0", ":group:0:source:0", ":repair:original"):
                 root = "guard-" + version + suffix.replace(":", "-")
                 with self.ledger.transaction() as conn:
@@ -478,9 +584,15 @@ class ProjectionTests(ReadingHarness):
         self.assertEqual([dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid LIMIT 2")], before)
 
     def test_editorial_partial_pages_resume_exact_and_unknown_child_blocks(self):
+        self.check_editorial_partial_pages(EDITORIAL_READING_POLICY, "v14")
+
+    def test_v15_partial_pages_resume_exact_and_unknown_child_blocks(self):
+        self.check_editorial_partial_pages(EDITORIAL_V2_READING_POLICY, "v15")
+
+    def check_editorial_partial_pages(self, policy, version_suffix):
         units = tuple(ReadingUnit("u" + str(i), "条件完整的可编辑责任" + str(i), ("e" + str(i),)) for i in range(12))
         evidence = tuple(EvidenceExcerpt("e" + str(i), "独立事实与适用范围。" * 25 + str(i), source_time="2026-10-09T12:00:00+08:00") for i in range(12))
-        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY, units=units, evidence=evidence)
+        snapshot = replace(self.snapshot(), reading_policy=policy, units=units, evidence=evidence)
         provider = ScriptedTextProvider(*([self.source_response] * 100))
         writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
         original = writer._invoke
@@ -500,7 +612,7 @@ class ProjectionTests(ReadingHarness):
         count = len(provider.calls)
         self.assertEqual(writer.plan(snapshot, request_id="editorial-partial"), plan)
         self.assertEqual(len(provider.calls), count)
-        self.assertEqual(self.ledger.one("SELECT prompt_version FROM reader_text_artifacts WHERE request_id='editorial-partial'")[0], "body-paged-v14")
+        self.assertEqual(self.ledger.one("SELECT prompt_version FROM reader_text_artifacts WHERE request_id='editorial-partial'")[0], "body-paged-" + version_suffix)
         disconnected = ScriptedTextProvider(self.source_response, RuntimeError("synthetic disconnected"))
         writer = BodyPlanWriter(disconnected, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
         changed = replace(snapshot, item_id="unknown-pages")
@@ -512,7 +624,13 @@ class ProjectionTests(ReadingHarness):
         self.assertEqual(len(disconnected.calls), calls)
 
     def test_editorial_increment_preserves_unaffected_bytes_manual_conflicts_and_strict_sources(self):
-        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY,
+        self.check_editorial_increment(EDITORIAL_READING_POLICY)
+
+    def test_v15_increment_preserves_bytes_conflicts_literal_and_quote_validation(self):
+        self.check_editorial_increment(EDITORIAL_V2_READING_POLICY)
+
+    def check_editorial_increment(self, policy):
+        snapshot = replace(self.snapshot(), reading_policy=policy,
             units=(ReadingUnit("steps", "派生说明：先停服务。", ("e1",), role="step"), ReadingUnit("walk", "周末去散步。", ("e2",))),
             evidence=(EvidenceExcerpt("e1", "先停服务。"), EvidenceExcerpt("e2", "周末散步。")))
         first = self.plan(snapshot)
@@ -541,9 +659,15 @@ class ProjectionTests(ReadingHarness):
                     self.ledger.generation_id).plan(strict, request_id="strict-editorial")
 
     def test_editorial_paged_increment_delivers_supplemental_and_bypasses_unchanged_homes(self):
+        self.check_editorial_paged_increment(EDITORIAL_READING_POLICY)
+
+    def test_v15_paged_increment_delivers_supplemental_and_bypasses_unchanged_homes(self):
+        self.check_editorial_paged_increment(EDITORIAL_V2_READING_POLICY)
+
+    def check_editorial_paged_increment(self, policy):
         units = tuple(ReadingUnit("u" + str(i), "内容责任" + str(i), ("e" + str(i),)) for i in range(30))
         evidence = tuple(EvidenceExcerpt("e" + str(i), "具体原文与范围。" * 35 + str(i)) for i in range(30))
-        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY, units=units, evidence=evidence)
+        snapshot = replace(self.snapshot(), reading_policy=policy, units=units, evidence=evidence)
         previous = self.plan(snapshot)
         changed = replace(snapshot, content_revision=2,
             units=tuple(replace(u, text=u.text + "新增限定") if i < 20 else u for i, u in enumerate(units)),

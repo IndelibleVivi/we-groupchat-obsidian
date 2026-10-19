@@ -1088,7 +1088,7 @@ class SemanticEngine:
                 # The generation's existing metadata binder owns this policy;
                 # engine only selects a prompt and never binds or changes it.
                 version = ("semantic-proposal-v2" if metadata.get("reading_policy") in
-                           {"source-composition-v1", "editorial-composition-v1"} else "semantic-proposal-v1")
+                           {"source-composition-v1", "editorial-composition-v1", "editorial-composition-v2"} else "semantic-proposal-v1")
                 versions = {"prompt": version, "text_route": asdict(self.text_provider.route),
                             "decision_route": asdict(self.decision_provider.route)}
         finally:

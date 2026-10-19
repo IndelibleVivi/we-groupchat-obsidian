@@ -289,7 +289,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
     def test_full_rebuild_real_store_history_migration_and_live_completion(self):
         plan = self.coordinator.plan(PROFILE, run_id="test-run")
         self.assertEqual(plan["history_policy"], "source-first-v1")
-        self.assertEqual(plan["reading_policy"], "editorial-composition-v1")
+        self.assertEqual(plan["reading_policy"], "editorial-composition-v2")
         self.managed.on_restore = self.live_increment
         result = self.execute()
         self.assertEqual(result["state"], "run_complete", result)

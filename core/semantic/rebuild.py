@@ -801,7 +801,7 @@ class RebuildCoordinator:
     def plan(self, provider_profile, *, run_id=None, expires_in=86400):
         from core.semantic.runtime import validate_profile
         from core.semantic.legacy import SOURCE_FIRST_POLICY
-        from core.semantic.projections import EDITORIAL_READING_POLICY
+        from core.semantic.projections import EDITORIAL_V2_READING_POLICY
         from core.config import DATA_DIR
         config = self._config()
         self._admit_private_paths(config)
@@ -833,7 +833,7 @@ class RebuildCoordinator:
         if type(expires_in) not in (int, float) or not 0 < expires_in <= 7 * 86400:
             raise RebuildError("rebuild_plan_expiry_invalid")
         plan = {"schema": SCHEMA, "run_id": run_id, "generation_id": generation,
-                "history_policy": SOURCE_FIRST_POLICY, "reading_policy": EDITORIAL_READING_POLICY,
+                "history_policy": SOURCE_FIRST_POLICY, "reading_policy": EDITORIAL_V2_READING_POLICY,
                 "created_at": self.clock(), "expires_at": self.clock() + expires_in,
                 "config": config, "config_fingerprint": fingerprint(config),
                 "config_revision": config["config_revision"], "provider_profile": profile,

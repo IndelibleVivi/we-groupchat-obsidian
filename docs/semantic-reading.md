@@ -58,13 +58,14 @@ would not pass the new admission rule. Unknown parent or child outcomes block
 before another provider call; they never become fresh-policy replacements.
 
 Reading policy is frozen per rebuild plan and generation. New plans bind
-`reading_policy="editorial-composition-v1"` in the plan and generation
-`metadata_json`; they use `body-plan-v14` / `body-paged-v14`. Previously bound
-`source-composition-v1` and `content-responsibility-v1` continue to use v13 and
+`reading_policy="editorial-composition-v2"` in the plan and generation
+`metadata_json`; they use `body-plan-v15` / `body-paged-v15`. Previously bound
+`editorial-composition-v1` retains v14; `source-composition-v1` and
+`content-responsibility-v1` continue to use v13 and
 v12 unchanged. Missing policy fields
 retain `derived-verbatim-v1` and the v11 writer, including its automatic literal
 obligations for derived steps, counterevidence and units affected by withdrawn or
-contested claims. These are four separate frozen contracts; resume never
+contested claims. These are five separate frozen contracts; resume never
 upgrades an accepted, failed or unresolved historical invocation.
 `bind_reading_policy(conn, binding)` is the canonical binding seam inside the
 caller's generation transaction: first adoption requires every canonical and
@@ -74,7 +75,8 @@ Old missing-field plans and metadata remain missing, preserving their original
 fingerprints and prompt bytes. The adapter carries this binding in the snapshot,
 and the writer checks it against the canonical ledger before reuse or dispatch.
 The independent verifier checks manifest/generation policy agreement and accepts
-v14 only for editorial composition, v13 only for source composition, v12 only for content responsibility, and v2-v11
+v15 only for editorial v2, v14 only for editorial v1, v13 only for source
+composition, v12 only for content responsibility, and v2-v11
 only for the missing-field/legacy reading policy. It also checks unit homes,
 evidence/resources, typed status and legacy literal obligations. None of these
 structural checks proves natural-language semantic completeness or prose quality.
@@ -102,6 +104,25 @@ meaningful reactions. It retains strong gender/attribution and grounded quotatio
 rules, without making derived responsibility wording literal. Structural tests
 verify these inputs and recovery boundaries, not the author's semantic or
 editorial success.
+
+Fresh editorial v2 keeps that same complete payload and one-call composition
+contract. Its positive technical example explains the failing object and symptom,
+a candidate cause with its evidence limit, parallel options, and a result limited
+to the case actually tested. The life example joins a few related experiences in
+one paragraph. Source speakers remain explicit in both synthetic examples; names
+appear in the prose where they distinguish an experience or measured result.
+Short material should form a few connected paragraphs, rather than one section
+per unit or a report organized by who said, feared or suggested something.
+Parallel suggestions use parallel sentences or unordered lists; ordered steps
+require source-supported prerequisite or sequence. A suggested option is not an
+observed success, and message chronology is not an operational dependency. These
+writing instructions apply to ordinary, paged and continuation work without
+adding a stage or changing validation. V14 retains its original examples and
+prompt bytes. V15 places its concrete writing contract after the JSON/schema
+instruction, so the existing bounded repair can replace the generic introduction
+while retaining the thing-first, parallel-option and result-scope guidance.
+Synthetic checks of the new examples are input-contract evidence,
+not model-output or editorial-quality acceptance.
 
 Under the retained source-composition policy, canonical units and their exact fingerprints remain
 intact, including derived `unit.text` and the Item title. Only the model's
@@ -237,8 +258,9 @@ after dispatch remains unresolved and blocks subsequent calls, including across
 Body versions and page/fragment repartitioning. Calling the pure `plan` helper
 without a ledger is intended for isolated rendering tests, not runtime
 publication and does not perform this durable repair.
-New editorial Body artifacts are `body-plan-v14` and `body-paged-v14`.
-The bound source-composition policy continues to write v13,
+New editorial-v2 Body artifacts are `body-plan-v15` and `body-paged-v15`.
+The bound editorial-v1 policy continues to write v14,
+the bound source-composition policy continues to write v13,
 the bound content-responsibility policy continues to write v12, and the
 missing-field legacy policy continues to write v11. All ask for one
 coherent reader-first note with grounded attribution, preserve each retained
@@ -253,8 +275,9 @@ Retained source-composition inputs contain source excerpts with provenance label
 unit responsibility metadata and explicit literal obligations, without a
 machine-written unit synopsis or Item title to reuse. Frozen v11/v12 composition
 prompts retain their synthetic technical/life demonstrations and original bytes;
-v13 uses its own source-only writing contract. V14 reuses the pure synthetic
-technical/life examples with editable responsibility wording. The examples are
+v13 uses its own source-only writing contract. V14 retains its original synthetic
+technical/life examples with editable responsibility wording. V15 uses the
+thing-first examples described above. The examples are
 not current evidence and cannot supply names or facts for the real note.
 They are omitted from prior-plan and continuation work, preserving bounded context
 for the actual material. This guidance does not change validation, authorize
@@ -265,7 +288,7 @@ it must not present a revision time as the event time or silently assume the
 reader's local timezone. Editorial acceptance still checks the actual output.
 Frozen v11-v13 writers receive `source_sequence`, a UUID list ordered only by
 offset-aware source timestamps, and separate undated UUIDs. Their ordinary
-evidence arrays retain their frozen order. V14 instead sends directly ordered
+evidence arrays retain their frozen order. V14 and v15 instead send directly ordered
 complete evidence objects and separately grouped complete undated objects.
 Equal timestamps do not imply
 causality, and unit order or commit order never establishes event order. This
@@ -278,13 +301,14 @@ Both ordinary and repair prompts explicitly request a JSON object, including
 localized writing instructions. This preserves the input requirement of
 endpoints that enforce the JSON keyword when JSON-object mode is selected.
 The paged aggregate key carries its policy's version, so a revised prompt never
-resumes a paged plan produced by an earlier one. Accepted v2-v13 artifacts remain
+resumes a paged plan produced by an earlier one. Accepted v2-v14 artifacts remain
 historical evidence under their original contracts; these prompt instructions
 are generation guidance, not proof of editorial acceptance or owner review.
 Before dispatch, the writer also checks unresolved page/fragment descendants of
 the stable request ID across Body versions. A new prompt or context budget
 cannot bypass an earlier unknown outcome by choosing a different partition.
-The verifier accepts v14 forms only for editorial composition, v13 only for source composition, v12 only for the
+The verifier accepts v15 forms only for editorial v2, v14 only for editorial v1,
+v13 only for source composition, v12 only for the
 bound content policy and retained v2-v11 only for the legacy reading policy.
 Its allowlist remains in lockstep with the writer; this prose does not authorize
 rewriting accepted historical output or weakening the verifier.
@@ -300,7 +324,7 @@ verbatim obligations, claim status and references. A single oversized paragraph
 uses bounded continuation tasks: all unit, evidence and context text is supplied
 in ordered segments, then accepted prose joins at one stable home.
 Editorial and retained source-composition modes budget their actual presentation
-payloads. V13 hidden derived text cannot force pages or echo calls; v14 complete
+payloads. V13 hidden derived text cannot force pages or echo calls; v14/v15 complete
 editable responsibilities count toward that budget. Ordered source windows first pack adjacent
 complete excerpts with their context
 under the actual prompt budget; several sources may share one writing call and
@@ -308,7 +332,7 @@ one original home. Only a source that cannot fit alone is split into paired
 text/context segments. Core windows retain unit mapping and status checks;
 context-only tails have no required units and must return no new narrative.
 Context supports its source instead of becoming a second content/home obligation.
-V13 windows do not fall back to hidden derived prose. V14 supplies full editable
+V13 windows do not fall back to hidden derived prose. V14/v15 supply full editable
 responsibilities beside the source windows; oversized responsibility text is
 supplied completely in ordered, nonliteral slices, consumed successively alongside
 source windows. Remaining responsibility slices continue at the same home without

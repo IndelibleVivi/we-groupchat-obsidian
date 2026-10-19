@@ -1143,16 +1143,18 @@ class ProposalCorrectionTests(unittest.TestCase):
                 self.assertNotIn("Item naming contract", text.prompts[0])
 
     def test_editorial_composition_freezes_v2_and_replays_without_calls(self):
-        self.new_fixture("editorial-composition-v1")
-        engine, text, decision = self.engine("valid", title="合成场景")
-        result = engine.resolve_batch("proposal", extracted=self.extracted)
-        frozen = self.rows("SELECT * FROM jobs WHERE kind='propose'")
-        self.assertEqual(json.loads(frozen[0]["versions_json"])["prompt"], "semantic-proposal-v2")
-        self.assertEqual(self.store.list_items()[0]["title"], "合成场景")
-        calls = (list(text.calls), list(decision.calls))
-        self.assertEqual(engine.resolve_batch("proposal", extracted=self.extracted)["receipt"], result["receipt"])
-        self.assertEqual((text.calls, decision.calls), calls)
-        self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind='propose'"), frozen)
+        for policy in ("editorial-composition-v1", "editorial-composition-v2"):
+            with self.subTest(policy=policy):
+                self.new_fixture(policy)
+                engine, text, decision = self.engine("valid", title="合成场景")
+                result = engine.resolve_batch("proposal", extracted=self.extracted)
+                frozen = self.rows("SELECT * FROM jobs WHERE kind='propose'")
+                self.assertEqual(json.loads(frozen[0]["versions_json"])["prompt"], "semantic-proposal-v2")
+                self.assertEqual(self.store.list_items()[0]["title"], "合成场景")
+                calls = (list(text.calls), list(decision.calls))
+                self.assertEqual(engine.resolve_batch("proposal", extracted=self.extracted)["receipt"], result["receipt"])
+                self.assertEqual((text.calls, decision.calls), calls)
+                self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind='propose'"), frozen)
 
     def test_frozen_v1_and_v2_pending_jobs_keep_their_prompt_after_metadata_drift(self):
         for initial, changed, version in ((None, "source-composition-v1", "semantic-proposal-v1"),
