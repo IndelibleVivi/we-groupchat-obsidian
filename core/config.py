@@ -355,6 +355,12 @@ def _sanitize_config(saved):
     if not isinstance(parameter, str) or parameter not in {"", "thinking", "enable_thinking"}:
         raise ConfigError("custom_thinking_parameter_invalid")
     cfg["custom_thinking_parameter"] = parameter
+    # Keep this opt-in absent in historical snapshots so loading an old
+    # config does not silently change a frozen rebuild fingerprint.
+    if "custom_streaming" in saved:
+        if type(saved["custom_streaming"]) is not bool:
+            raise ConfigError("custom_streaming_invalid")
+        cfg["custom_streaming"] = saved["custom_streaming"]
 
     monitor_chats = saved.get("monitor_chats")
     if isinstance(monitor_chats, list):

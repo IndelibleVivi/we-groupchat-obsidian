@@ -45,6 +45,22 @@ class RebuildCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         coordinator.rollback.assert_called_once_with("run", apply=False, allow_runtime_changes=False)
 
+    def test_restore_only_requires_runtime_grant_before_constructor(self):
+        factory = Mock(side_effect=AssertionError("constructor before grants"))
+        code, result = self.invoke(["restore-runtime", "run", "--apply"], factory)
+        self.assertEqual((code, result["code"]), (2, "rebuild_restore_grant_required"))
+        factory.assert_not_called()
+        for flags, state in (([], "runtime_restore_planned"),
+                             (["--apply", "--allow-runtime-changes"], "runtime_restored")):
+            coordinator = Mock()
+            coordinator.restore_runtime.return_value = {"state": state, "run_id": "run"}
+            code, _ = self.invoke(["restore-runtime", "run", *flags], Mock(return_value=coordinator))
+            self.assertEqual(code, 0)
+            coordinator.restore_runtime.assert_called_once_with("run", apply=bool(flags),
+                                                               allow_runtime_changes=bool(flags))
+            coordinator.execute.assert_not_called()
+            coordinator.resume.assert_not_called()
+
     def test_relocate_requires_explicit_apply_grant(self):
         factory = Mock(side_effect=AssertionError("constructor before grants"))
         code, result = self.invoke(["relocate", "run", "--destination-root", "/private/moved", "--apply"], factory)
@@ -80,12 +96,22 @@ class RebuildCommandTests(unittest.TestCase):
                               "tokens_per_minute": None, "unset": ["requests_per_minute", "tokens_per_minute"]}}
         value = public_result({"state": "incomplete", "private_chat": "SECRET", "database": "/private/path",
                                "configured_admission": admission,
+                               "restore_code": "runtime_restore_failed",
+                               "restore_attempt_count": 2,
+                               "job_states": {"failed": 1},
+                               "job_error_codes": ["provider_timeout"],
+                               "job_blocker": None,
                                "live_check": {"complete": False, "code": "rebuild_live_increment_pending",
                                               "process": {"executable": "/private/executable"}}})
         rendered = json.dumps(value)
         self.assertNotIn("private", rendered)
         self.assertNotIn("SECRET", rendered)
         self.assertEqual(value["configured_admission"], admission)
+        self.assertEqual(value["restore_code"], "runtime_restore_failed")
+        self.assertEqual(value["restore_attempt_count"], 2)
+        self.assertEqual(value["job_states"], {"failed": 1})
+        self.assertEqual(value["job_error_codes"], ["provider_timeout"])
+        self.assertIsNone(value["job_blocker"])
 
     def test_errors_are_content_free(self):
         code, value = self.invoke(["status", "run"], Mock(side_effect=ValueError("private URL and chat body")))

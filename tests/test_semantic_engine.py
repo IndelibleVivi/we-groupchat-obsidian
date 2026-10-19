@@ -767,7 +767,10 @@ class EngineIntegrationTests(unittest.TestCase):
         old = engine.jobs.ensure("extract_page", {"parent_job_id": parent["job_id"], "page": 1,
             "span_ids": [s.span_id for s in spans[22:]], "source_ids": sorted(s.source_id for s in sources[22:]),
             "core_source_ids": [s.source_id for s in sources[24:]]}, {"prompt": "semantic-extraction-pages-v2-attribution"})
-        engine.extract_batch("frozen-context")
+        with patch("core.semantic.engine.extraction_prompt", wraps=extraction_prompt) as prompts:
+            engine.extract_batch("frozen-context")
+        self.assertEqual([call.kwargs["unit_policy"] for call in prompts.call_args_list],
+                         ["retained-knowledge-v4", None])
         self.assertEqual({s["source_id"] for s in seen[1] if not s["core"]}, {s.source_id for s in sources[22:24]})
         self.assertEqual([s["source_id"] for s in seen[1]], [s.source_id for s in sources[24:] + sources[22:24]])
         with closing(self.store.connect()) as db:
@@ -776,6 +779,27 @@ class EngineIntegrationTests(unittest.TestCase):
         calls = len(provider.calls)
         engine.extract_batch("frozen-context")
         self.assertEqual(len(provider.calls), calls)
+
+    def test_new_unit_policy_cannot_fork_an_unknown_existing_page(self):
+        capture(self.store, "old-unknown", ["烤箱温度误设为一百八十度，应该是一百六十度。"])
+        text = FakeText()
+        engine = SemanticEngine(self.store, text, FakeDecision())
+        # Freeze the exact historical child before any newly versioned page
+        # can be created; an unknown result must stop the whole batch.
+        with patch.object(engine, "_accepted_extract_page", side_effect=RuntimeError("synthetic stop")):
+            with self.assertRaises(RuntimeError):
+                engine.extract_batch("old-unknown")
+        with closing(self.store.connect()) as db:
+            row = db.execute("SELECT inputs_json FROM jobs WHERE kind='extract_page'").fetchone()
+        old = engine.jobs.ensure("extract_page", json.loads(row[0]),
+                                {"prompt": "semantic-extraction-pages-v2-attribution"})
+        engine.jobs.claim(old["job_id"], engine.worker_id)
+        engine.jobs.fail(old["job_id"], engine.worker_id, "synthetic_unknown", unknown=True)
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            engine.extract_batch("old-unknown")
+        self.assertEqual(text.calls, [])
+        with closing(self.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM accepted_job_artifacts").fetchone()[0], 0)
 
     def test_extraction_page_crash_reuses_already_accepted_pages(self):
         class InterruptedText(FakeText):

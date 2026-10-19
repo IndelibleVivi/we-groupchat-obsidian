@@ -151,7 +151,7 @@ class ProviderRoles:
         selected["ai_thinking"] = bool(config.get("monitor_ai_thinking", False))
         selected["ai_timeout_seconds"] = config.get("monitor_ai_timeout_seconds", 90)
         native = create_provider(selected)
-        if getattr(native, "_commandcode_gateway", False) is True:
+        if getattr(native, "_json_object_gateway", False) is True:
             # Semantic consumers all validate JSON objects. Keep ordinary
             # prose summaries on the provider's normal text response format.
             native.json_object_output = True

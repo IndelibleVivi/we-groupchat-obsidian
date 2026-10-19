@@ -700,40 +700,38 @@ class BodyPlanWriter:
     @staticmethod
     def _prompt(snapshot, previous, unchanged, **context):
         prompt = {
-            "task": "Compose one evolving readable Item. Life stories and technical discussions deserve equal care. "
-                    "Return exactly {blocks:[...]} with the schema below. unit_indices select snapshot.units "
-                    "in their supplied order; the program binds all identities, revisions, evidence, resources "
-                    "and statuses. Assign every unit exactly once to a stable block home. A unit is a content "
-                    "responsibility, not a sentence to copy: combine overlapping facts and quotations into one "
-                    "explanation or scene. Do not print units, internal IDs or processing commentary. The publisher "
-                    "owns title and metadata; omit frontmatter and top-level H1 headings.\n"
-                    "For technical material, lead with the supported answer or mechanism and its scope, then "
-                    "explain the useful conditions and details. For stories, compose connected scenes and revealing "
-                    "exchanges while keeping different people's experiences distinct. Preserve concrete details, "
-                    "steps, counterevidence, key phrases and resources. Use the material's language and retain "
-                    "names, code and technical terms. Let content choose prose, a list or a table, not a fixed "
-                    "summary/facts/state template. A brief exchange may be one connected paragraph.\n"
-                    "Exact messages remain on source pages. A quote-role unit may be faithfully paraphrased; "
-                    "select the exact phrases whose wording carries detail, voice or a turn in the story. Do not "
-                    "copy chat wrappers such as [回复] into prose. Keep short quotes inline and substantial "
-                    "passages in blockquotes. Integrate quotations without also repeating their summary. Explicit "
-                    "unit.verbatim fragments, however, must occur in full at their block home, without shortening.\n"
-                    "Use only supplied evidence for facts. Preserve questions, guesses and hearsay as such, with "
-                    "natural captured-name attribution. Do not invent background, feelings, motives, outcomes or "
-                    "a concluding lesson. State uncertainty where it changes understanding. Exact timestamps belong "
-                    "on source pages; mention dates/times only to explain an event or change. semantic_at is revision "
-                    "time, not event time. If a clock time matters, retain its supplied timezone without guessing.\n"
-                    "Incremental writing: retain old block IDs and the homes of all retained units, evidence and "
-                    "resources. A new detail that answers or qualifies an existing point belongs at that home: "
-                    "rewrite the affected automatic prose naturally instead of appending a dated supplement. "
-                    "New blocks are for distinct parts or genuine new scenes. Unchanged blocks keep exact bytes "
-                    "unless they receive new units; unrelated paragraphs must not be polished again. Retracted "
-                    "or contested units require correction/historical/counterevidence role and their original "
-                    "wording with the changed status; never leave them as current conclusions. "
+            "task": "为会回来阅读这件事的人，写一篇持续更新的 Obsidian 笔记。生活故事与技术讨论同样认真对待。"
+                    "只返回 schema 要求的 {blocks:[...]}。unit_indices 选给定 snapshot.units 的序号，"
+                    "required_unit_indices 中的每个序号恰好一次，归入稳定 block。即使两个单元讲同一件事，"
+                    "也要把两个序号都放入讲这件事的 block，正文合写一次即可。程序绑定身份、revision、证据、资源与状态；"
+                    "不要输出内部 ID、处理说明、frontmatter 或 H1，标题由 publisher 提供。\n"
+                    "直接写有内容的正文：技术页围绕问题、办法、结果和适用条件，生活页围绕发生的事情、"
+                    "有意味的接话、反应和后文。不要逐条转述消息、按发言者列清单，或套摘要/事实/状态模板。"
+                    "短小的事情可以一段讲完；有层次的内容可用自然段、列表或比较表。合并相互重叠的"
+                    "单元与引用时，连续场景保持连续叙述，只为独立主题或阶段分节，不给每句接话单列小标题。"
+                    "一件事只讲一次。单元是内容责任，不是一句必须复制的话。单纯感谢、"
+                    "接话、发图次序和取证说明的证据仍有归属，正文仅在理解事情需要时提及；实质性细节、"
+                    "步骤、反证、条件、不同人的经历和有意味的原话不可丢。\n"
+                    "只用所供材料写事实，不补背景、因果、动机、感受、结果或结尾启示。问题、猜测和"
+                    "转述仍保持其性质；不确定性在影响理解时自然说明，不追加‘未说明/只能确认’审计旁白。"
+                    "保留所供称呼、归属、代码与技术词；性别未明确时用名字，不从名字或口吻推断他/她。"
+                    "不要把分享者、经历中的人和引文作者混为一人，也不编造图像或文件正文。\n"
+                    "精确消息在来源页。quote-role 单元可忠实转述，选用能承载细节、语气或转折的准确措辞；"
+                    "不要先总结再全文重复引用，也不要照搬 [回复] 等聊天包装。短引文放句内，长引文用带归属的"
+                    "blockquote。特别注意：unit.verbatim 的每一段必须逐字原样出现在该单元所在 block，"
+                    "包括虚词、标点和术语，不得同义改写或缩写；这适用于步骤、反证和更正义务。"
+                    "将这些原样片段自然接入正文，避免另外重复解释同一内容。\n"
+                    "精确时间留在来源页，仅在解释事件或变化时写日期时间，不把 semantic_at 修订时间当事件时间；"
+                    "需要时区时沿用所供时区。增量写作保留已有 block ID、全部 retained unit/evidence/resource 的"
+                    "原 home。新细节回答或限定原来的点时，改写收到新单元的自动段落；只给独立部分或真实新场景"
+                    "建新 block。没有收到新增或变化单元的 block 保持精确原字节，不顺手润色。手改冲突由程序处理。"
+                    "retracted/contested 单元须以 correction/historical/counterevidence role 明确 changed status，"
+                    "保留其原话，不能继续写成当前结论。\n"
                     + MARKDOWN_CONTRACT,
             "schema": {"blocks": [{"id": "stable-block-id", "role": "narrative",
                                    "text": "complete Markdown block", "unit_indices": [0]}] if snapshot.units else []},
             "writing_units": [{"index": index, "unit_id": unit.id} for index, unit in enumerate(snapshot.units)],
+            "required_unit_indices": list(range(len(snapshot.units))),
             "snapshot": asdict(snapshot),
             "previous": asdict(previous) if previous else None,
             "unchanged_blocks": list(unchanged),
@@ -791,7 +789,7 @@ class BodyPlanWriter:
             return result.to_json()
         if ledger is not None:
             artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
-                                              prompt_version="body-plan-v6", validate=validate)
+                                              prompt_version="body-plan-v9", validate=validate)
             return BodyPlan.from_json(artifact)
         route = provider_binding(self.provider)
         result = self.provider.generate(prompt_text, request_id=request_id, generation_id=self.generation_id)
@@ -810,7 +808,7 @@ class BodyPlanWriter:
         binding = fingerprint(json_text(asdict(snapshot)))
         route = provider_binding(self.provider)
         aggregate_key = fingerprint(json_text([binding, asdict(previous) if previous else None,
-                                               route, self.max_input_bytes, "body-paged-v6"]))
+                                               route, self.max_input_bytes, "body-paged-v9"]))
         if ledger:
             reused = ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request_id,))
             if reused and (reused["generation_id"] != self.generation_id or reused["job_key"] != aggregate_key):
@@ -884,7 +882,7 @@ class BodyPlanWriter:
         if ledger:
             with ledger.transaction() as conn:
                 conn.execute("INSERT OR IGNORE INTO reader_text_artifacts VALUES(?,?,?,?,?,'accepted',?)",
-                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v6", result.to_json()))
+                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v9", result.to_json()))
         return result
 
     @staticmethod

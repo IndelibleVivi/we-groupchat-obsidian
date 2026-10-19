@@ -27,9 +27,10 @@ from core.semantic.retrieval import _INDEX_SCHEMA
 from core.semantic.store import SemanticStore
 from core.semantic.verification import RebuildVerifier
 from core.semantic.legacy import (import_legacy, record_legacy_backups, record_legacy_resolution,
-                                  derive_topic_item_map, publish_legacy_navigation)
+                                  derive_topic_item_map, publish_legacy_navigation, SOURCE_FIRST_POLICY,
+                                  build_publication_plan)
 from core.url_safety import redact_urls_in_text
-from tests.test_semantic_legacy import LegacyFixture
+from tests.test_semantic_legacy import LegacyFixture, preserve_history_fixture
 
 
 def accept_fixture(store, artifact, kind="fixture", *, inputs=None, versions=None):
@@ -339,7 +340,7 @@ with tempfile.TemporaryDirectory() as directory:
         report = self.fixture.verify()
         self.assertTrue(report.complete, report.to_dict())
         with self.fixture.store.transaction() as db:
-            db.execute("UPDATE reader_text_artifacts SET prompt_version='body-plan-unrecognized' WHERE prompt_version='body-plan-v6'")
+            db.execute("UPDATE reader_text_artifacts SET prompt_version='body-plan-unrecognized' WHERE prompt_version='body-plan-v9'")
         self.assertIn("body_provider_version_conflict", self.codes(self.fixture.verify()))
 
     def test_navigation_revision_can_reuse_exact_accepted_body_without_provider(self):
@@ -811,6 +812,217 @@ with tempfile.TemporaryDirectory() as directory:
         report = fixture.verify()
         self.assertIn("capture_pass_undeclared_reset", self.codes(report))
         self.assertIn("capture_prefix_gap", self.codes(report))
+
+
+class SourceFirstHistoryVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.fixture = VerificationFixture(self.temp.name)
+        self.old = LegacyFixture(self.fixture.root / "old")
+        with self.fixture.store.transaction() as conn:
+            conn.execute("UPDATE generation_manifest SET metadata_json=?", (json.dumps({"history_policy": SOURCE_FIRST_POLICY}),))
+        self.fixture.manifest["history_policy"] = SOURCE_FIRST_POLICY
+        self.fixture.manifest["history_preservation_passes"] = []
+        self.fixture.manifest["history_freeze_receipts"] = []
+        self.add_history()
+
+    def add_history(self):
+        inventory = self.old.plan()
+        number = len(self.fixture.manifest["history_freeze_receipts"])
+        plan, backups = preserve_history_fixture(self.fixture.store, inventory,
+            self.fixture.root / ("history-backups-" + str(number)), self.fixture.publisher)
+        from core.semantic.rebuild import backup_sqlite
+        frozen = {"receipt_id": "freeze-" + str(number + 1), "legacy_inventory": inventory.to_dict(),
+            "databases": {"knowledge": backup_sqlite(self.old.db,
+                self.fixture.root / ("history-backups-" + str(number)) / "knowledge.sqlite")}}
+        existing = next((d for d in self.fixture.manifest["history_preservation_passes"]
+                         if d["receipt_id"] == inventory.manifest_id), None)
+        if existing is None:
+            self.fixture.manifest["history_preservation_passes"].append({"receipt_id": inventory.manifest_id,
+                "legacy_inventory": inventory.to_dict(), "publication_plan": plan, "freeze_receipts": [frozen]})
+        else:
+            existing["freeze_receipts"].append(frozen)
+        self.fixture.manifest["history_freeze_receipts"].append(frozen)
+        self.fixture.manifest.update(legacy_inventory=inventory.to_dict(), publication_plan=plan)
+        return inventory, plan, backups
+
+    def codes(self):
+        return {issue.code for issue in self.fixture.verify().issues}
+
+    def test_complete_history_needs_no_semantic_dispositions_for_old_summaries_or_pages(self):
+        report = self.fixture.verify()
+        self.assertTrue(report.complete, report.to_dict())
+        self.assertEqual(1, report.counts["capture_batches"])
+        self.assertEqual(1, report.counts["items"])
+        self.assertEqual(1, report.counts["legacy_history_passes"])
+        path = self.fixture.publisher.resolve("item")
+        (self.fixture.projections / path).unlink()
+        self.assertIn("item_current_projection_missing", self.codes())
+
+    def test_missing_or_tampered_history_records_and_resources_are_not_conserved(self):
+        with self.fixture.store.transaction() as conn:
+            row = dict(conn.execute("SELECT * FROM legacy_mappings WHERE target_type='history_record' "
+                "AND json_array_length(json_extract(metadata_json,'$.resources'))>0 LIMIT 1").fetchone())
+            metadata = json.loads(row["metadata_json"])
+            metadata["resources"][0]["metadata"] = {}
+            conn.execute("UPDATE legacy_mappings SET metadata_json=? WHERE kind=? AND legacy_id=? AND target_id=?",
+                (json.dumps(metadata), row["kind"], row["legacy_id"], row["target_id"]))
+        self.assertIn("legacy_history_record_unaccounted", self.codes())
+        with self.fixture.store.transaction() as conn:
+            conn.execute("DELETE FROM legacy_mappings WHERE kind=? AND legacy_id=? AND target_id=?",
+                (row["kind"], row["legacy_id"], row["target_id"]))
+        self.assertIn("legacy_history_record_set_mismatch", self.codes())
+
+    def test_all_passes_remain_bound_and_earlier_backup_is_checked_after_refresh(self):
+        old = self.fixture.manifest["history_preservation_passes"][0]
+        (self.old.tree / "life.md").write_bytes(self.old.page_bytes + "后来补充的个人文字\n".encode())
+        self.add_history()
+        report = self.fixture.verify()
+        self.assertTrue(report.complete, report.to_dict())
+        with self.fixture.store.transaction() as conn:
+            row = conn.execute("SELECT metadata_json FROM legacy_mappings WHERE kind='history_backup' "
+                "AND target_id=? AND json_extract(metadata_json,'$.path')='Old/life.md'", (old["receipt_id"],)).fetchone()
+            path = Path(json.loads(row[0])["backup_path"])
+        path.write_bytes(b"tampered earlier copy")
+        self.assertIn("legacy_backup_bytes_mismatch", self.codes())
+        self.fixture.manifest["history_preservation_passes"] = self.fixture.manifest["history_preservation_passes"][1:]
+        self.assertIn("legacy_history_pass_set_mismatch", self.codes())
+
+    def test_each_history_projection_and_private_copy_requires_real_bytes_and_receipt(self):
+        plan = self.fixture.manifest["publication_plan"]
+        document = next(d for d in plan["documents"] if d["kind"] == "topic")
+        (self.fixture.projections / document["path"]).write_text("tampered history")
+        self.assertIn("legacy_history_navigation_receipt_missing", self.codes())
+        with self.fixture.store.transaction() as conn:
+            conn.execute("DELETE FROM legacy_mappings WHERE kind='history_navigation' AND target_id=?", (document["object_id"],))
+        self.assertIn("legacy_history_navigation_receipt_missing", self.codes())
+        (self.fixture.projections / plan["pages"][0]["history_backup_path"]).unlink()
+        self.assertIn("legacy_history_copy_missing", self.codes())
+
+    def test_empty_old_topic_map_is_not_a_history_publication_contract(self):
+        from core.semantic.legacy import LegacyInventory
+        inventory = LegacyInventory.from_dict(self.fixture.manifest["legacy_inventory"])
+        wrong = build_publication_plan(inventory, {}, {})
+        self.fixture.manifest["publication_plan"] = wrong
+        self.fixture.manifest["history_preservation_passes"][0]["publication_plan"] = wrong
+        self.assertIn("legacy_history_publication_missing", self.codes())
+
+    def test_last_original_stays_required_and_policy_cannot_be_unknown(self):
+        (self.old.tree / "life.md").write_text("lost whole personal page")
+        self.assertIn("legacy_original_bytes_changed", self.codes())
+        self.fixture.manifest["history_policy"] = "unrecognized-policy"
+        self.assertIn("legacy_history_policy_invalid", self.codes())
+
+    def test_earlier_publication_and_resource_receipt_remain_independent(self):
+        first = self.fixture.manifest["history_preservation_passes"][0]
+        (self.old.tree / "life.md").write_bytes(self.old.page_bytes + b"\nnew personal page\n")
+        self.add_history()
+        document = next(d for d in first["publication_plan"]["documents"] if d["kind"] == "topic")
+        (self.fixture.projections / document["path"]).unlink()
+        self.assertIn("legacy_history_navigation_missing", self.codes())
+        with self.fixture.store.transaction() as conn:
+            conn.execute("UPDATE legacy_mappings SET metadata_json='{}' WHERE target_type='history_record' AND target_id=?",
+                (first["receipt_id"],))
+        self.assertIn("legacy_history_record_unaccounted", self.codes())
+
+    def test_run_bound_history_payloads_are_loaded_one_pass_at_a_time_and_tampering_is_rejected(self):
+        from core.semantic.legacy import LegacyInventory
+        from core.semantic.rebuild_payloads import Payloads
+        import weakref
+        (self.old.tree / "life.md").write_bytes(self.old.page_bytes + b"\nnext freeze\n")
+        self.add_history()
+        payloads = Payloads(self.fixture.root / "run", "synthetic-run")
+        manifest = dict(self.fixture.manifest)
+        declarations, frozen_references = [], []
+        for declaration in manifest["history_preservation_passes"]:
+            inventory_reference = payloads.put(declaration["legacy_inventory"])
+            freezes = [payloads.put(dict(frozen, legacy_inventory=inventory_reference))
+                       for frozen in declaration["freeze_receipts"]]
+            frozen_references.extend(freezes)
+            declarations.append({"receipt_id": declaration["receipt_id"],
+                "legacy_inventory": inventory_reference,
+                "publication_plan": payloads.put(declaration["publication_plan"]), "freeze_receipts": freezes})
+        manifest.update(history_preservation_passes=declarations,
+            history_freeze_receipts=frozen_references,
+            legacy_inventory=declarations[-1]["legacy_inventory"], publication_plan=declarations[-1]["publication_plan"])
+        decoded = []
+        original = LegacyInventory.from_dict
+        def one_pass(value):
+            self.assertTrue(all(reference() is None for reference in decoded), "earlier corpus stayed resident")
+            inventory = original(value)
+            decoded.append(weakref.ref(inventory))
+            return inventory
+        with patch.object(LegacyInventory, "from_dict", side_effect=one_pass):
+            report = RebuildVerifier(self.fixture.store.path, manifest, projection_root=self.fixture.projections,
+                history_payload_loader=payloads.get).verify()
+        self.assertTrue(report.complete, report.to_dict())
+        self.assertEqual(len(decoded), 2)
+        payloads.path(declarations[0]["legacy_inventory"]).write_text("{}")
+        report = RebuildVerifier(self.fixture.store.path, manifest, projection_root=self.fixture.projections,
+            history_payload_loader=payloads.get).verify()
+        self.assertIn("legacy_history_payload_unavailable", {issue.code for issue in report.issues})
+
+    def test_changed_topic_file_binding_retains_same_exact_page_baseline(self):
+        with closing(sqlite3.connect(self.old.db)) as conn:
+            conn.execute("UPDATE topics SET obsidian_path='Old/life.md' WHERE topic_id=2")
+            conn.commit()
+        self.add_history()
+        report = self.fixture.verify()
+        self.assertTrue(report.complete, report.to_dict())
+
+    def test_missing_or_changed_earlier_whole_database_backup_blocks_unknown_table_only_freeze(self):
+        first = self.fixture.manifest["history_freeze_receipts"][0]
+        with closing(sqlite3.connect(self.old.db)) as conn:
+            conn.execute("CREATE TABLE unknown_extension(extension_id TEXT PRIMARY KEY, exact_payload BLOB)")
+            conn.execute("INSERT INTO unknown_extension VALUES('one',?)", (b"unknown-table-only-change",))
+            conn.commit()
+        self.add_history()
+        self.assertEqual(len(self.fixture.manifest["history_preservation_passes"]), 1)
+        self.assertEqual(len(self.fixture.manifest["history_freeze_receipts"]), 2)
+        self.assertTrue(self.fixture.verify().complete)
+        path = Path(first["databases"]["knowledge"]["path"])
+        original = path.read_bytes()
+        path.unlink()
+        self.assertIn("legacy_history_database_backup_missing", self.codes())
+        path.write_bytes(original)
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE tampered_unknown(payload TEXT)")
+            conn.execute("INSERT INTO tampered_unknown VALUES('unbound unknown-table bytes')")
+            conn.commit()
+        self.assertIn("legacy_history_database_backup_changed", self.codes())
+
+    def test_rehashed_backup_still_requires_exact_known_rows(self):
+        receipt = self.fixture.manifest["history_freeze_receipts"][0]["databases"]["knowledge"]
+        with closing(sqlite3.connect(receipt["path"])) as conn:
+            conn.execute("UPDATE topics SET summary='wrong backup, valid SQLite' WHERE topic_id=1")
+            conn.commit()
+        receipt["sha256"] = hashlib.sha256(Path(receipt["path"]).read_bytes()).hexdigest()
+        self.assertIn("legacy_history_database_rows_mismatch", self.codes())
+
+    def test_every_expected_freeze_and_regular_file_backup_remains_required(self):
+        declaration = self.fixture.manifest["history_preservation_passes"][0]
+        frozen = declaration["freeze_receipts"].pop()
+        self.assertIn("legacy_history_freeze_set_mismatch", self.codes())
+        self.assertIn("legacy_history_database_backup_manifest_missing", self.codes())
+        declaration["freeze_receipts"].append(frozen)
+        receipt = frozen["databases"]["knowledge"]
+        path = Path(receipt["path"])
+        destination = path.with_name("actual-database.sqlite")
+        path.rename(destination)
+        path.symlink_to(destination)
+        self.assertIn("legacy_history_database_backup_invalid", self.codes())
+
+    def test_policy_mismatch_and_semantic_legacy_contamination_are_rejected(self):
+        with self.fixture.store.transaction() as conn:
+            conn.execute("UPDATE generation_manifest SET metadata_json='{}'")
+        self.assertIn("legacy_history_policy_mismatch", self.codes())
+        with self.fixture.store.transaction() as conn:
+            conn.execute("UPDATE generation_manifest SET metadata_json=?", (json.dumps({"history_policy": SOURCE_FIRST_POLICY}),))
+        self.fixture.store.capture_batch("forbidden-legacy", [], source_namespace="legacy:source", chat_id="old",
+            inventory_digest="old", inventory_revision=1, input_cursors={}, output_cursors={},
+            source_eof=True, purpose="legacy_import")
+        self.assertIn("legacy_history_semantic_contamination", self.codes())
 
 
 if __name__ == "__main__":

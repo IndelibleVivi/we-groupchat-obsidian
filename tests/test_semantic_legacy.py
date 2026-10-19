@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 from core.semantic.legacy import (
     LegacyError, LegacyInventory, build_publication_plan, iter_legacy_inputs,
-    plan_legacy, import_legacy, legacy_resources,
+    plan_legacy, import_legacy, legacy_resources, SOURCE_FIRST_POLICY,
+    preserve_legacy_history, build_history_publication_plan, record_legacy_backups,
+    publish_legacy_navigation,
 )
 from core.semantic.store import SemanticStore
 
@@ -304,6 +306,119 @@ class LegacyInventoryTests(unittest.TestCase):
         page["text"] = "invented content"
         with self.assertRaisesRegex(LegacyError, "legacy_manifest_bytes_changed"):
             LegacyInventory.from_dict(manifest)
+
+
+def preserve_history_fixture(store, inventory, root, publisher):
+    """Real conservation/publication boundary with private synthetic copies."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    preserve_legacy_history(store, inventory, allow_preserved_refresh=True)
+    backups = {}
+    for index, file in enumerate(inventory.files):
+        if file.owned:
+            path = root / (str(index) + ".bin")
+            path.write_bytes(file.original_bytes())
+            backups[file.relative_path] = path
+    import base64
+    for index, external in enumerate(inventory.external_files):
+        path = root / ("external-" + str(index) + ".bin")
+        path.write_bytes(base64.b64decode(external["bytes_base64"]))
+        backups["external:" + external["path"]] = path
+    record_legacy_backups(store, inventory, backups)
+    plan = build_history_publication_plan(inventory)
+    result = publish_legacy_navigation(store, inventory, plan, publisher)
+    if result["status"] != "published":
+        raise AssertionError(result)
+    return plan, backups
+
+
+class SourceFirstHistoryTests(unittest.TestCase):
+    def setUp(self):
+        from core.semantic.projections import ProjectionPublisher, ReadingLedger, CanonicalReadingAdapter
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.fixture = LegacyFixture(self.temp.name)
+        self.store = SemanticStore(self.fixture.root / "generation.sqlite", "history-generation")
+        with self.store.transaction() as conn:
+            conn.execute("UPDATE generation_manifest SET metadata_json=?", (json.dumps({"history_policy": SOURCE_FIRST_POLICY}),))
+        self.projections = self.fixture.root / "WGO"
+        self.publisher = ProjectionPublisher(ReadingLedger(self.store.connect, self.store.generation_id), self.projections,
+            current_revision=CanonicalReadingAdapter(self.store).current_revision)
+
+    def test_history_receipts_preserve_exact_rows_resources_and_do_not_create_semantic_work(self):
+        inventory = self.fixture.plan()
+        with patch.object(self.store, "capture_batch", side_effect=AssertionError("history is not a source batch")):
+            result = preserve_legacy_history(self.store, inventory)
+            self.assertEqual(result, preserve_legacy_history(self.store, inventory))
+        self.assertEqual(SOURCE_FIRST_POLICY, result["history_policy"])
+        with closing(self.store.connect()) as conn:
+            for table in ("source_records", "capture_batches", "jobs", "items", "source_dispositions"):
+                self.assertEqual(0, conn.execute("SELECT count(*) FROM " + table).fetchone()[0])
+            records = conn.execute("SELECT * FROM legacy_mappings WHERE target_type='history_record'").fetchall()
+            self.assertEqual(len(inventory.records), len(records))
+            for record in inventory.records:
+                row = next(r for r in records if r["legacy_id"] == record.legacy_ref)
+                from dataclasses import asdict
+                self.assertEqual(asdict(record), json.loads(row["metadata_json"])["input"])
+                self.assertEqual(list(legacy_resources(record)), json.loads(row["metadata_json"])["resources"])
+        with self.assertRaisesRegex(LegacyError, "legacy_history_policy_mismatch"):
+            import_legacy(self.store, inventory)
+
+    def test_history_publication_has_readable_db_only_and_missing_page_topics(self):
+        with closing(sqlite3.connect(self.fixture.db)) as conn:
+            conn.executemany("INSERT INTO topics VALUES(?,?,?,?,?,?,?)", [
+                (3, "DB only", "只有数据库的旧结论", "", "chat", "[]", "[]"),
+                (4, "Missing page", "缺页旧结论", "Old/missing.md", "chat", "[]", "[]")])
+            conn.commit()
+        inventory = self.fixture.plan()
+        plan, _ = preserve_history_fixture(self.store, inventory, self.fixture.root / "backups", self.publisher)
+        self.assertNotIn("topic_item_map", plan)
+        self.assertNotIn("item_paths", plan)
+        topics = [d for d in plan["documents"] if d["kind"] == "topic"]
+        self.assertEqual(4, len(topics))
+        text = "\n".join((self.projections / d["path"]).read_text() for d in topics)
+        self.assertIn("只有数据库的旧结论", text)
+        self.assertIn("缺页旧结论", text)
+        self.assertIn("derived_summary", text)
+        self.assertIn("excerpt_only", text)
+        self.assertIn("raw", text)
+        self.assertNotIn("token=raw", text)
+        self.assertTrue((self.projections / "Legacy/Index.md").is_file())
+        self.assertEqual(self.fixture.page_bytes, (self.fixture.tree / "life.md").read_bytes())
+        self.assertTrue(all(p["preservation"] == "unknown_preserve_entire_page" for p in plan["pages"]))
+        replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
+        self.assertEqual("published", replay["status"])
+
+    def test_refresh_retains_both_immutable_passes_and_original_whole_page_backups(self):
+        first = self.fixture.plan()
+        old_plan, old_backups = preserve_history_fixture(self.store, first, self.fixture.root / "backup-1", self.publisher)
+        (self.fixture.tree / "life.md").write_bytes(self.fixture.page_bytes + "新增个人笔记\n".encode())
+        second = self.fixture.plan()
+        new_plan, _ = preserve_history_fixture(self.store, second, self.fixture.root / "backup-2", self.publisher)
+        self.assertNotEqual(first.manifest_id, second.manifest_id)
+        self.assertNotEqual(old_plan["documents"][0]["path"], new_plan["documents"][0]["path"])
+        self.assertEqual(self.fixture.page_bytes, old_backups["Old/life.md"].read_bytes())
+        with closing(self.store.connect()) as conn:
+            self.assertEqual(2, conn.execute("SELECT count(*) FROM legacy_mappings WHERE kind='history_pass'").fetchone()[0])
+            self.assertEqual(len(first.records) + len(second.records), conn.execute(
+                "SELECT count(*) FROM legacy_mappings WHERE target_type='history_record'").fetchone()[0])
+        root = (self.projections / "Legacy/Index.md").read_text()
+        self.assertIn(first.manifest_id, root)
+        self.assertIn(second.manifest_id, root)
+
+    def test_receipt_tampering_and_existing_semantic_history_fail_closed(self):
+        inventory = self.fixture.plan()
+        preserve_legacy_history(self.store, inventory)
+        with self.store.transaction() as conn:
+            conn.execute("UPDATE legacy_mappings SET metadata_json='{}' WHERE target_type='history_record'")
+        with self.assertRaisesRegex(LegacyError, "legacy_history_receipt_conflict"):
+            preserve_legacy_history(self.store, inventory)
+        old_store = SemanticStore(self.fixture.root / "old-policy.sqlite", "old-policy")
+        import_legacy(old_store, inventory)
+        with old_store.transaction() as conn:
+            conn.execute("UPDATE generation_manifest SET metadata_json=?", (json.dumps({"history_policy": SOURCE_FIRST_POLICY}),))
+        with self.assertRaisesRegex(LegacyError, "legacy_history_semantic_contamination"):
+            preserve_legacy_history(old_store, inventory)
 
 
 if __name__ == "__main__":

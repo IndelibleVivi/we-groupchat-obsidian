@@ -178,6 +178,11 @@
   witnesses and Episodes; time proximity or a shared URL alone is not identity.
   New extraction pages carry the preceding bounded page as ordered non-core
   context; resumed page jobs retain their exact frozen context and outcome.
+  Fresh extraction pages and coverage jobs bind
+  `unit_policy="retained-knowledge-v4"`; v1/v2/v3 are frozen intermediate candidate
+  policies. Units represent retained knowledge and scenes, not a provenance
+  audit or message directory. Source evidence and resources remain exact, and
+  display names never imply gender or identity.
   Material withdrawal is proposition- and scope-specific; explicit claim
   restatement/replay lineage carries it across Items without revoking unrelated
   facts in a report. Evidence-only claims may bridge that lineage but cannot
@@ -219,7 +224,10 @@
   evidence; local roles do not fabricate Cloudflare accounts or usage.
 - `projections.py`, `controls.py`, `briefing.py`, `delivery.py` and
   `reader_runtime.py` under `core/semantic/` own the Obsidian reading surface.
-  BodyPlan has a unique home for each retained detail; accepted pages are
+  Current Body artifacts are `body-plan-v9` / `body-paged-v9`; accepted
+  `body-plan-v2` through `body-paged-v8` evidence remains historical and must
+  not be rewritten. The verifier accepts v2-v9 and must remain in lockstep with
+  the writer. BodyPlan has a unique home for each retained detail; accepted pages are
   durable before publishing. New units may rewrite their receiving block's
   automatic prose while retaining stable homes, evidence, resources and exact
   verbatim obligations; unaffected blocks retain exact bytes. Markdown tables, lists and attributed quotations
@@ -239,11 +247,28 @@
   and the coordinator in `core/semantic/rebuild.py`: frozen plan, exact managed
   app stop, AppInstanceLock/capture locks, Online Backup, independent C0/C1
   full-source observations, conservation verification and durable cutover journal.
+  New plans bind `history_policy="source-first-v1"`: raw selected WeChat
+  snapshots alone create semantic captures/extraction/resolution. Old rows,
+  pages and queues are retained per `(legacy_ref, manifest_id)` as immutable
+  history passes, with exact backups, prior navigation and resources. They are
+  not semantic `legacy_import` input. Plans without the field retain
+  `legacy-semantic-v1`, its original fingerprint and obligations; populated or
+  in-flight generations cannot silently switch policy. No SQL schema migration
+  is required. Every retained pass stays verifier-accountable through run-bound
+  payload refs, including a distinct verified whole-database Online Backup per
+  freeze; `Legacy/Index.md` links each pass and DB-only or missing-page topics
+  have explicit history entries.
   Publish the fixed projection, install v3 via CAS, activate the pin, record the
   provisional receipt, release locks, restore the exact app and verify live
   incremental acceptance in that order. Failed provisional evidence remains
   sticky. Rollback preserves new captures/reading/delivery evidence. An already
   active different semantic generation is not an admissible new rebuild plan.
+  Before source/provider work, `status`/execute inspect durable job states.
+  Unknown outcomes and unexpired running leases block; expired leases remain
+  reclaimable. `restore_attempts` is append-only and owns the latest
+  restored/code/time; legacy `restored=true` followed by a restore error is
+  observation-required. Never auto-reconcile unknown work or reset it. Restores
+  are recorded as observations, not assumed from an older success field.
   Source/model grants, budget/account setup, installation and activation are
   separate from source tests; see `docs/semantic-rebuild.md`.
 - `core/semantic/verification.py` owns independent complete-generation checks;

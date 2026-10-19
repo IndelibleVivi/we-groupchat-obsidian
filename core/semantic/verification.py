@@ -7,23 +7,30 @@ data, acknowledges an outbox, or initializes a consumer schema.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import base64
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
+from itertools import zip_longest
 import json
 import math
 import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from core.url_safety import redact_urls_in_text
 from .attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata, source_attribution
 from .legacy import (LegacyError, LegacyInventory, legacy_resources,
-                     _checked_path, _read_regular, _relative, _under)
+                     HISTORY_SCHEMA, HISTORY_PUBLICATION_SCHEMA, SOURCE_FIRST_POLICY, LEGACY_SEMANTIC_POLICY,
+                     TABLE_KEYS,
+                     history_policy, build_history_publication_plan, history_document_body, history_root_body,
+                     _checked_path, _read_regular, _relative, _under, _opaque)
 from .projections import ReadingError, property_value, region_body
+from .rebuild_payloads import is_ref
 from .verification_storage import GroupMap, RowMap, Rows, ScratchMap, freeze_json, workspace
 
 
@@ -63,7 +70,8 @@ class VerificationReport:
 class RebuildVerifier:
     """Read a consistent DB snapshot plus a private staged membership manifest."""
 
-    def __init__(self, store_path, manifest: Mapping[str, Any], *, projection_root=None):
+    def __init__(self, store_path, manifest: Mapping[str, Any], *, projection_root=None,
+                 history_payload_loader=None):
         self.store_path = store_path
         # Freeze the caller's nested object; validation is reported content-free.
         try:
@@ -71,6 +79,7 @@ class RebuildVerifier:
         except (TypeError, ValueError):
             self.manifest = {}
         self.projection_root = projection_root
+        self.history_payload_loader = history_payload_loader
         self._issues = Counter()
         self.counts = Counter()
 
@@ -135,7 +144,7 @@ class RebuildVerifier:
                 source.close()
             # A retained verifier can be called again, but must not retain the
             # previous run's rows, decoded payloads, metadata sets or connections.
-            for key in ("db", "scratch", "tables", "generation", "sources", "source_resources", "batches", "members",
+            for key in ("db", "scratch", "tables", "generation", "history_policy", "sources", "source_resources", "batches", "members",
                         "accepted", "extractions", "extraction_inputs", "processing", "transactions", "outboxes",
                         "dispositions", "actions", "observations", "items", "spans", "evidence", "observed_versions",
                         "item_observations", "item_content_observations", "projection_id_paths"):
@@ -151,6 +160,23 @@ class RebuildVerifier:
                 or generations[0]["generation_id"] != self.generation
                 or generations[0]["schema"] != "we-groupchat-obsidian.semantic.v1"):
             self.issue("generation_binding_mismatch")
+        try:
+            self.history_policy = history_policy(self.manifest)
+            if len(generations) == 1 and history_policy(_load(generations[0]["metadata_json"])) != self.history_policy:
+                self.issue("legacy_history_policy_mismatch")
+        except LegacyError:
+            self.issue("legacy_history_policy_invalid")
+            self.history_policy = LEGACY_SEMANTIC_POLICY
+        if self.history_policy == SOURCE_FIRST_POLICY:
+            if (self.db.execute("SELECT 1 FROM capture_batches WHERE purpose='legacy_import' LIMIT 1").fetchone()
+                    or self._has("legacy_mappings") and self.db.execute(
+                        "SELECT 1 FROM legacy_mappings WHERE target_type='source_version' LIMIT 1").fetchone()):
+                self.issue("legacy_history_semantic_contamination")
+            if self.manifest.get("legacy_capture_passes"):
+                self.issue("legacy_history_semantic_contamination")
+        elif (self.manifest.get("history_preservation_passes") or self._has("legacy_mappings") and self.db.execute(
+                "SELECT 1 FROM legacy_mappings WHERE kind='history_pass' LIMIT 1").fetchone()):
+            self.issue("legacy_history_policy_mismatch")
         self.issue("foreign_key_violation", count=sum(1 for _ in self.db.execute("PRAGMA foreign_key_check")))
         if [r[0] for r in self.db.execute("PRAGMA quick_check")] != ["ok"]:
             self.issue("canonical_integrity_failed")
@@ -1107,7 +1133,8 @@ class RebuildVerifier:
             for reference in self.scratch.execute("SELECT request_id FROM body_artifact_refs WHERE item_id=?", (item_id,)):
                 row = self.db.execute("SELECT * FROM reader_text_artifacts WHERE request_id=?", (reference[0],)).fetchone()
                 yield row, _load(row["artifact_json"])
-        if (items or self.manifest.get("legacy_inventory") or self.manifest.get("required_brief")) and self.projection_root is not None:
+        if (items or self.manifest.get("legacy_inventory") or self.manifest.get("history_preservation_passes")
+                or self.manifest.get("required_brief")) and self.projection_root is not None:
             try:
                 root = _checked_path(self.projection_root, directory=True)
                 for directory, dirs, files in os.walk(root, followlinks=False):
@@ -1154,7 +1181,8 @@ class RebuildVerifier:
                 elif not any(a["status"] == "accepted" and a["prompt_version"] in {
                         "body-plan-v2", "body-paged-v2", "body-plan-v3", "body-paged-v3",
                         "body-plan-v4", "body-paged-v4", "body-plan-v5", "body-paged-v5",
-                        "body-plan-v6", "body-paged-v6"} for a in matches):
+                        "body-plan-v6", "body-paged-v6", "body-plan-v7", "body-paged-v7",
+                        "body-plan-v8", "body-paged-v8", "body-plan-v9", "body-paged-v9"} for a in matches):
                     self.issue("body_provider_version_conflict", "semantic_pending")
             required_spans = set().union(*(self.evidence[oid] for oid in self.item_observations[iid]))
             if required_spans and not self._has("reader_source_locations"):
@@ -1412,7 +1440,345 @@ class RebuildVerifier:
             if position != parts:
                 self.issue("brief_compaction_coverage_incomplete")
 
+    def _verify_history(self):
+        """Read each frozen history pass; none can supply semantic completion."""
+        if not {"legacy_mappings", "annotation_preservation"} <= self.tables:
+            self.issue("legacy_conservation_tables_missing")
+            return
+        passes = self.manifest.get("history_preservation_passes")
+        if not isinstance(passes, list) or not passes:
+            self.issue("legacy_history_passes_missing")
+            return
+        ids, declared_freezes, freeze_ids = [], [], set()
+        namespace = None
+        for index, declaration in enumerate(passes):
+            if not isinstance(declaration, dict) or not isinstance(declaration.get("legacy_inventory"), dict):
+                self.issue("legacy_history_pass_invalid")
+                continue
+            value = declaration["legacy_inventory"]
+            publication = declaration.get("publication_plan")
+            if is_ref(value) or is_ref(publication):
+                if self.history_payload_loader is None:
+                    self.issue("legacy_history_payload_unavailable")
+                    continue
+                try:
+                    value = self.history_payload_loader(value)
+                    publication = self.history_payload_loader(publication)
+                except (RuntimeError, OSError, ValueError, TypeError):
+                    self.issue("legacy_history_payload_unavailable")
+                    continue
+            inventory = LegacyInventory.from_dict(value)
+            manifest_id = inventory.manifest_id
+            if declaration.get("receipt_id") != manifest_id or manifest_id in ids:
+                self.issue("legacy_history_pass_invalid")
+            ids.append(manifest_id)
+            if namespace is None:
+                namespace = inventory.namespace
+            elif inventory.namespace != namespace:
+                self.issue("legacy_history_namespace_mismatch")
+            self._verify_history_inventory(inventory, publication, current=index == len(passes) - 1)
+            self._verify_history_databases(inventory, declaration["legacy_inventory"],
+                                           declaration.get("freeze_receipts"), declared_freezes, freeze_ids)
+            if index == len(passes) - 1 and (
+                    self.manifest.get("legacy_inventory") != declaration["legacy_inventory"]
+                    or self.manifest.get("publication_plan") != declaration.get("publication_plan")):
+                self.issue("legacy_history_final_binding_mismatch")
+            del inventory, value, publication
+        expected_freezes = self.manifest.get("history_freeze_receipts")
+        if not isinstance(expected_freezes, list) or not expected_freezes:
+            self.issue("legacy_history_freeze_manifest_missing")
+        elif (len(expected_freezes) != len(declared_freezes)
+                or any(sum(reference == actual for actual in declared_freezes) != 1 for reference in expected_freezes)):
+            self.issue("legacy_history_freeze_set_mismatch")
+        actual = {row[0] for row in self.db.execute("SELECT legacy_id FROM legacy_mappings WHERE kind='history_pass'")}
+        if actual != set(ids):
+            self.issue("legacy_history_pass_set_mismatch")
+        # Extra record/pass evidence is never silently detached from the run.
+        if any(row[0] not in set(ids) for row in self.db.execute(
+                "SELECT DISTINCT target_id FROM legacy_mappings WHERE target_type IN ('history_record','history_file','file_backup')")):
+            self.issue("legacy_history_pass_set_mismatch")
+        if namespace is not None:
+            self._verify_history_root(namespace, ids)
+        self.counts["legacy_history_passes"] = len(ids)
+
+    def _verify_history_databases(self, inventory, inventory_binding, references, declared, freeze_ids):
+        """Every freeze owns a distinct whole-DB receipt, even for equal rows."""
+        if not isinstance(references, list) or not references:
+            self.issue("legacy_history_database_backup_manifest_missing")
+            return
+        for reference in references:
+            declared.append(reference)
+            try:
+                if is_ref(reference):
+                    if self.history_payload_loader is None:
+                        self.issue("legacy_history_payload_unavailable")
+                        continue
+                    frozen = self.history_payload_loader(reference)
+                else:
+                    frozen = reference
+            except (RuntimeError, OSError, ValueError, TypeError):
+                self.issue("legacy_history_payload_unavailable")
+                continue
+            if (not isinstance(frozen, dict) or not isinstance(frozen.get("receipt_id"), str)
+                    or not frozen["receipt_id"] or frozen["receipt_id"] in freeze_ids
+                    or frozen.get("legacy_inventory") != inventory_binding):
+                self.issue("legacy_history_freeze_binding_invalid")
+                continue
+            freeze_ids.add(frozen["receipt_id"])
+            self._verify_history_database_backup(inventory, frozen.get("databases", {}).get("knowledge"))
+            del frozen
+
+    def _verify_history_database_backup(self, inventory, receipt):
+        if (not isinstance(receipt, dict) or not isinstance(receipt.get("path"), str)
+                or not isinstance(receipt.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"]) is None):
+            self.issue("legacy_history_database_backup_manifest_invalid")
+            return
+        connection = None
+        fd = None
+        def identity(observation):
+            return (observation.st_dev, observation.st_ino, observation.st_mode, observation.st_size,
+                    observation.st_mtime_ns, observation.st_ctime_ns)
+        try:
+            path = _checked_path(receipt["path"])
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as stream:
+                fd = None
+                initial = os.fstat(stream.fileno())
+                if not stat.S_ISREG(initial.st_mode):
+                    self.issue("legacy_history_database_backup_invalid")
+                    return
+                expected_identity = identity(initial)
+                checksum = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    checksum.update(chunk)
+                if (checksum.hexdigest() != receipt["sha256"]
+                        or identity(os.fstat(stream.fileno())) != expected_identity
+                        or identity(path.lstat()) != expected_identity):
+                    self.issue("legacy_history_database_backup_changed")
+                    return
+                # Online Backup seals a standalone database. Read those exact
+                # hashed bytes; a later sidecar must not supply unbound rows.
+                connection = sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("PRAGMA cache_size=-4096")
+                connection.execute("PRAGMA mmap_size=0")
+                connection.execute("BEGIN")
+                if any(row[0] != "ok" for row in connection.execute("PRAGMA quick_check")):
+                    self.issue("legacy_history_database_backup_invalid")
+                names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "topics" not in names or set(inventory.tables) != names.intersection(TABLE_KEYS):
+                    self.issue("legacy_history_database_rows_mismatch")
+                missing = object()
+                for table, key in TABLE_KEYS.items():
+                    if table not in names:
+                        continue
+                    columns = {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+                    if key not in columns or table == "topics" and "obsidian_path" not in columns:
+                        self.issue("legacy_history_database_rows_mismatch")
+                        continue
+                    expected = (record for record in inventory.records if record.table == table)
+                    actual = connection.execute(f'SELECT * FROM "{table}" ORDER BY "{key}"')
+                    try:
+                        for record, row in zip_longest(expected, actual, fillvalue=missing):
+                            if record is missing or row is missing:
+                                self.issue("legacy_history_database_rows_mismatch")
+                                break
+                            payload = {name: ({"sqlite_blob_base64": base64.b64encode(value).decode("ascii")}
+                                              if isinstance(value, bytes) else value)
+                                       for name in row.keys() for value in (row[name],)}
+                            if record.old_id != str(row[key]) or record.payload != payload:
+                                self.issue("legacy_history_database_rows_mismatch")
+                                break
+                    finally:
+                        actual.close()
+                if (identity(os.fstat(stream.fileno())) != expected_identity
+                        or identity(path.lstat()) != expected_identity):
+                    self.issue("legacy_history_database_backup_changed")
+                self.counts["legacy_database_backups"] += 1
+        except LegacyError as exc:
+            self.issue("legacy_history_database_backup_missing" if exc.code == "legacy_input_missing"
+                       else "legacy_history_database_backup_invalid")
+        except FileNotFoundError:
+            self.issue("legacy_history_database_backup_missing")
+        except (sqlite3.Error, OSError):
+            self.issue("legacy_history_database_backup_invalid")
+        finally:
+            if connection is not None:
+                connection.close()
+            if fd is not None:
+                os.close(fd)
+
+    def _verify_history_inventory(self, inventory, plan, *, current):
+        manifest_id = inventory.manifest_id
+        expected = {"schema": HISTORY_SCHEMA, "history_policy": SOURCE_FIRST_POLICY,
+            "receipt_id": manifest_id, "manifest_id": manifest_id, "namespace": inventory.namespace,
+            "database_snapshot_digest": inventory.database_snapshot_digest,
+            "record_count": len(inventory.records), "file_count": len(inventory.files),
+            "external_file_count": len(inventory.external_files)}
+        row = self.db.execute("SELECT * FROM legacy_mappings WHERE kind='history_pass' AND legacy_id=? "
+            "AND target_type='history_inventory' AND target_id=?", (manifest_id, manifest_id)).fetchone()
+        if row is None or row["disposition"] != "history_preserved" or _load(row["metadata_json"]) != expected:
+            self.issue("legacy_history_pass_receipt_invalid")
+        for record in inventory.records:
+            row = self.db.execute("SELECT * FROM legacy_mappings WHERE kind='history_record' AND legacy_id=? "
+                "AND target_type='history_record' AND target_id=?", (record.legacy_ref, manifest_id)).fetchone()
+            metadata = {"schema": HISTORY_SCHEMA, "history_policy": SOURCE_FIRST_POLICY,
+                "manifest_id": manifest_id, "input": asdict(record), "resources": list(legacy_resources(record))}
+            if row is None or row["disposition"] != "history_preserved" or _load(row["metadata_json"]) != metadata:
+                self.issue("legacy_history_record_unaccounted")
+        if self.db.execute("SELECT count(*) FROM legacy_mappings WHERE target_type='history_record' AND target_id=?",
+                           (manifest_id,)).fetchone()[0] != len(inventory.records):
+            self.issue("legacy_history_record_set_mismatch")
+        selection = self.db.execute("SELECT disposition,metadata_json FROM legacy_mappings WHERE kind='selection' "
+            "AND legacy_id=? AND target_id=?", (inventory.namespace, manifest_id)).fetchone()
+        if (selection is None or selection[0] != "preserved_no_subscription"
+                or _load(selection[1]) != inventory.selection_snapshot):
+            self.issue("legacy_selection_unaccounted")
+        for file in inventory.files:
+            row = self.db.execute("SELECT * FROM legacy_mappings WHERE kind='history_file' AND legacy_id=? "
+                "AND target_type='history_file' AND target_id=?",
+                (_opaque(inventory.namespace, "file-inventory", file.relative_path), manifest_id)).fetchone()
+            metadata = {"manifest_id": manifest_id, "file": _load(_json(asdict(file))),
+                "preservation": "unknown_preserve_entire_page" if file.owned else "unowned_in_place"}
+            if row is None or row["disposition"] != "history_preserved" or _load(row["metadata_json"]) != metadata:
+                self.issue("legacy_history_file_unaccounted")
+            if current:
+                try:
+                    path = _under(_checked_path(inventory.managed_root, directory=True), file.relative_path)
+                    raw = _read_regular(path, max(1, file.byte_length))
+                    if len(raw) != file.byte_length or _bytes_hash(raw) != file.sha256:
+                        self.issue("legacy_original_bytes_changed" if file.owned else "unowned_legacy_file_changed")
+                except LegacyError:
+                    self.issue("legacy_original_bytes_changed" if file.owned else "unowned_legacy_file_changed")
+            if file.owned:
+                self._verify_history_backup(inventory, "file", file.relative_path, file.sha256,
+                                            file.byte_length, file.original_bytes())
+                annotation = self.db.execute("SELECT * FROM annotation_preservation WHERE path=? AND sha256=?",
+                    (file.relative_path, file.sha256)).fetchone()
+                if annotation is None:
+                    historical = self.db.execute("SELECT metadata_json FROM legacy_mappings WHERE kind='annotation_history' "
+                        "AND legacy_id=? AND target_type='backup' AND target_id=?", (file.relative_path, file.sha256)).fetchone()
+                    annotation = _load(historical[0]) if historical else None
+                baseline = _load(annotation["metadata_json"]).get("file", {}) if annotation else {}
+                if (annotation is None or annotation["status"] not in {"preserved", "preserved_in_place", "user_preserved"}
+                        or any(baseline.get(key) != getattr(file, key) for key in
+                               ("relative_path", "sha256", "byte_length", "bytes_base64"))):
+                    self.issue("legacy_annotation_unaccounted")
+                elif current:
+                    try:
+                        if _read_regular(_checked_path(annotation["backup_path"]), max(1, file.byte_length)) != file.original_bytes():
+                            self.issue("legacy_backup_bytes_mismatch")
+                    except LegacyError:
+                        self.issue("legacy_backup_missing", "projection_pending")
+        for external in inventory.external_files:
+            row = self.db.execute("SELECT disposition,metadata_json FROM legacy_mappings WHERE kind='history_external_file' "
+                "AND legacy_id=? AND target_type='history_file' AND target_id=?",
+                (_opaque(inventory.namespace, external["path"]), manifest_id)).fetchone()
+            if (row is None or row[0] != "history_preserved"
+                    or _load(row[1]) != {"manifest_id": manifest_id, "file": external}):
+                self.issue("legacy_external_file_unaccounted")
+            import base64
+            raw = base64.b64decode(external["bytes_base64"], validate=True)
+            self._verify_history_backup(inventory, "external", external["path"], external["sha256"], external["byte_length"], raw)
+            if current:
+                try:
+                    if _read_regular(_checked_path(external["path"]), max(1, len(raw))) != raw:
+                        self.issue("legacy_external_bytes_changed")
+                except LegacyError:
+                    self.issue("legacy_external_bytes_changed")
+        if self.db.execute("SELECT count(*) FROM legacy_mappings WHERE target_type='history_file' AND target_id=?",
+                           (manifest_id,)).fetchone()[0] != len(inventory.files) + len(inventory.external_files):
+            self.issue("legacy_history_file_set_mismatch")
+        if self.db.execute("SELECT count(*) FROM legacy_mappings WHERE target_type='file_backup' AND target_id=?",
+                           (manifest_id,)).fetchone()[0] != sum(f.owned for f in inventory.files) + len(inventory.external_files):
+            self.issue("legacy_history_backup_set_mismatch")
+        self.counts["legacy_records"] += len(inventory.records)
+        self.counts["legacy_files"] += len(inventory.files)
+        self._verify_history_publication(inventory, plan)
+
+    def _verify_history_backup(self, inventory, role, path, sha256, byte_length, expected):
+        row = self.db.execute("SELECT * FROM legacy_mappings WHERE kind='history_backup' AND legacy_id=? "
+            "AND target_type='file_backup' AND target_id=?",
+            (_opaque(inventory.namespace, role, path), inventory.manifest_id)).fetchone()
+        if row is None:
+            self.issue("legacy_history_backup_missing", "projection_pending")
+            return
+        metadata = _load(row["metadata_json"])
+        if (row["disposition"] != "preserved_in_place" or set(metadata) != {
+                "manifest_id", "role", "path", "sha256", "byte_length", "backup_path"}
+                or {k: v for k, v in metadata.items() if k != "backup_path"} != {
+                    "manifest_id": inventory.manifest_id, "role": role, "path": path,
+                    "sha256": sha256, "byte_length": byte_length}):
+            self.issue("legacy_history_backup_invalid")
+            return
+        try:
+            if _read_regular(_checked_path(metadata["backup_path"]), max(1, byte_length)) != expected:
+                self.issue("legacy_backup_bytes_mismatch")
+        except LegacyError:
+            self.issue("legacy_history_backup_missing", "projection_pending")
+
+    def _verify_history_publication(self, inventory, plan):
+        if not isinstance(plan, dict) or plan.get("schema") != HISTORY_PUBLICATION_SCHEMA:
+            self.issue("legacy_history_publication_missing", "projection_pending")
+            return
+        if plan != build_history_publication_plan(inventory):
+            self.issue("legacy_history_publication_invalid")
+            return
+        if self.db.execute("SELECT count(*) FROM legacy_mappings WHERE kind='history_navigation' AND legacy_id=?",
+                           (inventory.manifest_id,)).fetchone()[0] != len(plan["documents"]):
+            self.issue("legacy_history_navigation_set_mismatch")
+        for page in plan["pages"]:
+            file = next(f for f in inventory.files if f.relative_path == page["old_path"])
+            try:
+                if self._projection_bytes(page["history_backup_path"]) != file.original_bytes():
+                    self.issue("legacy_history_copy_missing", "projection_pending")
+            except LegacyError:
+                self.issue("legacy_history_copy_missing", "projection_pending")
+        for document in plan["documents"]:
+            body = history_document_body(inventory, plan, document)
+            row = self.db.execute("SELECT * FROM legacy_mappings WHERE kind='history_navigation' AND legacy_id=? "
+                "AND target_type='projection' AND target_id=?", (inventory.manifest_id, document["object_id"])).fetchone()
+            if row is None:
+                self.issue("legacy_history_navigation_receipt_missing", "projection_pending")
+                continue
+            metadata = _load(row["metadata_json"])
+            if (metadata.get("manifest_id") != inventory.manifest_id or metadata.get("document") != document
+                    or metadata.get("body_sha256") != _bytes_hash(body.encode())):
+                self.issue("legacy_history_navigation_invalid")
+            self._verify_history_document(document, body, metadata.get("receipt", {}))
+
+    def _verify_history_document(self, document, body, receipt):
+        if (receipt.get("object_id") != document["object_id"] or receipt.get("path") != document["path"]
+                or receipt.get("status") not in {"published", "unchanged"}
+                or not self._projection_ready(document["object_id"], receipt.get("content_revision"))):
+            self.issue("legacy_history_navigation_receipt_missing", "projection_pending")
+        try:
+            actual = region_body(self._projection_bytes(document["path"]).decode(), "body")
+            if actual != "\n" + body.strip("\n") + "\n" or redact_urls_in_text(actual) != actual:
+                self.issue("legacy_history_navigation_content_mismatch")
+        except (LegacyError, ReadingError, UnicodeError):
+            self.issue("legacy_history_navigation_missing", "projection_pending")
+
+    def _verify_history_root(self, namespace, ids):
+        document = {"path": "Legacy/Index.md", "object_id": "control:legacy-history:" + namespace + ":root"}
+        body = history_root_body(ids)
+        row = self.db.execute("SELECT metadata_json FROM legacy_mappings WHERE kind='history_root_navigation' "
+            "AND legacy_id=? AND target_type='projection' AND target_id=?", (namespace, document["object_id"])).fetchone()
+        if row is None:
+            self.issue("legacy_history_root_missing", "projection_pending")
+            return
+        metadata = _load(row[0])
+        if (metadata.get("manifest_ids") != sorted(ids) or metadata.get("root_navigation") != document
+                or metadata.get("body_sha256") != _bytes_hash(body.encode())):
+            self.issue("legacy_history_root_invalid")
+        self._verify_history_document(document, body, metadata.get("receipt", {}))
+
     def _verify_legacy(self):
+        if self.history_policy == SOURCE_FIRST_POLICY:
+            self._verify_history()
+            return
         value = self.manifest.get("legacy_inventory")
         if value is None:
             return

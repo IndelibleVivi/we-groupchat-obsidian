@@ -8,7 +8,7 @@
 %%{init: {"theme":"neutral","flowchart":{"htmlLabels":true,"wrappingWidth":190,"curve":"basis"}}}%%
 flowchart TB
   accTitle: WGO semantic implementation — capture, canonical knowledge, reading and recovery
-  accDescr: A source-based candidate architecture with 116 nodes. Durable sources, semantic and reader ledgers are distinguished from derived indexes and Markdown. Optional providers, resource backup, generation cutover and failure paths remain visible.
+  accDescr: A source-based candidate architecture with separate raw-semantic and preserved-old-history lanes. Durable sources, semantic and reader ledgers are distinguished from derived indexes and Markdown. Optional providers, resource backup, generation cutover and failure paths remain visible.
 
   classDef canon fill:#e6f4ea,stroke:#1b5e20,color:#0b1a10,stroke-width:2px;
   classDef derived fill:#e7f0fb,stroke:#0d47a1,color:#06121f;
@@ -29,7 +29,7 @@ flowchart TB
     T_DIGEST["daily digest timer legacy"]
     MCP["(O) mcp_server.py 可选 legacy 只读兼容<br/>非普通安装依赖 独立 SDK 客户端拥有生命周期"]:::optional
     MCP_SEND["(O) mcp_send_retired 惰性 stub 无发送路径"]:::optional
-    CLI_REBUILD["scripts/rebuild_knowledge.py operator CLI"]
+    CLI_REBUILD["scripts/rebuild_knowledge.py operator CLI<br/>含 source-free restore-runtime"]
     CLI_HEALTH["scripts/health_check.py 内容无关健康矩阵"]
     CLI_SOURCE["(O) 短命 source CLI<br/>需 --allow-transient-wechat-source-read"]:::optional
     WECHAT_APP["(O) WeChat 客户端进程 仅由 guard 在后台拉起"]:::optional
@@ -123,17 +123,19 @@ flowchart TB
   end
 
   subgraph REBUILD["迁移与切换 / Rebuild and cutover"]
-    COORD["core/semantic/rebuild.py :: RebuildCoordinator<br/>plan/execute/resume/verify/rollback"]
+    COORD["core/semantic/rebuild.py :: RebuildCoordinator<br/>plan/execute/resume/status/restore/verify/rollback"]
+    HISTORY_PASS["source-first-v1::_preserve_history<br/>每个 retained freeze 独立保全<br/>不建立 semantic capture/Item/job"]:::canon
+    LEGACY_SEM_IMPORT["legacy-semantic-v1 compatibility<br/>仅无 policy 的旧 plan<br/>import_legacy → capture_batch"]
     MANAGED["ManagedRuntime 停止精确 app<br/>AppInstanceLock + exact restore"]
     JOURNAL["RebuildJournal<br/>不可变 payload run lock 内升级"]
     PIN["(C) GenerationRegistry / GenerationPin<br/>active.json + cutover.json"]:::canon
     CUT["cutover journal phases 半切换启动 fail closed"]
-    VERIF["RebuildVerifier 独立 C0/C1 conservation 校验"]
+    VERIF["RebuildVerifier 独立 C0/C1 conservation 校验<br/>逐 pass 读取 history payload"]:::canon
     COORD_V3["切换步骤 1：安装 v3 检查点<br/>MonitorStateStore.install_v3 CAS"]
     COORD_PIN["切换步骤 2：激活 active manifest pin"]
     COORD_PROV["切换步骤 3：记录 durable provisional receipt"]
     COORD_RELEASE["切换步骤 4：<br/>释放 AppInstanceLock/capture/projection 锁"]
-    COORD_RESTORE_APP["切换步骤 5：ManagedRuntime exact restore"]
+    COORD_RESTORE_APP["切换步骤 5 / restore-runtime：exact restore<br/>restore_attempts 最新观察<br/>不推进 phase 或 live ACK"]:::canon
     COORD_LIVE["切换步骤 6：live 增量验收<br/>真实 applied/processing receipt"]
     COORD_ROLLBACK["(C) rollback restore_checkpoint CAS<br/>保留新 captures/reading/delivery 证据"]:::canon
     RELOC["(cand) relocate 同 run/gen<br/>WAL-safe copy + config adopt + retirement"]:::optional
@@ -141,8 +143,10 @@ flowchart TB
 
   subgraph LEGACY["legacy 兼容路径 / Legacy path"]
     LEG_PATH["legacy topic/event runtime 未 pin 前的真实兼容路径"]
-    LEG_IMPORT["core/semantic/legacy.py<br/>plan_legacy / import_legacy 只读旧 DB + 页面清单"]
-    LEG_NAV["(D) Legacy/ redacted 导航页"]:::derived
+    LEG_INVENTORY["core/semantic/legacy.py::plan_legacy<br/>旧 DB/页面/Review Queue frozen inventory"]
+    HISTORY_STORE["(C) history receipts per legacy row + manifest<br/>record/file/pass/backup dispositions"]:::canon
+    HISTORY_PUB["core/semantic/legacy.py::build_history_publication_plan<br/>无 topic_item_map / 无 semantic ACK"]:::derived
+    LEG_NAV["(D) Legacy/History/<manifest_id>/ + Legacy/Index.md"]:::derived
     LEG_BLOCK["runtime.legacy_command_blocked 旧 writer fail closed"]
     LEG_DB["(C) legacy knowledge DB 语义迁移不改写"]:::canon
   end
@@ -340,7 +344,16 @@ flowchart TB
   COORD -->|Online Backup + C0/C1 完整来源观测| SEM_CAP
   COORD -->|固定投影发布| PUB
   COORD -->|verify| VERIF
-  COORD -->|legacy conservation| LEG_IMPORT
+  CLI_REBUILD -->|source-free restore-runtime| COORD_RESTORE_APP
+  COORD -->|source-first-v1| HISTORY_PASS
+  HISTORY_PASS -->|读取每份 frozen inventory| LEG_INVENTORY
+  HISTORY_PASS -->|immutable history receipts| HISTORY_STORE
+  HISTORY_PASS -->|history publication plan| HISTORY_PUB
+  HISTORY_PUB -->|redacted history pages| LEG_NAV
+  HISTORY_STORE -->|不改写| LEG_DB
+  COORD -->|无 policy 的旧 plan| LEGACY_SEM_IMPORT
+  LEGACY_SEM_IMPORT -->|仅 compatibility 路径| STORE
+  LEGACY_SEM_IMPORT -->|无 policy 的旧 plan| LEG_INVENTORY
   VERIF -->|独立 conservation| JOURNAL
   CUT -->|半切换启动 fail closed| PIN
   COORD -.->|in-progress cutover 拒绝新 plan| CUT
@@ -365,13 +378,11 @@ flowchart TB
   RELOC -->|adopt semantic_runtime_root| CONFIG
 
   %% legacy 兼容
-  LEG_IMPORT -->|只读旧 DB/页面 走 capture_batch| STORE
-  LEG_IMPORT -->|不改写| LEG_DB
   LEG_PATH -->|topic/event writer| LEG_DB
   LEG_BLOCK -->|pin 后停止旧 writer| LEG_PATH
   LEG_PATH -.->|root 不可用 fail closed| ROOT_ERR
-  LEG_IMPORT -->|frozen inventory + topic map| LEG_NAV
-  LEG_NAV -->|redacted Legacy/ 页| WGO
+  HISTORY_PUB -->|redacted Legacy/History/<manifest_id>/ 页| WGO
+  HISTORY_PUB -->|root index 链接每一 pass| WGO
 
   %% 平台 / 配置 / 健康
   CONFIG -->|semantic_runtime_root| PIN

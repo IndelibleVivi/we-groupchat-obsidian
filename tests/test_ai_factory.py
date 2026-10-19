@@ -6,6 +6,24 @@ from core.config import ConfigError, _sanitize_config
 
 
 class AIProviderFactoryTests(unittest.TestCase):
+    def test_custom_streaming_is_strictly_opt_in_without_changing_old_snapshots(self):
+        config = {"ai_provider": "custom", "ai_model": "synthetic", "ai_base_url": "http://127.0.0.1:12345/v1"}
+        self.assertNotIn("custom_streaming", _sanitize_config(config))
+        with patch("ai.factory.load_key", return_value="synthetic-key"), \
+                patch("ai.openai_provider.OpenAIProvider") as provider:
+            create_provider(config)
+            self.assertNotIn("streaming", provider.call_args.kwargs)
+            for value in (True, False):
+                selected = _sanitize_config(dict(config, custom_streaming=value))
+                create_provider(selected)
+                self.assertIs(provider.call_args.kwargs["streaming"], value)
+            for value in (1, 0, None, "true", []):
+                with self.subTest(value=value):
+                    with self.assertRaises(ConfigError):
+                        _sanitize_config(dict(config, custom_streaming=value))
+                    with self.assertRaises(ValueError):
+                        create_provider(dict(config, custom_streaming=value))
+
     def test_custom_thinking_is_explicit_and_preserves_other_custom_endpoints(self):
         config = {"ai_provider": "custom", "ai_model": "synthetic",
                   "ai_base_url": "http://127.0.0.1:12345/v1", "ai_thinking": False}

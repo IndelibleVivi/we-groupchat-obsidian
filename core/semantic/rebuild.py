@@ -47,7 +47,7 @@ _ACTIVATION_STEPS = (
 _PROVIDER_CONFIG_KEYS = (
     "ai_provider", "ai_model", "ai_base_url", "ollama_url", "ollama_model",
     "monitor_ai_provider", "monitor_ai_model", "monitor_ai_thinking",
-    "monitor_ai_timeout_seconds", "custom_thinking_parameter",
+    "monitor_ai_timeout_seconds", "custom_thinking_parameter", "custom_streaming",
     "semantic_provider_limits", "semantic_text_output_tokens",
 )
 
@@ -276,6 +276,11 @@ class RebuildJournal:
 
     def verification(self, run=None):
         run = self.read() if run is None else run
+        from .legacy import history_policy, SOURCE_FIRST_POLICY
+        if history_policy(run["plan"]) == SOURCE_FIRST_POLICY:
+            # A verifier consumes history inventories one pass at a time. Phase
+            # transitions must never expand all historical page/row payloads.
+            return self.payloads.get(run["verification"])
         return self.payloads.expand(run["verification"], ("verification",))
 
     def frozen(self, run=None):
@@ -588,6 +593,55 @@ def _job_count(path):
         return int(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
 
 
+def _job_state_summary(path, now):
+    """Inspect durable job outcomes without creating or mutating the database.
+
+    Unknown provider outcomes and unexpired running claims block before a new
+    source capture. Known failed attempts remain retryable through the normal
+    fresh freeze/source path and are reported for the operator.
+    """
+    path = Path(path)
+    result = {"states": {}, "blocker": None, "error_codes": []}
+    if not regular_exists(path):
+        return result
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "jobs" not in tables:
+                return result
+            states = {row[0]: int(row[1]) for row in conn.execute(
+                "SELECT state,COUNT(*) FROM jobs GROUP BY state")}
+            invalid = set(states) - {"pending", "running", "failed", "unknown", "accepted", "done"}
+            if invalid:
+                raise RebuildError("rebuild_job_state_invalid")
+            result["states"] = dict(sorted(states.items()))
+            running = 0
+            if states.get("running"):
+                running = int(conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE state='running' "
+                    "AND lease_until IS NOT NULL AND lease_until>?", (now,)).fetchone()[0])
+            if states.get("unknown") or running:
+                result["blocker"] = "semantic_job_busy_or_unknown"
+            if "job_attempts" in tables:
+                codes = []
+                for row in conn.execute(
+                        "SELECT error_code FROM job_attempts WHERE error_code IS NOT NULL "
+                        "ORDER BY COALESCE(finished_at,started_at) DESC,started_at DESC"):
+                    code = row[0]
+                    if (isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,99}", code)
+                            and code not in codes):
+                        codes.append(code)
+                        if len(codes) == 10:
+                            break
+                result["error_codes"] = codes
+            return result
+    except RebuildError:
+        raise
+    except sqlite3.Error as exc:
+        raise RebuildError("rebuild_job_state_unavailable") from exc
+
+
 def _default_source(config):
     from core.key_extractor import get_cached_keys
     from core.wechat_db import WeChatDB
@@ -736,6 +790,7 @@ class RebuildCoordinator:
 
     def plan(self, provider_profile, *, run_id=None, expires_in=86400):
         from core.semantic.runtime import validate_profile
+        from core.semantic.legacy import SOURCE_FIRST_POLICY
         from core.config import DATA_DIR
         config = self._config()
         self._admit_private_paths(config)
@@ -767,6 +822,7 @@ class RebuildCoordinator:
         if type(expires_in) not in (int, float) or not 0 < expires_in <= 7 * 86400:
             raise RebuildError("rebuild_plan_expiry_invalid")
         plan = {"schema": SCHEMA, "run_id": run_id, "generation_id": generation,
+                "history_policy": SOURCE_FIRST_POLICY,
                 "created_at": self.clock(), "expires_at": self.clock() + expires_in,
                 "config": config, "config_fingerprint": fingerprint(config),
                 "config_revision": config["config_revision"], "provider_profile": profile,
@@ -791,6 +847,7 @@ class RebuildCoordinator:
         return include_review_queue(plan_legacy(config), self.review_queue_dir)
 
     def status(self, run_id):
+        from .legacy import history_policy
         self._admit_private_paths(self._config())
         run = RebuildJournal(self.root, run_id).read()
         state = ("rolled_back" if run["rollback"].get("restored") is True else "incomplete") if run.get("rollback") else run.get("final_receipt", {}).get("state", "incomplete")
@@ -802,17 +859,103 @@ class RebuildCoordinator:
             state = "rolled_back" if phase == "rolled_back" and run.get("rollback", {}).get("restored") is True else "incomplete"
         elif state == "run_complete" and (not own_cutover or cutover.get("phase") != "run_complete"):
             state = "incomplete"
+        jobs = _job_state_summary(run["plan"]["database"], self.clock())
+        runtime = run.get("runtime", {})
+        attempts = runtime.get("restore_attempts", [])
+        if run.get("rollback"):
+            rollback = run["rollback"]
+            restored = rollback.get("restored")
+            restore_code = "rebuild_rollback_restored" if restored is True else "runtime_restore_pending"
+            restore_observed_at = rollback.get("observed_at")
+        elif attempts:
+            latest = attempts[-1]
+            restored = latest.get("restored")
+            restore_code = latest.get("code")
+            restore_observed_at = latest.get("observed_at")
+        else:
+            restored = runtime.get("restored")
+            restore_code = runtime.get("restore_code")
+            restore_observed_at = runtime.get("restored_at")
+            if (restored is True and any(e.get("code") == "runtime_restore_failed"
+                                         and e.get("phase") == "restore" for e in run["errors"])):
+                # Older journals did not record an attempt. A prior successful
+                # value cannot establish the latest result after a restore error.
+                restored = None
+                restore_code = "runtime_restore_observation_required"
         return {"run_id": run_id, "generation_id": run["plan"]["generation_id"],
+                "history_policy": history_policy(run["plan"]),
                 "phase": phase, "error_codes": [e["code"] for e in run["errors"]],
                 "freeze_count": len(run["freeze_receipts"]),
                 "relocated": bool((run.get("relocation") or {}).get("complete")),
                 "configured_admission": _admission_snapshot(run["plan"]["config"]),
-                "state": state}
+                "state": state, "restored": restored, "restore_code": restore_code,
+                "restore_observed_at": restore_observed_at,
+                "restore_attempt_count": len(attempts),
+                "job_states": jobs["states"], "job_error_codes": jobs["error_codes"],
+                "job_blocker": jobs["blocker"]}
 
     def _event(self, journal, phase, value):
         self.fault_hook("before_" + phase)
         journal.step(phase, value)
         self.fault_hook("after_" + phase)
+
+    def _restore_runtime(self, journal, observation, phase="restore"):
+        """Record every restore observation while keeping prior attempts."""
+        started = self.clock()
+        restored, code = False, None
+        try:
+            restored = self.managed.restore(observation) is True
+            if not restored:
+                code = "runtime_restore_unobserved"
+        except Exception as exc:
+            code = getattr(exc, "code", "runtime_restore_failed")
+            if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,99}", code) is None:
+                code = "runtime_restore_failed"
+        observed = self.clock()
+        attempt = {"started_at": started, "observed_at": observed, "restored": restored}
+        if code:
+            attempt["code"] = code
+        def patch(row):
+            runtime = row["runtime"]
+            runtime.setdefault("restore_attempts", []).append(attempt)
+            runtime.update(restored=restored, restored_at=started, restore_code=code)
+        journal.update(patch)
+        if code:
+            journal.error(code, phase)
+        return restored, code
+
+    def restore_runtime(self, run_id, *, apply=False, allow_runtime_changes=False):
+        """Restore the frozen managed app without source, jobs or provider work.
+
+        This observes restoration only; it never advances a run, reconciles a
+        provider outcome, activates a generation or supplies live acceptance.
+        """
+        if apply and allow_runtime_changes is not True:
+            raise RebuildError("rebuild_restore_grant_required")
+        self._admit_private_paths(self._config())
+        journal = RebuildJournal(self.root, run_id)
+        run = journal.read()
+        result = {"run_id": run_id, "generation_id": run["plan"]["generation_id"],
+                  "state": "runtime_restore_planned", "requires_runtime_grant": not apply}
+        if not apply:
+            return result
+        with journal.locked():
+            run = journal.read()
+            cutover = read_json(journal.registry.journal_path)
+            if cutover and cutover.get("phase") not in {
+                    "activation_committed", "provisional", "run_complete", "rolled_back"}:
+                raise RebuildError("cutover_recovery_required")
+            observation = run["plan"]["runtime"]
+            fresh = self.managed.inspect()
+            for key in ("label", "plist_path", "plist_sha256", "program_arguments", "working_directory"):
+                if fresh[key] != observation[key]:
+                    raise RebuildError("rebuild_runtime_changed")
+            validator = getattr(self.managed, "validate_execution", None)
+            if callable(validator):
+                validator(observation)
+            restored, code = self._restore_runtime(journal, observation)
+            return {**result, "state": "runtime_restored" if restored else "incomplete",
+                    "requires_runtime_grant": False, "restored": restored, "restore_code": code}
 
     def _roles(self, config, profile):
         if self.roles_factory:
@@ -1307,6 +1450,7 @@ class RebuildCoordinator:
 
     def _execute_locked(self, journal):
         from core.semantic.store import SemanticStore
+        from core.semantic.legacy import history_policy, SOURCE_FIRST_POLICY
         run, config = journal.read(), self._config()
         plan = run["plan"]
         relocation = run.get("relocation")
@@ -1333,6 +1477,14 @@ class RebuildCoordinator:
             raise RebuildError("rebuild_initial_migration_only")
         if self.clock() > plan["expires_at"] and not own_cutover:
             raise RebuildError("rebuild_plan_expired")
+        jobs = _job_state_summary(plan["database"], self.clock())
+        if jobs["blocker"] is not None:
+            restored, _ = self._restore_runtime(journal, plan["runtime"])
+            return {"run_id": journal.run_id, "generation_id": plan["generation_id"],
+                    "state": "incomplete", "code": jobs["blocker"],
+                    "restored": restored, "recovery_required": True,
+                    "job_states": jobs["states"], "job_error_codes": jobs["error_codes"],
+                    "job_blocker": jobs["blocker"]}
         roles = self._roles(config, plan["provider_profile"])
         if roles.preflight().get("ready") is not True:
             raise RebuildError("rebuild_provider_budget_unready")
@@ -1350,6 +1502,17 @@ class RebuildCoordinator:
         store = SemanticStore(plan["database"], plan["generation_id"])
         with store.transaction() as conn:
             row = json.loads(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0])
+            policy = history_policy(plan)
+            if history_policy(row) != policy:
+                # Only a pristine, newly created generation can acquire the
+                # new policy. Existing old captures/jobs (including unknown)
+                # retain their immutable contract and cannot be rebound.
+                pristine = all(conn.execute("SELECT count(*) FROM " + table).fetchone()[0] == 0
+                    for table in ("source_records", "capture_batches", "jobs", "legacy_mappings", "items"))
+                if policy != SOURCE_FIRST_POLICY or "history_policy" in row or not pristine:
+                    raise RebuildError("rebuild_history_policy_mismatch")
+            if "history_policy" in plan:
+                row["history_policy"] = policy
             row["provider_profile"] = plan["provider_profile"]
             conn.execute("UPDATE generation_manifest SET metadata_json=?", (canonical_json(row).decode(),))
         stopped, lock_stack, failure = False, ExitStack(), None
@@ -1388,12 +1551,7 @@ class RebuildCoordinator:
             "activation_committed", "provisional", "run_complete", "rolled_back"}
         restored = False
         if stopped and safe_restore:
-            try:
-                restore_started = self.clock()
-                restored = self.managed.restore(plan["runtime"]) is True
-                journal.update(lambda r: r["runtime"].update(restored=restored, restored_at=restore_started))
-            except Exception as exc:
-                journal.error(getattr(exc, "code", "runtime_restore_failed"), "restore")
+            restored, _ = self._restore_runtime(journal, plan["runtime"])
         if failure is not None:
             return {"run_id": journal.run_id, "state": "incomplete", "code": getattr(failure, "code", "rebuild_operation_failed"),
                     "restored": restored, "recovery_required": not safe_restore}
@@ -1572,13 +1730,17 @@ class RebuildCoordinator:
 
     def _build(self, journal, store, roles, config, states, frozen, source):
         from core.semantic.legacy import (LegacyInventory, import_legacy, record_legacy_backups,
-            derive_topic_item_map, record_legacy_resolution, publish_legacy_navigation)
+            derive_topic_item_map, record_legacy_resolution, publish_legacy_navigation,
+            history_policy, SOURCE_FIRST_POLICY)
         from core.semantic.source import SemanticCapture, MonitorReceiptBridge
         from core.monitor_source import pending_monitor_source_batch, read_monitor_source_batch, verify_pending_monitor_source_batch
         from core.monitor_state import MonitorStateSnapshot
         from core.monitor import TopicMonitor
         self._prepare_staging(journal, frozen)
         runtime = self._runtime(store, roles, journal.read()["plan"]["staging_root"], config)
+        policy = history_policy(journal.read()["plan"])
+        if policy == SOURCE_FIRST_POLICY:
+            self._preserve_history(journal, store, runtime.publisher)
         capture = SemanticCapture(store, source)
         pending = {}
         for chat, state in frozen["checkpoints"].items():
@@ -1596,15 +1758,16 @@ class RebuildCoordinator:
                 journal.update(lambda r, label=label: r["capture_attempts"][label].update(abandoned=True))
         prefix = frozen["receipt_id"]
         self._snapshot(journal, capture, prefix + "-C0", list(states))
-        inventory = LegacyInventory.from_dict(journal.payloads.get(frozen["legacy_inventory"]))
-        imported = import_legacy(store, inventory, allow_preserved_refresh=True)
-        record_legacy_backups(store, inventory, frozen["legacy_backups"])
-        if imported.batch_ids:
-            journal.update(lambda r: r.setdefault("legacy_imports", {}).update({imported.manifest_id: {
-                "receipt_id": imported.manifest_id, "batch_ids": list(imported.batch_ids)}}))
-        # The immutable journal payload remains the evidence owner. Do not keep
-        # the decoded legacy corpus alive throughout parallel provider work.
-        del inventory
+        if policy != SOURCE_FIRST_POLICY:
+            inventory = LegacyInventory.from_dict(journal.payloads.get(frozen["legacy_inventory"]))
+            imported = import_legacy(store, inventory, allow_preserved_refresh=True)
+            record_legacy_backups(store, inventory, frozen["legacy_backups"])
+            if imported.batch_ids:
+                journal.update(lambda r: r.setdefault("legacy_imports", {}).update({imported.manifest_id: {
+                    "receipt_id": imported.manifest_id, "batch_ids": list(imported.batch_ids)}}))
+            # The immutable journal payload remains the evidence owner. Do not
+            # keep the decoded legacy corpus alive throughout provider work.
+            del inventory
         self._event(journal, prefix + "-processed-C0", self._process_all(runtime, run_id=journal.run_id + "-" + prefix + "-C0"))
         final = self._snapshot(journal, capture, prefix + "-C1", list(states))
         self._event(journal, prefix + "-processed-C1", self._process_all(runtime, run_id=journal.run_id + "-" + prefix + "-C1"))
@@ -1618,13 +1781,16 @@ class RebuildCoordinator:
                           "provider_route": provider_binding(roles.text)}
         journal.update(lambda r: r.update(required_brief=required_brief))
         inventory = LegacyInventory.from_dict(journal.payloads.get(frozen["legacy_inventory"]))
-        mapping = derive_topic_item_map(store, inventory)
-        mapped_ids = {iid for ids in mapping.values() for iid in ids}
-        item_paths = {iid: runtime.publisher.resolve(iid) for iid in mapped_ids}
-        publication = record_legacy_resolution(store, inventory, mapping, item_paths)
-        legacy_receipt = publish_legacy_navigation(store, inventory, publication, runtime.publisher)
-        if legacy_receipt["status"] != "published":
-            raise RebuildError("rebuild_legacy_publication_pending")
+        if policy == SOURCE_FIRST_POLICY:
+            publication = journal.payloads.get(journal.read()["history_preservations"][inventory.manifest_id]["publication_plan"])
+        else:
+            mapping = derive_topic_item_map(store, inventory)
+            mapped_ids = {iid for ids in mapping.values() for iid in ids}
+            item_paths = {iid: runtime.publisher.resolve(iid) for iid in mapped_ids}
+            publication = record_legacy_resolution(store, inventory, mapping, item_paths)
+            legacy_receipt = publish_legacy_navigation(store, inventory, publication, runtime.publisher)
+            if legacy_receipt["status"] != "published":
+                raise RebuildError("rebuild_legacy_publication_pending")
         migrations = {}
         bridge = MonitorReceiptBridge(store)
         batch_ids = [b["batch_id"] for b in final["batches"]]
@@ -1634,9 +1800,11 @@ class RebuildCoordinator:
             new, receipt = bridge.migration(old, boundary, batch_ids, pending_batch=pending.get(chat))
             migrations[chat] = {"state": new, "receipt": receipt, "old_revision": old.revision}
         manifest = self._verification_manifest(journal, store, roles, final, inventory, publication)
+        del inventory
         write_json(journal.run_root / "verification.json", journal.payloads.compact(manifest, ("verification",)))
         from core.semantic.verification import RebuildVerifier
-        report = RebuildVerifier(store.path, manifest, projection_root=runtime.publisher.root).verify().to_dict()
+        report = RebuildVerifier(store.path, manifest, projection_root=runtime.publisher.root,
+            history_payload_loader=journal.payloads.get).verify().to_dict()
         acceptance = {"receipt_id": fingerprint(report), **report}
         journal.update(lambda r: r.update(migrations=migrations, verification=manifest,
                                           publication_plan=publication, acceptance=acceptance,
@@ -1645,7 +1813,44 @@ class RebuildCoordinator:
         if acceptance.get("complete") is not True:
             raise RebuildError("rebuild_acceptance_incomplete")
 
+    def _preserve_history(self, journal, store, publisher):
+        from .legacy import (LegacyInventory, preserve_legacy_history, record_legacy_backups,
+                             build_history_publication_plan, publish_legacy_navigation)
+        # A failure before source construction can leave a freeze that has never
+        # reached preservation. Conserve every retained freeze on the next build,
+        # including earlier versions of personal pages and queue append history.
+        for reference in journal.read()["freeze_receipts"]:
+            frozen = journal.payloads.get(reference)
+            database_backup = frozen.get("databases", {}).get("knowledge", {})
+            if (not isinstance(database_backup.get("path"), str)
+                    or not isinstance(database_backup.get("sha256"), str)
+                    or not regular_exists(database_backup["path"])
+                    or file_fingerprint(database_backup["path"]) != database_backup["sha256"]):
+                raise RebuildError("rebuild_history_database_backup_invalid")
+            inventory = LegacyInventory.from_dict(journal.payloads.get(frozen["legacy_inventory"]))
+            receipt = preserve_legacy_history(store, inventory, allow_preserved_refresh=True)
+            record_legacy_backups(store, inventory, frozen["legacy_backups"])
+            publication = build_history_publication_plan(inventory)
+            result = publish_legacy_navigation(store, inventory, publication, publisher)
+            if result["status"] != "published":
+                raise RebuildError("rebuild_legacy_publication_pending")
+            declaration = {"receipt_id": receipt["receipt_id"], "legacy_inventory": frozen["legacy_inventory"],
+                           "publication_plan": journal.payloads.put(publication)}
+            def record(row):
+                preservations = row.setdefault("history_preservations", {})
+                freeze_references = list(preservations.get(receipt["manifest_id"], {}).get("freeze_receipts", ()))
+                if reference not in freeze_references:
+                    freeze_references.append(reference)
+                preservations[receipt["manifest_id"]] = dict(declaration, freeze_receipts=freeze_references)
+                order = row.setdefault("history_preservation_order", [])
+                if receipt["manifest_id"] in order:
+                    order.remove(receipt["manifest_id"])
+                order.append(receipt["manifest_id"])
+            journal.update(record)
+            del inventory, publication
+
     def _verification_manifest(self, journal, store, roles, final, inventory, publication):
+        from .legacy import history_policy, SOURCE_FIRST_POLICY
         with closing(store.connect()) as conn:
             rows = [dict(row) for row in conn.execute("SELECT * FROM capture_batches ORDER BY rowid")]
             batches = [{"batch_id": row["batch_id"], "member_version_ids": json.loads(row["receipt_json"])["member_version_ids"]} for row in rows]
@@ -1661,15 +1866,27 @@ class RebuildCoordinator:
             if captured:
                 abandoned.append({"receipt_id": attempt["snapshot_id"], "generation_id": store.generation_id,
                                   "complete": False, "batches": captured})
-        return {"generation_id": store.generation_id, "expected_batches": batches,
+        manifest = {"generation_id": store.generation_id, "expected_batches": batches,
                 "capture_passes": passes, "abandoned_capture_passes": abandoned,
                 "legacy_capture_passes": list(run.get("legacy_imports", {}).values()),
                 "source_inventory": final["source_inventory"], "h1": final["h1"],
                 "capture_seq": final["capture_seq"],
                 "embedding_profile_id": roles.embedding.profile.profile_id,
                 "index_generation_id": roles.index.index_identity,
-                "rebuild_reading_required": True, "required_brief": run.get("required_brief"),
-                "legacy_inventory": inventory.to_dict(), "publication_plan": publication}
+                "rebuild_reading_required": True, "required_brief": run.get("required_brief")}
+        if "history_policy" in run["plan"]:
+            manifest["history_policy"] = history_policy(run["plan"])
+        if history_policy(run["plan"]) == SOURCE_FIRST_POLICY:
+            declarations = [run["history_preservations"][identity] for identity in run.get("history_preservation_order", ())]
+            if not declarations or declarations[-1]["receipt_id"] != inventory.manifest_id:
+                raise RebuildError("rebuild_history_final_binding_mismatch")
+            manifest.update(history_preservation_passes=declarations,
+                history_freeze_receipts=list(run["freeze_receipts"]),
+                legacy_inventory=declarations[-1]["legacy_inventory"],
+                publication_plan=declarations[-1]["publication_plan"])
+        else:
+            manifest.update(legacy_inventory=inventory.to_dict(), publication_plan=publication)
+        return manifest
 
     def _cutover_step(self, journal, name, evidence):
         current = read_json(journal.registry.journal_path)
@@ -1738,7 +1955,8 @@ class RebuildCoordinator:
         active = journal.activate_pointer()
         self.fault_hook("after_active_pointer")
         self._cutover_step(journal, "active_manifest", active)
-        report = RebuildVerifier(store.path, journal.verification(run), projection_root=plan["projection_root"]).verify().to_dict()
+        report = RebuildVerifier(store.path, journal.verification(run), projection_root=plan["projection_root"],
+            history_payload_loader=journal.payloads.get).verify().to_dict()
         if report.get("complete") is not True or fingerprint(self._config()) != plan["config_fingerprint"]:
             raise RebuildError("rebuild_cutover_consistency_failed")
         self._cutover_step(journal, "consistency", {"receipt_id": fingerprint(report), **report})
@@ -1802,11 +2020,16 @@ class RebuildCoordinator:
             except Exception:
                 journal.error("provisional_receipt_failed", "provisional")
                 raise
-        restored = run.get("runtime", {}).get("restored") is True
+        runtime = run.get("runtime", {})
+        restored = runtime.get("restored") is True
+        # Legacy journals have no per-attempt restore history. A sticky error
+        # from a later restore makes an older true value untrustworthy; observe
+        # the exact managed runtime again instead of reporting stale success.
+        if (restored and not runtime.get("restore_attempts")
+                and any(entry.get("phase") == "restore" for entry in run["errors"])):
+            restored = False
         if not restored:
-            started = self.clock()
-            restored = self.managed.restore(run["plan"]["runtime"]) is True
-            journal.update(lambda r: r["runtime"].update(restored=restored, restored_at=started))
+            restored, _ = self._restore_runtime(journal, run["plan"]["runtime"])
         return journal.finalize(restored=restored, live_check=self._live_check(journal, self._states(config)))
 
     def verify(self, run_id):
@@ -1821,7 +2044,8 @@ class RebuildCoordinator:
         cutover = read_json(journal.registry.journal_path)
         published = cutover and cutover.get("run_id") == run_id and "projections" in cutover["steps"]
         root = run["plan"]["projection_root" if published else "staging_root"]
-        return RebuildVerifier(run["plan"]["database"], manifest, projection_root=root).verify().to_dict()
+        return RebuildVerifier(run["plan"]["database"], manifest, projection_root=root,
+            history_payload_loader=journal.payloads.get).verify().to_dict()
 
     def rollback(self, run_id, *, apply=False, allow_runtime_changes=False):
         """Plan by default; explicit apply freezes owners and uses the state CAS."""

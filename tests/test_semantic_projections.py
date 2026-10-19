@@ -151,7 +151,7 @@ class ProjectionTests(ReadingHarness):
         self.assertIsNone(self.publisher.resolve(snapshot.item_id))
         root = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='large-body'")
         self.assertEqual(root["status"], "accepted")
-        self.assertEqual(root["prompt_version"], "body-paged-v6")
+        self.assertEqual(root["prompt_version"], "body-paged-v9")
         count = len(provider.calls)
         resumed = writer.plan(snapshot, request_id="large-body")
         self.assertEqual(resumed, plan)
@@ -281,6 +281,21 @@ class ProjectionTests(ReadingHarness):
         wrong_revision["content_revision"] = 8
         with self.assertRaisesRegex(ReadingError, "stale_body_plan"):
             BodyPlanWriter(ScriptedTextProvider(wrong_revision), self.ledger.generation_id).plan(snapshot, request_id="stale")
+
+    def test_overlapping_units_share_prose_but_keep_both_content_homes(self):
+        snapshot = self.snapshot()
+        snapshot = replace(snapshot, units=(snapshot.units[0], replace(snapshot.units[0], id="overlap")))
+        def response(indices):
+            return {"blocks": [{"id": "same-scene", "role": "narrative",
+                                "text": snapshot.units[0].text, "unit_indices": indices}]}
+        for indices in ([0], [1], [0, 0, 1]):
+            with self.subTest(indices=indices), self.assertRaisesRegex(ReadingError, "body_plan_unit_coverage"):
+                BodyPlanWriter(ScriptedTextProvider(response(indices)), self.ledger.generation_id).plan(
+                    snapshot, request_id="incomplete-scene")
+        plan = BodyPlanWriter(ScriptedTextProvider(response([0, 1])), self.ledger.generation_id).plan(
+            snapshot, request_id="complete-scene")
+        self.assertEqual(plan.blocks[0].unit_ids, (snapshot.units[0].id, "overlap"))
+        self.assertEqual(plan.blocks[0].text, snapshot.units[0].text)
 
     def test_single_table_list_and_quote_anchor_the_body_and_remain_embeddable(self):
         formats = (("table", "项目 | 值 | 来源\n--- | --- | ---\n观察 | 未知 | {{evidence:e1}}", "观察 | 未知 |"),

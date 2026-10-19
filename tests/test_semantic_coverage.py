@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ai.semantic_provider import ProviderError, TextResult
-from core.semantic.engine import SemanticEngine, SemanticValidationError
+from core.semantic.engine import SemanticEngine, SemanticValidationError, extraction_prompt
 from core.semantic.store import SemanticStore
 
 from tests.test_semantic_engine import FakeDecision, FakeText, capture
@@ -189,6 +189,38 @@ class CoverageEngineTests(unittest.TestCase):
                                        (page["job_id"],)).fetchone()[0]
         self.assertEqual(before, after)
         self.assertEqual(set(self.dispositions().values()), {"observed"})
+
+    def test_existing_coverage_keeps_its_old_unit_policy_and_identity(self):
+        capture(self.store, "old-policy", ["一句尚待理解的话。"])
+        text = CoverageText(primary=lambda value: False)
+        engine = SemanticEngine(self.store, text, FakeDecision())
+        frozen = {}
+        def freeze_old(child, sources, span_ids, namespace, generation, *, coverage=False):
+            if not coverage:
+                return original(child, sources, span_ids, namespace, generation)
+            old_versions = {"prompt": child["versions"]["prompt"]}
+            frozen["inputs"] = child["inputs"]
+            frozen["versions"] = old_versions
+            raise RuntimeError("synthetic pre-dispatch stop")
+        original = engine._accepted_extract_page
+        # Capture the intended inputs without dispatching or accepting a new
+        # coverage task; then model an already-frozen historical task.
+        with patch.object(engine, "_accepted_extract_page", side_effect=freeze_old):
+            with self.assertRaises(RuntimeError):
+                engine.extract_batch("old-policy")
+        with closing(self.store.connect()) as db:
+            # The intercepted pending job has never been dispatched. Remove
+            # only this synthetic fixture so one historical identity remains.
+            db.execute("DELETE FROM jobs WHERE kind='extract_coverage'")
+            db.commit()
+        old = engine.jobs.ensure("extract_coverage", frozen["inputs"], frozen["versions"])
+        with patch("core.semantic.engine.extraction_prompt", wraps=extraction_prompt) as prompts:
+            result = engine.extract_batch("old-policy")
+        self.assertEqual(result["observations"][0]["scene_kind"], "life")
+        self.assertEqual([call.kwargs["unit_policy"] for call in prompts.call_args_list], [None])
+        with closing(self.store.connect()) as db:
+            rows = list(db.execute("SELECT job_id,state FROM jobs WHERE kind='extract_coverage'"))
+        self.assertEqual([tuple(row) for row in rows], [(old["job_id"], "done")])
 
     def test_coverage_does_not_overwrite_a_terminal_neighbour_disposition(self):
         record = capture(self.store, "terminal", ["含义不明的一句话。", "嗯", "补充说明：指的是美术馆。"])

@@ -79,12 +79,18 @@ def create_provider(config):
         # DeepSeek/Qwen-compatible gateway into its existing thinking control.
         thinking_options = ({"thinking": config.get("ai_thinking"),
                              "thinking_parameter": parameter} if parameter else {})
+        transport_options = {}
+        if "custom_streaming" in config:
+            if type(config["custom_streaming"]) is not bool:
+                raise ValueError("custom_streaming must be boolean")
+            transport_options["streaming"] = config["custom_streaming"]
         return OpenAIProvider(
             api_key=api_key,
             model=model,
             base_url=config.get("ai_base_url", ""),
             timeout_seconds=config.get("ai_timeout_seconds", 45.0),
             **thinking_options,
+            **transport_options,
         )
 
     else:

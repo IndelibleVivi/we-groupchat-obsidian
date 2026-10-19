@@ -23,6 +23,10 @@ from core.url_safety import redact_urls_in_text
 
 
 SCHEMA = "we-groupchat-obsidian.legacy-inventory.v1"
+LEGACY_SEMANTIC_POLICY = "legacy-semantic-v1"
+SOURCE_FIRST_POLICY = "source-first-v1"
+HISTORY_SCHEMA = "we-groupchat-obsidian.legacy-history.v1"
+HISTORY_PUBLICATION_SCHEMA = "we-groupchat-obsidian.legacy-history-publication.v1"
 TABLE_KEYS = {
     "topics": "topic_id", "events": "event_id", "relations": "relation_id",
     "attachment_mentions": "mention_id", "attachment_objects": "sha256",
@@ -541,6 +545,115 @@ class LegacyImportResult:
     status: str = "captured_semantic_pending"
 
 
+def history_policy(value: Mapping[str, Any]) -> str:
+    """Absent policy is the exact historical semantic-import contract."""
+    policy = value.get("history_policy", LEGACY_SEMANTIC_POLICY)
+    if policy not in {LEGACY_SEMANTIC_POLICY, SOURCE_FIRST_POLICY}:
+        raise LegacyError("legacy_history_policy_invalid")
+    return policy
+
+
+def _require_history_policy(conn, expected):
+    metadata = json.loads(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0])
+    if history_policy(metadata) != expected:
+        raise LegacyError("legacy_history_policy_mismatch")
+    if expected == SOURCE_FIRST_POLICY and (
+            conn.execute("SELECT 1 FROM capture_batches WHERE purpose='legacy_import' LIMIT 1").fetchone()
+            or conn.execute("SELECT 1 FROM legacy_mappings WHERE target_type='source_version' LIMIT 1").fetchone()):
+        raise LegacyError("legacy_history_semantic_contamination")
+    if expected == LEGACY_SEMANTIC_POLICY and conn.execute(
+            "SELECT 1 FROM legacy_mappings WHERE kind='history_pass' LIMIT 1").fetchone():
+        raise LegacyError("legacy_history_policy_mismatch")
+
+
+def _immutable_mapping(conn, kind, legacy_id, target_type, target_id, disposition, metadata):
+    encoded = _json(metadata)
+    existing = conn.execute("SELECT disposition,metadata_json FROM legacy_mappings "
+        "WHERE kind=? AND legacy_id=? AND target_type=? AND target_id=?",
+        (kind, legacy_id, target_type, target_id)).fetchone()
+    if existing is not None:
+        if tuple(existing) != (disposition, encoded):
+            raise LegacyError("legacy_history_receipt_conflict")
+        return
+    conn.execute("INSERT INTO legacy_mappings VALUES(?,?,?,?,?,?)",
+                 (kind, legacy_id, target_type, target_id, disposition, encoded))
+
+
+def _record_files(conn, manifest, *, allow_preserved_refresh, history=False):
+    """Shared annotation owner; the policy changes evidence, never page bytes."""
+    manifest_id = manifest.manifest_id
+    existing_history = history and conn.execute(
+        "SELECT 1 FROM legacy_mappings WHERE kind='history_pass' AND legacy_id=?", (manifest_id,)).fetchone()
+    for external in manifest.external_files:
+        conn.execute("INSERT OR IGNORE INTO legacy_mappings VALUES(?,?,?,?,?,?)",
+            ("external_file", _opaque(manifest.namespace, external["path"]), "file", external["sha256"],
+             "captured_pending_backup", _json({"manifest_id": manifest_id, "file": external})))
+        if history:
+            _immutable_mapping(conn, "history_external_file", _opaque(manifest.namespace, external["path"]),
+                "history_file", manifest_id, "history_preserved",
+                {"manifest_id": manifest_id, "file": external})
+    for file in manifest.files:
+        metadata = {"manifest_id": manifest_id, "file": asdict(file)}
+        conn.execute("INSERT OR IGNORE INTO legacy_mappings VALUES(?,?,?,?,?,?)",
+            ("file", _opaque(manifest.namespace, "file-inventory", file.relative_path),
+             "file", file.sha256, "preserve_in_place", _json(metadata)))
+        if history:
+            _immutable_mapping(conn, "history_file", _opaque(manifest.namespace, "file-inventory", file.relative_path),
+                "history_file", manifest_id, "history_preserved", dict(metadata,
+                    preservation="unknown_preserve_entire_page" if file.owned else "unowned_in_place"))
+        if not file.owned or existing_history:
+            continue
+        existing = conn.execute("SELECT * FROM annotation_preservation WHERE path=?", (file.relative_path,)).fetchone()
+        if existing is not None and existing["sha256"] != file.sha256:
+            if not allow_preserved_refresh or existing["status"] not in {"preserved", "preserved_in_place", "user_preserved"}:
+                raise LegacyError("legacy_annotation_baseline_changed")
+            old = _checked_path(existing["backup_path"])
+            if _digest(_read_regular(old, max(1, old.stat().st_size))) != existing["sha256"]:
+                raise LegacyError("legacy_backup_bytes_mismatch")
+            conn.execute("INSERT OR IGNORE INTO legacy_mappings VALUES(?,?,?,?,?,?)",
+                ("annotation_history", file.relative_path, "backup", existing["sha256"],
+                 "preserved", _json(dict(existing))))
+            conn.execute("DELETE FROM annotation_preservation WHERE path=?", (file.relative_path,))
+        conn.execute("INSERT OR IGNORE INTO annotation_preservation VALUES(?,?,?,?,?)",
+            (file.relative_path, file.sha256, "", "captured_pending_backup", _json(metadata)))
+    conn.execute("INSERT OR IGNORE INTO legacy_mappings VALUES(?,?,?,?,?,?)",
+        ("selection", manifest.namespace, "selection_snapshot", manifest_id,
+         "preserved_no_subscription", _json(manifest.selection_snapshot)))
+
+
+def preserve_legacy_history(store, manifest: LegacyInventory | Mapping[str, Any], *,
+                            generation_id: str | None = None,
+                            allow_preserved_refresh: bool = False) -> dict[str, Any]:
+    """Conserve exact historical inputs without creating semantic work.
+
+    The coordinator must bind the new generation policy first. Existing plans,
+    legacy captures, accepted artifacts and unknown outcomes cannot be converted
+    by calling this function. Every freeze keeps distinct immutable receipts.
+    """
+    if not isinstance(manifest, LegacyInventory):
+        manifest = LegacyInventory.from_dict(manifest)
+    manifest.validate()
+    if generation_id is not None and generation_id != store.generation_id:
+        raise LegacyError("legacy_generation_mismatch")
+    manifest_id = manifest.manifest_id
+    receipt = {"schema": HISTORY_SCHEMA, "history_policy": SOURCE_FIRST_POLICY,
+               "receipt_id": manifest_id, "manifest_id": manifest_id,
+               "namespace": manifest.namespace, "database_snapshot_digest": manifest.database_snapshot_digest,
+               "record_count": len(manifest.records), "file_count": len(manifest.files),
+               "external_file_count": len(manifest.external_files)}
+    with store.transaction() as conn:
+        _require_history_policy(conn, SOURCE_FIRST_POLICY)
+        for record in manifest.records:
+            _immutable_mapping(conn, "history_record", record.legacy_ref, "history_record", manifest_id,
+                "history_preserved", {"schema": HISTORY_SCHEMA, "history_policy": SOURCE_FIRST_POLICY,
+                    "manifest_id": manifest_id, "input": asdict(record),
+                    "resources": list(legacy_resources(record))})
+        _record_files(conn, manifest, allow_preserved_refresh=allow_preserved_refresh, history=True)
+        _immutable_mapping(conn, "history_pass", manifest_id, "history_inventory", manifest_id,
+                           "history_preserved", receipt)
+    return receipt
+
+
 def legacy_resources(record: LegacyInput) -> tuple[dict[str, Any], ...]:
     """Exact old references, with no claim that attachment bytes are accessible."""
     resources = []
@@ -602,6 +715,7 @@ def import_legacy(store, manifest: LegacyInventory | Mapping[str, Any], *,
     # retries then adopt the same bounded batch identities after a crash.
     versions = {}
     with store.transaction() as conn:
+        _require_history_policy(conn, LEGACY_SEMANTIC_POLICY)
         saved = conn.execute("SELECT metadata_json FROM legacy_mappings WHERE kind='import_plan' AND legacy_id=?",
                              (manifest_id,)).fetchone()
         if saved:
@@ -698,39 +812,7 @@ def import_legacy(store, manifest: LegacyInventory | Mapping[str, Any], *,
         batch_ids.append(batch_id)
         receipts.append(receipt["receipt_id"])
     with store.transaction() as conn:
-        for external in manifest.external_files:
-            conn.execute("INSERT OR IGNORE INTO legacy_mappings VALUES(?,?,?,?,?,?)",
-                         ("external_file", _opaque(manifest.namespace, external["path"]), "file", external["sha256"],
-                          "captured_pending_backup", _json({"manifest_id": manifest_id, "file": external})))
-        for file in manifest.files:
-            metadata = {"manifest_id": manifest_id, "file": asdict(file)}
-            conn.execute("""INSERT INTO legacy_mappings
-                (kind,legacy_id,target_type,target_id,disposition,metadata_json)
-                VALUES(?,?,?,?,?,?) ON CONFLICT(kind,legacy_id,target_type,target_id) DO NOTHING""",
-                ("file", _opaque(manifest.namespace, "file-inventory", file.relative_path),
-                 "file", file.sha256, "preserve_in_place", _json(metadata)))
-            if file.owned:
-                existing = conn.execute("SELECT * FROM annotation_preservation WHERE path=?",
-                                        (file.relative_path,)).fetchone()
-                if existing is not None and existing["sha256"] != file.sha256:
-                    if not allow_preserved_refresh or existing["status"] not in {"preserved", "preserved_in_place", "user_preserved"}:
-                        raise LegacyError("legacy_annotation_baseline_changed")
-                    old = _checked_path(existing["backup_path"])
-                    if _digest(_read_regular(old, max(1, old.stat().st_size))) != existing["sha256"]:
-                        raise LegacyError("legacy_backup_bytes_mismatch")
-                    conn.execute("INSERT OR IGNORE INTO legacy_mappings VALUES(?,?,?,?,?,?)",
-                        ("annotation_history", file.relative_path, "backup", existing["sha256"],
-                         "preserved", _json(dict(existing))))
-                    conn.execute("DELETE FROM annotation_preservation WHERE path=?", (file.relative_path,))
-                conn.execute("""INSERT INTO annotation_preservation
-                    (path,sha256,backup_path,status,metadata_json) VALUES(?,?,?,?,?)
-                    ON CONFLICT(path) DO NOTHING""",
-                    (file.relative_path, file.sha256, "", "captured_pending_backup", _json(metadata)))
-        conn.execute("""INSERT INTO legacy_mappings
-            (kind,legacy_id,target_type,target_id,disposition,metadata_json)
-            VALUES(?,?,?,?,?,?) ON CONFLICT(kind,legacy_id,target_type,target_id) DO NOTHING""",
-            ("selection", manifest.namespace, "selection_snapshot", manifest_id,
-             "preserved_no_subscription", _json(manifest.selection_snapshot)))
+        _record_files(conn, manifest, allow_preserved_refresh=allow_preserved_refresh)
     return LegacyImportResult(manifest_id, tuple(batch_ids), tuple(receipts), versions)
 
 
@@ -823,6 +905,121 @@ def _topic_families(manifest, conn):
         if all(ref in versions for ref in refs):
             families[topic.legacy_ref] = set().union(*(versions[ref] for ref in refs))
     return families
+
+
+def _history_visible(value: Any) -> str:
+    # Original syntax remains in the private receipt. Navigation cannot contain
+    # live machine markers, active HTML or secret URL query values.
+    return redact_urls_in_text(str(value)).replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _history_link(path: str, label: str) -> str:
+    target = _relative(path)
+    if any(c in target for c in "[]|#^\n\r"):
+        raise LegacyError("legacy_navigation_path_invalid")
+    visible = label.replace("[", "(").replace("]", ")").replace("|", "·")
+    return "[[" + redact_urls_in_text(target).removesuffix(".md") + "|" + visible + "]]"
+
+
+def build_history_publication_plan(manifest: LegacyInventory) -> dict[str, Any]:
+    """A history contract: no Item map, inferred personal section or model ACK."""
+    manifest.validate()
+    manifest_id = manifest.manifest_id
+    base = "Legacy/History/" + manifest_id
+    documents, pages, assigned = [], [], set()
+    for topic in (r for r in manifest.records if r.kind == "topic"):
+        family = [r.legacy_ref for r in manifest.records if r.legacy_ref == topic.legacy_ref
+                  or r.topic_ref == topic.legacy_ref or topic.legacy_ref in r.payload.get("topic_refs", ())]
+        assigned.update(family)
+        documents.append({"kind": "topic", "legacy_ref": topic.legacy_ref,
+            "path": base + "/Topics/" + topic.legacy_ref + ".md",
+            "object_id": "control:legacy-history:" + manifest_id + ":" + topic.legacy_ref,
+            "record_refs": family,
+            "history_paths": [f.relative_path for f in manifest.files if f.owned and topic.legacy_ref in f.topic_refs],
+            "missing_paths": [p for p in manifest.missing_paths if p == topic.payload.get("obsidian_path")]})
+    remaining = [r.legacy_ref for r in manifest.records
+                 if r.legacy_ref not in assigned and r.table not in {"files", "review_queue"}]
+    if remaining:
+        documents.append({"kind": "records", "path": base + "/Records.md",
+            "object_id": "control:legacy-history:" + manifest_id + ":records", "record_refs": remaining})
+    queue = [r.legacy_ref for r in manifest.records if r.table == "review_queue"]
+    if queue:
+        documents.append({"kind": "queue", "path": base + "/Review Queue.md",
+            "object_id": "control:legacy-history:" + manifest_id + ":queue", "record_refs": queue})
+    for file in manifest.files:
+        if not file.owned:
+            continue
+        page = {"old_path": file.relative_path, "old_sha256": file.sha256,
+            "old_byte_length": file.byte_length, "preserve_original": True,
+            "preservation": "unknown_preserve_entire_page", "history_path": file.relative_path,
+            "navigation_path": base + "/Pages/" + _opaque(manifest.namespace, file.relative_path) + ".md",
+            "history_backup_path": ".wgo/legacy-history/" + _opaque(manifest.namespace, file.relative_path, file.sha256) + ".bin",
+            "anchor_maps": [{"old_anchor": a["target"], "history_path": file.relative_path,
+                             "history_anchor": a["target"]} for a in file.anchors],
+            "references": list(file.references), "aliases": list(file.aliases)}
+        pages.append(page)
+        documents.append({"kind": "page", "path": page["navigation_path"],
+            "object_id": "control:legacy-history:" + manifest_id + ":page:" + _opaque(file.relative_path),
+            "old_path": file.relative_path, "record_refs": []})
+    documents.insert(0, {"kind": "index", "path": base + "/Index.md",
+        "object_id": "control:legacy-history:" + manifest_id + ":index", "record_refs": []})
+    return {"schema": HISTORY_PUBLICATION_SCHEMA, "history_policy": SOURCE_FIRST_POLICY,
+        "manifest_id": manifest_id, "requires_verified_backup": True, "subscriptions": [],
+        "pages": pages, "documents": documents, "missing_paths": list(manifest.missing_paths),
+        "root_navigation": {"path": "Legacy/Index.md", "object_id": "control:legacy-history:" + manifest.namespace + ":root"}}
+
+
+def history_document_body(manifest: LegacyInventory, plan: Mapping[str, Any], document: Mapping[str, Any]) -> str:
+    """Render one bounded history document from its frozen private evidence."""
+    kind = document["kind"]
+    if kind == "index":
+        lines = ["# 历史资料", "", "此处保留旧整理与原页；新知识从捕获的原始消息重建。", ""]
+        for entry in plan["documents"]:
+            if entry["kind"] == "index":
+                continue
+            topic = next((r for r in manifest.records if r.legacy_ref == entry.get("legacy_ref")), None)
+            title = topic.payload.get("title") or topic.text if topic else {
+                "records": "其他旧记录", "queue": "历史 Review Queue", "page": entry.get("old_path", "历史原页")}[entry["kind"]]
+            lines.append("- " + _history_link("WGO/" + entry["path"], _history_visible(title).replace("\n", " ")))
+    elif kind == "page":
+        lines = ["# 历史原页", "", _history_link(document["old_path"], "打开保留的原页"), "",
+                 "整页缺少可信机器基线，已保留全部原始字节、个人文字、frontmatter、链接与锚点。"]
+    else:
+        refs = set(document["record_refs"])
+        rows = (r for r in manifest.records if r.legacy_ref in refs and r.table != "files")
+        topic = next((r for r in manifest.records if r.legacy_ref == document.get("legacy_ref")), None)
+        title = _history_visible(topic.payload.get("title") or topic.text) if topic else (
+            "历史 Review Queue" if kind == "queue" else "其他旧记录")
+        lines = ["# " + title.replace("\n", " "), "", "历史记录不建立新 Item，也不代表新语义处理已完成。", ""]
+        for path in document.get("history_paths", ()):
+            lines.append("- " + _history_link(path, "历史原页"))
+        if document.get("missing_paths"):
+            lines.extend(["", "旧数据库记录的页面已缺失；以下旧记录仍完整保留。"])
+        for record in rows:
+            if kind == "queue":
+                item = record.payload["queue_item"]
+                label = _history_visible(str(item.get("title", "历史待办")) + " · " + str(item.get("status", "unknown")))
+                lines.extend(["- " + label.replace("\n", " ") + " ^queue-" + record.legacy_ref, ""])
+            else:
+                lines.extend(["## " + record.table + " · " + record.raw_level + " ^record-" + record.legacy_ref, ""])
+            if record.text:
+                # Quoting prevents historical Markdown from becoming our own
+                # structure; exact byte/syntax recovery stays in the receipt.
+                lines.extend("> " + line for line in _history_visible(record.text).splitlines())
+                lines.append("")
+            resources = legacy_resources(record)
+            if resources:
+                lines.extend(["保留资源引用：" + str(len(resources)) + "（附件字节状态未验证）。", ""])
+                lines.extend("> " + _history_visible(_json(resource["metadata"]["legacy_reference"]))
+                             for resource in resources)
+                lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def history_root_body(manifest_ids: Iterable[str]) -> str:
+    return "# 历史资料索引\n\n" + "\n".join(
+        "- " + _history_link("WGO/Legacy/History/" + manifest_id + "/Index.md", "冻结资料 " + str(index))
+        for index, manifest_id in enumerate(sorted(manifest_ids), 1)) + "\n"
 
 
 def _history_dispositions(conn, versions):
@@ -932,6 +1129,9 @@ def record_legacy_backups(store, manifest: LegacyInventory,
     """
     manifest.validate()
     manifest_id = manifest.manifest_id
+    with closing(store.connect()) as conn:
+        source_first = history_policy(json.loads(conn.execute(
+            "SELECT metadata_json FROM generation_manifest").fetchone()[0])) == SOURCE_FIRST_POLICY
     verified = []
     for file in manifest.files:
         if not file.owned:
@@ -942,29 +1142,131 @@ def record_legacy_backups(store, manifest: LegacyInventory,
         raw = _read_regular(path, max(1, file.byte_length))
         if raw != file.original_bytes():
             raise LegacyError("legacy_backup_bytes_mismatch")
-        current = _read_regular(_under(_checked_path(manifest.managed_root, directory=True), file.relative_path),
-                                max(1, file.byte_length))
-        if current != raw:
-            raise LegacyError("legacy_original_bytes_changed")
+        if not source_first:
+            current = _read_regular(_under(_checked_path(manifest.managed_root, directory=True), file.relative_path),
+                                    max(1, file.byte_length))
+            if current != raw:
+                raise LegacyError("legacy_original_bytes_changed")
         verified.append((str(path), file.relative_path, file.sha256))
     with store.transaction() as conn:
         for path, relative, sha in verified:
             cursor = conn.execute("""UPDATE annotation_preservation SET backup_path=?,status='preserved_in_place'
                 WHERE path=? AND sha256=?""", (path, relative, sha))
-            if cursor.rowcount != 1:
+            if cursor.rowcount != 1 and not source_first:
                 raise LegacyError("legacy_annotation_unaccounted")
+            if source_first:
+                file = next(f for f in manifest.files if f.relative_path == relative)
+                _record_history_backup(conn, manifest, "file", relative, path, file.sha256, file.byte_length)
         for external in manifest.external_files:
             backup_path = backups.get("external:" + external["path"])
             if not backup_path:
                 raise LegacyError("legacy_backup_missing")
             expected = base64.b64decode(external["bytes_base64"])
-            current = _read_regular(_checked_path(external["path"]), max(1, external["byte_length"]))
             recovery = _read_regular(_checked_path(backup_path), max(1, external["byte_length"]))
+            current = expected if source_first else _read_regular(_checked_path(external["path"]), max(1, external["byte_length"]))
             if current != expected or recovery != expected:
                 raise LegacyError("legacy_backup_bytes_mismatch")
             conn.execute("UPDATE legacy_mappings SET disposition='preserved_in_place',metadata_json=? WHERE kind='external_file' AND legacy_id=? AND target_id=?",
                          (_json({"manifest_id": manifest_id, "file": external, "backup_path": str(backup_path)}),
                           _opaque(manifest.namespace, external["path"]), external["sha256"]))
+            if source_first:
+                _record_history_backup(conn, manifest, "external", external["path"], str(backup_path),
+                                       external["sha256"], external["byte_length"])
+
+
+def _record_history_backup(conn, manifest, role, path, backup_path, sha256, byte_length):
+    identity = _opaque(manifest.namespace, role, path)
+    metadata = {"manifest_id": manifest.manifest_id, "role": role, "path": path,
+                "sha256": sha256, "byte_length": byte_length, "backup_path": backup_path}
+    prior = conn.execute("SELECT metadata_json FROM legacy_mappings WHERE kind='history_backup' "
+        "AND legacy_id=? AND target_type='file_backup' AND target_id=?", (identity, manifest.manifest_id)).fetchone()
+    if prior:
+        previous = json.loads(prior[0])
+        if {k: v for k, v in previous.items() if k != "backup_path"} != {
+                k: v for k, v in metadata.items() if k != "backup_path"}:
+            raise LegacyError("legacy_history_receipt_conflict")
+        data = _read_regular(_checked_path(previous["backup_path"]), max(1, byte_length))
+        if len(data) != byte_length or _digest(data) != sha256:
+            raise LegacyError("legacy_backup_bytes_mismatch")
+        metadata = previous  # An identical freeze adopts its first exact copy.
+    _immutable_mapping(conn, "history_backup", identity, "file_backup", manifest.manifest_id,
+                       "preserved_in_place", metadata)
+
+
+def _publish_history_navigation(store, manifest, supplied, publisher):
+    from .projections import ReadingError
+
+    if supplied != build_history_publication_plan(manifest):
+        raise LegacyError("legacy_publication_plan_invalid")
+    manifest_id = manifest.manifest_id
+    with closing(store.connect()) as conn:
+        _require_history_policy(conn, SOURCE_FIRST_POLICY)
+        if not conn.execute("SELECT 1 FROM legacy_mappings WHERE kind='history_pass' AND legacy_id=?",
+                            (manifest_id,)).fetchone():
+            raise LegacyError("legacy_history_pass_missing")
+
+    def original(file):
+        with closing(store.connect()) as conn:
+            row = conn.execute("SELECT metadata_json FROM legacy_mappings WHERE kind='history_backup' "
+                "AND legacy_id=? AND target_id=?", (_opaque(manifest.namespace, "file", file.relative_path), manifest_id)).fetchone()
+        if row is None:
+            raise LegacyError("legacy_backup_missing")
+        expected = file.original_bytes()
+        if _read_regular(_checked_path(json.loads(row[0])["backup_path"]), max(1, file.byte_length)) != expected:
+            raise LegacyError("legacy_backup_bytes_mismatch")
+        return expected
+
+    for file in manifest.files:
+        if file.owned:
+            original(file)
+    revision = max(1, store.read_revision())
+    receipts, histories = [], []
+    try:
+        with publisher.locked():
+            for page in supplied["pages"]:
+                file = next(f for f in manifest.files if f.relative_path == page["old_path"])
+                raw = original(file)
+                previous = publisher.read(page["history_backup_path"])
+                if previous is not None and previous != raw:
+                    raise LegacyError("legacy_history_copy_collision")
+                publisher.atomic_write(page["history_backup_path"], raw,
+                    expected=_digest(previous) if previous is not None else None)
+                if publisher.read(page["history_backup_path"]) != raw:
+                    raise LegacyError("legacy_history_copy_failed")
+                histories.append({"old_path": file.relative_path, "path": page["history_backup_path"],
+                                  "sha256": file.sha256, "byte_length": file.byte_length})
+            for document in supplied["documents"]:
+                body = history_document_body(manifest, supplied, document)
+                receipt = publisher.publish_document(object_id=document["object_id"], path=document["path"],
+                    title="历史资料", body=body, content_revision=revision,
+                    is_current=lambda: max(1, store.read_revision()) == revision)
+                receipts.append(asdict(receipt))
+                with store.transaction() as conn:
+                    conn.execute("INSERT INTO legacy_mappings VALUES(?,?,?,?,?,?) ON CONFLICT(kind,legacy_id,target_type,target_id) "
+                        "DO UPDATE SET disposition=excluded.disposition,metadata_json=excluded.metadata_json",
+                        ("history_navigation", manifest_id, "projection", document["object_id"], receipt.status,
+                         _json({"manifest_id": manifest_id, "document": document,
+                                "body_sha256": _digest(body), "receipt": asdict(receipt)})))
+            with closing(store.connect()) as conn:
+                manifest_ids = [row[0] for row in conn.execute("SELECT legacy_id FROM legacy_mappings "
+                    "WHERE kind='history_pass' AND json_extract(metadata_json,'$.namespace')=? ORDER BY legacy_id",
+                    (manifest.namespace,))]
+            root = supplied["root_navigation"]
+            body = history_root_body(manifest_ids)
+            receipt = publisher.publish_document(object_id=root["object_id"], path=root["path"], title="历史资料索引",
+                body=body, content_revision=revision, is_current=lambda: max(1, store.read_revision()) == revision)
+            receipts.append(asdict(receipt))
+            with store.transaction() as conn:
+                conn.execute("INSERT INTO legacy_mappings VALUES(?,?,?,?,?,?) ON CONFLICT(kind,legacy_id,target_type,target_id) "
+                    "DO UPDATE SET disposition=excluded.disposition,metadata_json=excluded.metadata_json",
+                    ("history_root_navigation", manifest.namespace, "projection", root["object_id"], receipt.status,
+                     _json({"manifest_ids": manifest_ids, "root_navigation": root,
+                            "body_sha256": _digest(body), "receipt": asdict(receipt)})))
+    except ReadingError as exc:
+        raise LegacyError("legacy_publication_conflict") from exc
+    return {"manifest_id": manifest_id, "history_policy": SOURCE_FIRST_POLICY,
+            "status": "published" if all(r["status"] in {"published", "unchanged"} for r in receipts) else "projection_pending",
+            "receipts": receipts, "history_copies": histories}
 
 
 def publish_legacy_navigation(store, manifest: LegacyInventory, publication_plan: Mapping[str, Any],
@@ -985,6 +1287,10 @@ def publish_legacy_navigation(store, manifest: LegacyInventory, publication_plan
         database = next((r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main"), None)
         if database is None or _checked_path(database) != _checked_path(store.path):
             raise LegacyError("legacy_publisher_store_mismatch")
+    if publication_plan.get("schema") == HISTORY_PUBLICATION_SCHEMA:
+        return _publish_history_navigation(store, manifest, dict(publication_plan), publisher)
+    with closing(store.connect()) as conn:
+        _require_history_policy(conn, LEGACY_SEMANTIC_POLICY)
     try:
         supplied = json.loads(_json(dict(publication_plan)))
         expected = build_publication_plan(manifest, supplied["topic_item_map"], supplied["item_paths"])

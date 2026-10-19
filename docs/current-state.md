@@ -7,6 +7,12 @@ is implied by this document.
 - New installations and unmigrated state keep the legacy topic/event path.
   An accepted active-generation manifest selects the shared full-rebuild/live
   semantic engine; a half-written cutover blocks startup.
+- New rebuild plans freeze `history_policy="source-first-v1"`. Semantic Items
+  are reconstructed only from captured raw messages. Old summaries, pages,
+  Review Queue transitions and resources remain in separately verified immutable
+  history passes; they create no legacy captures, Items, model jobs or semantic
+  completion claims. Plans without the field retain `legacy-semantic-v1` and
+  their original fingerprint and obligations.
 - The candidate adds immutable source versions, Observations/Items, claim and
   identity operations, hybrid search, explicit local or Cloudflare embedding and
   local or remote vector indexing, captured member attribution, Markdown bodies
@@ -73,18 +79,32 @@ from the same material. Incomplete scope cannot combine separate trials, and a
 newer overlapping contrary report prevents an unconditional current-state match.
 Incremental BodyPlans may rewrite automatic prose when new details join its
 stable block; unchanged blocks, exact quotations and manual edits remain
-protected. Current BodyPlan artifacts use v6, while accepted v2–v5 evidence
-remains verifiable. These are candidate source behaviors, not evidence of a
-private generation being repaired, re-rendered or activated.
+protected. Current writer artifacts use v9, and the verifier accepts v2-v9 so
+current output and retained earlier artifacts keep their independent acceptance
+checks. These are candidate source behaviors, not evidence of a private
+generation being repaired, re-rendered or activated.
 The canonical reading adapter now separates quote provenance from mandatory
 full-message body wording. Connected exchanges can be composed with selected
 quotations while every source remains reachable; remaining citations use a
 collapsible source callout. Extraction and resolution guidance retains whole
 scenes without treating message or Observation counts as required page counts.
 Structural checks do not establish editorial quality or owner acceptance.
+Fresh extraction pages and coverage jobs bind `retained-knowledge-v4`; older
+v1/v2/v3 page jobs retain their exact frozen inputs, versions and outcomes.
 New extraction pages include the preceding bounded page as ordered non-core
 context instead of only its last two messages. Existing page jobs keep their
 frozen inputs and outcomes; this change does not silently re-extract old work.
+
+`status` reports content-free job states and error codes, the current blocker,
+and the latest append-only restore observation. Unknown outcomes and unexpired
+running leases block source/provider work; expired leases remain reclaimable.
+An old `restored=true` followed by a restore error is observation-required, not
+fresh health. No command automatically reconciles unknown jobs or resets work.
+Custom endpoints now have an explicit `custom_streaming` boolean opt-in.
+The adapter requires a terminal `stop` before returning text and preserves
+unknown-outcome handling on disconnect; absent historical fields retain their
+original config fingerprint. This is source support, not evidence of a
+particular endpoint or candidate being activated.
 
 Known deferred decisions now admit dependency-bound replanning and later-batch
 knowledge processing, while the applied prefix remains blocked until its gap

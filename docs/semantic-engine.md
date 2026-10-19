@@ -68,7 +68,17 @@ cannot manufacture a later recovery test.
 
 New extraction jobs bind these fields under
 `semantic-extraction-v2-attribution`; bounded pages use
-`semantic-extraction-pages-v2-attribution`. An existing accepted v1 candidate
+`semantic-extraction-pages-v2-attribution`. Fresh page and coverage jobs also
+bind `unit_policy="retained-knowledge-v4"`. Earlier `retained-knowledge-v1` and
+`retained-knowledge-v2` / `retained-knowledge-v3` pages are frozen candidate variants: their exact input,
+version and accepted/unknown outcome survive resume without being reinterpreted.
+The v4 units describe retained knowledge and complete scenes, not a provenance
+audit or message directory. Source evidence, resources and exact source spans
+remain separately preserved; a display name never supplies gender or identity.
+URL slugs and filenames establish a reference, not an unseen page title, author
+or conclusion. Expected and erroneous values are not competing reports unless
+they actually assert contrary facts in the same scope.
+An existing accepted v1 candidate
 can replay its exact frozen input and artifact after a commit interruption;
 its former subject mapping is not reinterpreted as new attribution. This
 limited branch exists for the current source-candidate recovery path, not a
@@ -87,7 +97,11 @@ Observation. New pages retain the entire preceding bounded page, in source
 order, so a pronoun or reply can still see a subject more than two messages
 back. Core page limits remain unchanged; overlap grants no identity proof.
 An existing page job keeps its exact frozen context and accepted/unknown
-outcome on resume, including earlier two-message overlap. The parent extraction artifact aggregates validated pages before
+outcome on resume, including earlier two-message overlap and its original
+`unit_policy`. A fresh page receives the full preceding bounded page as
+ordered non-core context and binds `retained-knowledge-v4`; the change does not
+fork, rewrite or resend an older unknown job. The parent extraction artifact
+aggregates validated pages before
 canonical commit. An unclassified fragment keeps its whole source unread even
 when other fragments produced Observations. Only explicit supported terminal
 dispositions can finish a source with zero Observations. Empty

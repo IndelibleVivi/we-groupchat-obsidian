@@ -7,9 +7,13 @@
 `run_id` 的恢复和 rollback。已有 active semantic generation 时，新 plan
 会明确拒绝；这里没有按标题推测跨 generation reader preferences 的迁移器。
 
-新 generation 的 SQLite 是 canonical owner。原知识库、原笔记、已有
-Review Queue、resource ledger 和本地附件均先保全；Markdown 与 index 是
-derived consumers。协议细节分别见 [store](semantic-store-contract.md)、
+新 generation 的 SQLite 是 canonical owner。新 plan 固定
+`history_policy="source-first-v1"`：语义知识只从捕获的原始消息构建。原知识库、
+原笔记、已有 Review Queue、resource ledger 和本地附件作为独立历史证据保全；
+它们不生成 semantic core capture、Item、model job 或旧知识导入 Obligation。
+Markdown 与 index 是 derived consumers。没有 policy 字段的旧 plan 仍按
+`legacy-semantic-v1` 的原 fingerprint 与模型义务恢复，不会在 resume 时静默改成新
+policy。协议细节分别见 [store](semantic-store-contract.md)、
 [legacy conservation](semantic-legacy.md)、[provider](semantic-providers.md)、
 [reading](semantic-reading.md) 和 [monitor v3](monitor-state-v3.md)。
 
@@ -55,7 +59,11 @@ rebuild，使用全局参数 `--project-dir /ABSOLUTE/PATH/MANAGED-CHECKOUT` 精
 RPM/TPM 配置；`unset` 明确列出未设置的速率。它只读取计划配置，不构造
 provider，也不代表已探明服务商限额或当前运行中的请求数。实际进程的
 admission 观察来自所用 `ProviderRoles.preflight()`；已冻结计划不能靠后来
-修改配置来悄悄改换执行参数。
+修改配置来悄悄改换执行参数。`plan` 与 `status` 还输出 `history_policy`。
+`status` 只读持久化证据并报告 job state/error-code 汇总、是否有 unknown 或未过期
+running lease 阻断，以及 append-only restore attempts 的最新观察；遇到 unknown
+或跨进程运行中的 lease 时，不打开 source、不构造 provider、不新建 freeze。
+已过期的 running lease 可由正常恢复流程重新 claim，不会被误报为永久 unknown。
 
 ## Provider profile 与预算
 
@@ -189,7 +197,7 @@ message 数量为 `null`；plan counts 不是 H1，也不是费用报价。新�
 ```
 
 前一 flag 只授权本次短命 CLI 读取来源，macOS 仍可能为该进程显示独立 App
-Data consent。后一 flag 授权将此次 captured/legacy 文本经统一 URL 脱敏后
+Data consent。后一 flag 授权将此次捕获的原始消息经统一 URL 脱敏后
 交给已配置的 Text、Decision 和 Embedding providers。没有隐式 attachment-byte
 consent、link crawler 或换模型 fallback。该操作会停止并恢复 exact managed
 app、生成新 DB、发布 `WGO/` 并 CAS 更新 monitor checkpoint。
@@ -214,8 +222,9 @@ reference/hash/plan 身份与 schema 不变。此优化不降低冻结、来源�
 conservation 验证。
 Legacy inventory 的身份校验也按 canonical JSON chunks 计算，保持既有 digest；
 单次 backup/navigation 操作复用其已算身份，不在每个旧页面上重算全库。
-完成 legacy 导入和备份核对后，coordinator 释放已 decode 的清单；模型处理结束、
-需要旧页面映射时再读取同一不可变 payload，避免整个旧库随 provider 并发长期驻留。
+完成每个 history pass 的保全和备份核对后，coordinator 释放已 decode 的清单；
+模型处理结束、需要历史发布或 verify 时再读取同一不可变 payload，避免整个旧库随
+provider 并发长期驻留。
 parallel wave 准备只读取轻量 batch metadata（`batch_id` 与 capture order），再
 逐 batch 读取 core members 计算 overlap-owner wave，不预先解出全部 capture
 receipt 或保留全部 member 副本；它仍不持有 DB 事务或 projection lock。
@@ -317,11 +326,15 @@ managed bytes、Review Queue 文件、resource ledger 和本地 archive bytes �
 exact recovery copy。数据库和原笔记不会被重写为新 schema。未知 baseline 的
 整页一并保留，不猜测哪一段属于用户。
 
-执行顺序固定为：完整 pinned C0 traversal、legacy import、全部 extraction、
+执行顺序固定为：完整 pinned C0 traversal、全部 extraction、
 全局真实 embedding/index、resolver、consolidation、Views；然后从零进行完整
 C1 traversal 并处理其新版本。C1 捕获旧时间戳晚到行及 A→B→A，不以最后时间戳
 代替全库证明。最后生成本日 Brief，保留来源时间与获知时间，避免补写历史日期。
-accepted jobs 和 artifacts 可复用，unknown provider outcome 不会自动重发。
+source-first plan 在 provider 前先对每一个 retained freeze 保全旧记录、原页字节、
+selection、Review Queue 状态和 resource envelope，并发布该 pass 的独立历史导航；
+这些动作不进入 semantic extraction。legacy-semantic 旧 plan 仍走原来的
+`import_legacy` compatibility path。accepted jobs 和 artifacts 可复用，unknown
+provider outcome 不会自动重发。
 
 旧 `pending_source_batch` 在任何 provider 工作前以原 policy、raw limit、精确
 成员、内容和完整 inventory 重新验证。失败保留 intent；不能清空 pending 或
@@ -333,7 +346,12 @@ H1。migration receipt 只引用该轮的连续批次，C0/C1 不混成一条 ch
 独立 verifier 从 canonical SQLite snapshot 和 frozen manifest 重建证据：每个
 member identity、terminal disposition、Observation/span、accepted action、
 transaction/outbox、embedding/index confirmation、当前 Item/来源/Views
-projection，以及旧 rows/pages/notes/links/anchors 和映射均须有去向。Brief
+projection，以及每个 source-first history pass 的旧 rows/pages/notes/links/
+anchors、resource envelope、recovery copy 和 navigation receipt 均须有去向。
+历史 pass 的 payload 按 pass 逐个从 run-bound journal reference 读取，不把全部旧库
+常驻内存；每个 retained freeze 还须有独立、可用且仍匹配 path/digest/identity 的
+whole-database Online Backup，冻结集合、pass 和输入 binding 均须一一对应。
+缺 pass、篡改旧数据库/页面备份、漏掉旧导航或混入 `legacy_import` 都失败。Brief
 必须有本日 inputs、accepted plan/disposition 和引用；success 还须有 history
 及当前磁盘正文。明确 `silent` 可以通过，未生成、deferred、unresolved review
 或丢失正文不能通过。报告区分 source、semantic、index、projection pending；
@@ -341,10 +359,12 @@ projection，以及旧 rows/pages/notes/links/anchors 和映射均须有去向�
 
 先在私有 staging/WGO 达到完整验收，再以冻结 file hashes CAS 发布到固定
 vault/WGO。已知机器区由 canonical publisher 管理；未知文件、个人编辑、重名
-identity、symlink 和越界路径不会被覆盖。旧页面仍留原址，另建 redacted
-`Legacy/` history/redirect/hub navigation。旧 Review Queue 每次 append 的状态
-都进入同一 canonical DB 的 legacy evidence，并有可读历史；不会翻译成新
-reader controls 的一次虚构操作。
+identity、symlink 和越界路径不会被覆盖。旧页面仍留原址；每个 source-first
+freeze 另建 `Legacy/History/<manifest_id>/` 可读历史，并由 `Legacy/Index.md`
+列出。数据库中有 topic、但页面缺失或只有 DB 记录的条目也保留为显式历史。
+旧 Review Queue 每次 append 的状态都进入同一 canonical DB 的 history evidence，
+并有可读历史；不会翻译成新 reader controls 的一次虚构操作。`Legacy/` 页面是
+历史投影，不是新的 Item，也不能证明 semantic processing 已成功。
 
 ## Cutover、resume 与 live completion
 
@@ -388,7 +408,29 @@ resolution receipts，旧 proposal/decision 才能以 explicit supersession proo
 
 同一 run 已 activation_committed 的 `resume` 只执行待完成的 provisional、
 observed restore 与 live 验收，不再读取 source 或调用 model。CLI 仍要求同一组
-显式 flags，以免操作者在阶段未确定时隐式授权一条更广的恢复路径。
+显式 flags，以免操作者在阶段未确定时隐式授权一条更广的恢复路径。实施 restore
+时每次结果都 append 到 `restore_attempts`，同时保留旧 top-level 字段作兼容；
+`status` 以最新 attempt 的 `restored`、`code` 和 `observed_at` 为准。旧 journal
+若只有 `restored=true`、其后又记录了 restore error，则显示
+`runtime_restore_observation_required`，不能拿较早的成功值冒充当前健康。
+normal resume 会在没有 source/model work 的 finalization 阶段重新观察 exact
+runtime；unknown provider outcome 也不存在自动 reconciliation 或 reset。
+
+若需要只修复运行时的恢复观察、又不继续 source/model 阶段，先看计划，再显式应用：
+
+```bash
+.venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \
+  restore-runtime FIRST_MIGRATION
+.venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \
+  restore-runtime FIRST_MIGRATION --apply --allow-runtime-changes
+```
+
+这是 source-free、provider-free 且 job-free 的窄命令：它要求 cutover 已到
+`activation_committed`/`provisional`/`run_complete`/`rolled_back`，重新核对 frozen
+managed runtime binding，然后只记录一次 restore observation。它不推进 run phase、
+不提供 live acceptance、不 reconciliation unknown outcome，也不激活 generation。
+没有 apply 时返回计划且不改 runtime；apply 缺少运行授权码时在构造 coordinator
+之前失败。
 
 `run_complete` 同时要求 durable provisional、所有锁已释放、实际 restore 被
 观察、exact 新进程身份，以及每个原 selected chat 在 restore 后由真实新
@@ -441,6 +483,10 @@ Rollback 只在 current bytes 仍等于已发布 candidate 时恢复原 WGO byte
 | projection conflict 或个人编辑 | 使用 reader owner 的明确冲突处置；原 bytes、backup 和 draft 都保留。 |
 | cutover recovery required | 保持 app 停止；同一 run resume 或显式 rollback，不手改 active.json。 |
 | restore failed / live increment pending | 同一 run 复查 exact binding 与真实 app；不能仅修改 receipt 声称完成。 |
+| 只需重新观察 restore，不应继续 source/model/job | 先用 source-free 的 `restore-runtime RUN_ID` 查看计划；确认 exact binding 后用 `--apply --allow-runtime-changes`。它只追加 restore observation，不能让 run complete，也不能处理 unknown。 |
+| legacy inline journal 的 restored=true 与后续 restore error 并存 | `status` 返回 `runtime_restore_observation_required`；在同一允许 finalization 的 run 上重新观察 exact runtime，不能用旧成功字段覆盖新失败。 |
+| unknown provider outcome / 未过期 running lease | 保留 job 与 artifact；先处理 exact reconciliation 或确认跨进程 owner。`status` 先报告 `semantic_job_busy_or_unknown`，恢复不会自行 reset、重发或打开 source。 |
+| 已过期 running lease 或 known failed attempts | 不会被当作永久 unknown；按正常同 run 恢复重新 claim/prepare，同时保留 `job_states` 与有界 error codes 供操作者核对。 |
 | relocation 中断、plan 过期或已换 root | 用同一 run 与同一 destination 再跑显式 `relocate --apply --allow-runtime-changes` 完成复制/adoption/finalize；不新建 run、不手改 plan 或 expires_at、不在 config 未 adopt 前继续。 |
 | `rebuild_relocation_*` 拒绝（active/cutover/路径/目标非空/provider 变化） | 按 code 处理：先完成或 rollback 现有 cutover；在已挂载卷上创建空目标目录；jobs 存在时恢复原 provider route/model，或另走新 generation 而不是就地改绑。 |
 

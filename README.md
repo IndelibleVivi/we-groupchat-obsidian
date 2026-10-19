@@ -56,6 +56,9 @@ The plugin is source-only and is not installed or enabled automatically.
 The body can combine an exchange into a coherent explanation and select its
 key quotations; complete original excerpts remain on linked source pages.
 Multiple remaining source links are grouped in a collapsible source callout.
+Fresh extraction treats units as retained knowledge and connected scenes, not a
+message directory or provenance audit; older page jobs keep their frozen policy
+and results.
 
 SQLite remains the canonical store. Embeddings can use an explicitly configured
 loopback model service or Cloudflare BGE-M3; derived retrieval can use the local
@@ -73,9 +76,13 @@ space for that cache; it does not load the full vector collection into RAM.
 The app does not create a Cloudflare account, provision an index or grant spending.
 
 Existing installations use the [first-migration runbook](docs/semantic-rebuild.md).
-The migration preserves old knowledge, reader state and raw history, verifies two complete
-source observations and a finite cutover horizon, then switches one generation
-pin and checks the restored runtime. Large journals keep immutable evidence outside
+The source-first plan rebuilds semantic knowledge only from captured raw
+messages. Old summaries, pages, queue transitions and resources are preserved
+as separate, losslessly verified history and exposed through `Legacy/` pages;
+they do not become new Items or model tasks. Older plans without the policy
+field keep their original legacy-semantic import contract. The migration verifies
+two complete source observations and a finite cutover horizon, then switches one
+generation pin and checks the restored runtime. Large journals keep immutable evidence outside
 small mutable state. `scripts/rebuild_knowledge.py compact-journal RUN_ID` upgrades
 an interrupted inline journal, preserving original bytes without starting source
 or model processing. `scripts/rebuild_knowledge.py relocate RUN_ID
@@ -398,6 +405,13 @@ monitor timeout. For a known compatible custom endpoint, explicitly set
 (Qwen dialect) to forward the monitor's `monitor_ai_thinking` setting. Its default
 is empty, preserving ordinary custom requests. Forwarding the flag does not prove
 that an intervening gateway or upstream model honors it.
+
+For a custom endpoint that supports server-sent events, explicitly set
+`custom_streaming: true` to collect streamed text. WGO returns a result only
+after the provider reports `finish_reason="stop"`; interrupted streams never
+become partial successful output. This option is absent by default and does
+not change historical config fingerprints. It changes transport, not the
+provider route, retry policy or unknown-job reconciliation rules.
 
 When DeepSeek is selected without an explicit `ai_model`, the current default
 is `deepseek-v4-flash`; a different compatible model can still be configured.

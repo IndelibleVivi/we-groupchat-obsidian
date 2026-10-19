@@ -1,13 +1,66 @@
 import sys
 import types
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from ai.openai_provider import OpenAIProvider
+from ai.base import OutputTruncatedError
 from core.api_errors import is_retryable_ai_error
 
 
 class OpenAIProviderTests(unittest.TestCase):
+    @staticmethod
+    def streamed(chunks):
+        captured = {}
+        @contextmanager
+        def create(**kwargs):
+            captured.update(kwargs)
+            try:
+                yield iter(chunks)
+            finally:
+                captured["closed"] = True
+        provider = OpenAIProvider.__new__(OpenAIProvider)
+        provider.model = "synthetic"
+        provider.streaming = True
+        provider.json_object_output = True
+        provider.client = types.SimpleNamespace(chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=create)))
+        return provider, captured
+
+    @staticmethod
+    def chunk(content=None, reason=None):
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(
+            delta=types.SimpleNamespace(content=content), finish_reason=reason)])
+
+    def test_stream_assembles_only_complete_content_and_closes_response(self):
+        chunks = [types.SimpleNamespace(choices=[]), self.chunk('{"字":'),
+                  self.chunk('"值"}'), self.chunk(reason="stop")]
+        provider, captured = self.streamed(chunks)
+        self.assertEqual(provider.summarize("synthetic prompt"), '{"字":"值"}')
+        self.assertIs(captured["stream"], True)
+        self.assertEqual(captured["response_format"], {"type": "json_object"})
+        self.assertTrue(captured["closed"])
+
+    def test_incomplete_or_failed_stream_never_returns_a_partial_result(self):
+        def disconnected():
+            yield self.chunk("partial private text")
+            raise ConnectionError("synthetic disconnect")
+        for chunks in ([self.chunk("partial private text")], disconnected(),
+                       [self.chunk("partial private text"), self.chunk(reason="content_filter")]):
+            with self.subTest(chunks=type(chunks).__name__):
+                provider, captured = self.streamed(chunks)
+                with self.assertRaises(RuntimeError) as failure:
+                    provider.summarize("synthetic prompt")
+                self.assertNotIn("private text", str(failure.exception))
+                self.assertTrue(captured["closed"])
+
+    def test_length_limited_stream_remains_a_known_truncated_output(self):
+        provider, captured = self.streamed([self.chunk("partial"), self.chunk(reason="length")])
+        with self.assertRaises(OutputTruncatedError):
+            provider.summarize("synthetic prompt")
+        self.assertTrue(captured["closed"])
+
     def test_configures_bounded_single_attempt_client_requests(self):
         captured = {}
 
@@ -110,9 +163,11 @@ class OpenAIProviderTests(unittest.TestCase):
 
         self.assertEqual(captured["extra_body"], {"enable_thinking": False})
 
-    def test_commandcode_thinking_off_uses_its_gateway_effort_value(self):
+    def test_exact_gateway_thinking_off_uses_its_declared_effort_value(self):
         for endpoint in ("https://api.commandcode.ai/provider/v1/",
-                         "https://api.deepseek.com", "https://api.commandcode.ai.example.test/provider/v1"):
+                         "https://amr-link.open-design.ai/v1/",
+                         "https://api.deepseek.com", "https://api.commandcode.ai.example.test/provider/v1",
+                         "https://amr-link.open-design.ai.example.test/v1"):
             for thinking in (False, True, None):
                 with self.subTest(endpoint=endpoint, thinking=thinking):
                     captured = {}
@@ -134,8 +189,11 @@ class OpenAIProviderTests(unittest.TestCase):
                         self.assertEqual(captured["response_format"], {"type": "json_object"})
                     else:
                         self.assertNotIn("response_format", captured)
-                    if endpoint == "https://api.commandcode.ai/provider/v1/" and thinking is False:
-                        self.assertEqual(captured["reasoning_effort"], "off")
+                    effort = {"https://api.commandcode.ai/provider/v1/": "off",
+                              "https://amr-link.open-design.ai/v1/": "none"}.get(endpoint)
+                    self.assertEqual(provider._json_object_gateway, effort is not None)
+                    if effort is not None and thinking is False:
+                        self.assertEqual(captured["reasoning_effort"], effort)
                         self.assertEqual(captured["extra_body"], {"thinking": {"type": "disabled"}})
                     else:
                         self.assertNotIn("reasoning_effort", captured)

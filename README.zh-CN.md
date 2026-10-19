@@ -40,6 +40,8 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 正文按材料选用条件对照表、步骤列表、要点和带归属的原话引用，不要求每篇套用同一格式。
 新细节可以自然融入原来的自动段落；未受影响的段落、必须保留的原话与手写内容继续受保护。
 正文可以综合一段讨论、选用关键原话；完整原文仍在关联的来源页，多条补充证据收进可展开的来源区。
+新抽取把 unit 当作值得留下的知识和完整场景，而不是消息目录或取证清单；旧 page job
+继续使用其冻结的 policy 与结果，不会因新版本被重新解释。
 可选的[本地 Obsidian 插件](integrations/obsidian/README.md)只为确实可见的页面记录打开事件；
 未装插件时使用手动读过／已知动作。仓库提供插件源码，不自动安装或启用。
 
@@ -53,8 +55,11 @@ SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务
 文本生成、结构化判断与 embedding 分开配置。Provider ledger 保存 usage、reservation、明确预算证据和
 未知结果；程序不会自行建账户、建索引或获得消费授权。
 
-已有安装按[首次迁移 runbook](docs/semantic-rebuild.md)执行：保全旧知识、读者状态和原始历史，
-两次完整观察来源、验证有限 cutover horizon，再切换唯一 generation pin 并检查恢复后的增量 runtime。
+已有安装按[首次迁移 runbook](docs/semantic-rebuild.md)执行：新的 source-first plan
+只从捕获的原始消息重建语义知识；旧摘要、旧页面、Review Queue 变化与资料作为独立历史
+逐 pass 无损保全，并显示在 `Legacy/` 导航中，不变成新 Item 或模型任务。没有 policy
+字段的旧 plan 保留原来的 legacy-semantic import contract。迁移会两次完整观察来源、
+验证有限 cutover horizon，再切换唯一 generation pin 并检查恢复后的增量 runtime。
 拉取代码本身不会迁移或激活数据。大体积迁移 journal 将不可变证据与小型阶段状态分开保存；
 中断的旧内联 journal 可通过 `scripts/rebuild_knowledge.py compact-journal RUN_ID` 升级，
 原件保留，升级本身不读取微信或调用模型。`scripts/rebuild_knowledge.py relocate RUN_ID
@@ -322,6 +327,12 @@ timeout。确认自定义 endpoint 兼容后，可显式设置 `custom_thinking_
 `thinking`（DeepSeek dialect）或 `enable_thinking`（Qwen dialect），转发 monitor 的
 `monitor_ai_thinking` 设置；默认空值保留普通 custom request。参数已转发不代表中间
 gateway 或上游 model 已执行它。
+
+对于支持 server-sent events 的 custom endpoint，可显式设置
+`custom_streaming: true` 来收集流式文本。只有 provider 返回
+`finish_reason="stop"` 后才交付完整结果；中断的流不会变成部分成功输出。
+该字段默认不存在，加载历史 config 不改变其 fingerprint；它只改变传输方式，
+不改变 provider route、重试策略或 unknown job 的 reconciliation 规则。
 
 选择 DeepSeek 且没有显式填写 `ai_model` 时，当前默认使用
 `deepseek-v4-flash`；仍可在配置中指定其他兼容 model。

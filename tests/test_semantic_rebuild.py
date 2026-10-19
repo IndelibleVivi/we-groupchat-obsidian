@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from core.semantic.rebuild import (ACTIVE_SCHEMA, SCHEMA, GenerationRegistry, RebuildError,
     RebuildJournal, backup_files, backup_sqlite, fingerprint, read_json, read_regular, safe_path, write_json)
-from core.semantic.rebuild import ManagedRuntime, RebuildCoordinator
+from core.semantic.rebuild import ManagedRuntime, RebuildCoordinator, _job_state_summary
 
 
 PROFILE = {"schema": "we-groupchat-obsidian.semantic-providers.v1", "decision": "text",
@@ -22,6 +22,41 @@ PROFILE = {"schema": "we-groupchat-obsidian.semantic-providers.v1", "decision": 
 def journal_details(root, run_id):
     journal = RebuildJournal(root, run_id)
     return journal.payloads.expand(journal.read())
+
+
+class JobStateSummaryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name).resolve() / "knowledge.sqlite"
+        with closing(sqlite3.connect(self.path)) as conn:
+            conn.execute("CREATE TABLE jobs(job_id TEXT PRIMARY KEY,state TEXT NOT NULL,lease_until REAL)")
+            conn.execute("CREATE TABLE job_attempts(job_id TEXT NOT NULL,error_code TEXT,started_at REAL,finished_at REAL)")
+            conn.execute("INSERT INTO jobs VALUES('unknown','unknown',NULL)")
+            conn.execute("INSERT INTO jobs VALUES('running','running',?)", (50,))
+            conn.execute("INSERT INTO jobs VALUES('failed','failed',NULL)")
+            conn.execute("INSERT INTO job_attempts VALUES('unknown','text_provider_failed',10,11)")
+            conn.execute("INSERT INTO job_attempts VALUES('failed','provider_timeout',12,13)")
+            conn.commit()
+
+    def test_unknown_or_live_running_blocks_and_failures_remain_visible(self):
+        summary = _job_state_summary(self.path, 100)
+        self.assertEqual(summary["blocker"], "semantic_job_busy_or_unknown")
+        self.assertEqual(summary["states"], {"failed": 1, "running": 1, "unknown": 1})
+        self.assertEqual(summary["error_codes"], ["provider_timeout", "text_provider_failed"])
+
+    def test_expired_running_lease_and_known_failure_do_not_block(self):
+        with closing(sqlite3.connect(self.path)) as conn:
+            conn.execute("DELETE FROM jobs WHERE job_id='unknown'")
+            conn.commit()
+        summary = _job_state_summary(self.path, 200)
+        self.assertIsNone(summary["blocker"])
+        self.assertEqual(summary["states"], {"failed": 1, "running": 1})
+        with closing(sqlite3.connect(self.path)) as conn:
+            conn.execute("UPDATE jobs SET lease_until=300 WHERE job_id='running'")
+            conn.commit()
+        self.assertEqual(_job_state_summary(self.path, 200)["blocker"],
+                         "semantic_job_busy_or_unknown")
 
 
 class SyntheticManagedRuntime:
@@ -149,6 +184,16 @@ class RebuildCoordinatorTests(unittest.TestCase):
     def execute(self):
         return self.coordinator.execute("test-run", allow_source_read=True, allow_model_processing=True)
 
+    def legacy_plan(self):
+        """An exact synthetic pre-policy plan, with its own original identity."""
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        def historical(row):
+            row["plan"].pop("history_policy")
+            row["plan_fingerprint"] = fingerprint(row["plan"])
+        journal.update(historical)
+        return journal.read()
+
     def live_increment(self, root=None):
         from core.semantic.store import SemanticStore
         from core.semantic.runtime import SemanticRuntime
@@ -214,15 +259,19 @@ class RebuildCoordinatorTests(unittest.TestCase):
                              ["requests_per_minute", "tokens_per_minute"])
             self.config_store.update(lambda value: value.update(semantic_provider_limits={
                 "text": {"max_inflight": 1, "requests_per_minute": 10}}))
-            self.assertEqual(self.coordinator.status("test-run")["configured_admission"],
-                             plan["configured_admission"])
+            status = self.coordinator.status("test-run")
+            self.assertEqual(status["configured_admission"], plan["configured_admission"])
+            self.assertEqual(status["job_states"], {})
+            self.assertIsNone(status["job_blocker"])
+            self.assertFalse(Path(plan["database"]).exists())
         with patch.object(self.config_store, "inspect", side_effect=AssertionError("config before grant")):
             with self.assertRaisesRegex(RebuildError, "explicit_grants"):
                 self.coordinator.execute("test-run", allow_source_read=True)
         self.assertEqual(self.managed.events, [])
 
     def test_full_rebuild_real_store_history_migration_and_live_completion(self):
-        self.coordinator.plan(PROFILE, run_id="test-run")
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        self.assertEqual(plan["history_policy"], "source-first-v1")
         self.managed.on_restore = self.live_increment
         result = self.execute()
         self.assertEqual(result["state"], "run_complete", result)
@@ -235,6 +284,11 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.assertLess(self.managed.events.index("app_released"), self.managed.events.index("restored"))
         with closing(sqlite3.connect(run["plan"]["database"])) as conn:
             metadata = json.loads(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0])
+            self.assertEqual(conn.execute("SELECT count(*) FROM capture_batches WHERE purpose='legacy_import'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM source_records WHERE source_namespace LIKE 'legacy:%'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM legacy_mappings WHERE target_type='history_record'").fetchone()[0],
+                             len(run["plan"]["legacy_inventory"]["records"]))
+        self.assertEqual(metadata["history_policy"], "source-first-v1")
         self.assertEqual(metadata["activation"]["delivery_floor_change_id"], 0)
 
     def test_decoded_legacy_inventory_is_released_during_provider_work(self):
@@ -427,6 +481,28 @@ class RebuildCoordinatorTests(unittest.TestCase):
             result = self.execute()
         self.assertEqual(result["state"], "run_complete", result)
 
+    def test_legacy_stale_restore_success_is_reobserved_before_finalization(self):
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        self.assertEqual(self.execute()["state"], "incomplete")
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        def make_legacy(row):
+            row["runtime"].update(restored=True)
+            row["runtime"].pop("restore_attempts", None)
+            if {"code": "runtime_restore_failed", "phase": "restore"} not in row["errors"]:
+                row["errors"].append({"code": "runtime_restore_failed", "phase": "restore"})
+        journal.update(make_legacy)
+        restore_events = self.managed.events.count("restored")
+        with patch.object(self.coordinator, "source_factory",
+                          side_effect=AssertionError("legacy finalization reopened source")), \
+             patch.object(self.coordinator, "_roles",
+                          side_effect=AssertionError("legacy finalization constructed provider")):
+            result = self.execute()
+        self.assertTrue(result["restored"], result)
+        self.assertEqual(self.managed.events.count("restored"), restore_events + 1)
+        attempts = journal_details(self.runtime_root, "test-run")["runtime"]["restore_attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertTrue(attempts[0]["restored"])
+
     def test_budget_failure_does_not_stop_runtime(self):
         self.coordinator.plan(PROFILE, run_id="test-run")
         with patch.object(type(self.roles), "preflight", return_value={"ready": False}):
@@ -434,6 +510,63 @@ class RebuildCoordinatorTests(unittest.TestCase):
                 self.execute()
         self.assertEqual(self.managed.events, [])
         self.assertEqual(self.source_calls, 0)
+
+    def test_unknown_job_blocks_before_new_provider_source_or_freeze(self):
+        from ai.semantic_provider import ProviderError
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        with patch.object(self.text, "generate",
+                          side_effect=ProviderError("text_provider_failed", outcome_unknown=True)):
+            failed = self.execute()
+        self.assertEqual(failed["code"], "text_provider_failed", failed)
+        self.assertTrue(failed["restored"], failed)
+        before = journal_details(self.runtime_root, "test-run")
+        self.assertNotIn("job_states", before)
+        initial_status = self.coordinator.status("test-run")
+        self.assertEqual(initial_status["job_states"].get("unknown"), 1)
+        pending_jobs = initial_status["job_states"].get("pending", 0)
+        text_calls = len(self.text.calls)
+        restores = self.managed.events.count("restored")
+        with patch.object(self.coordinator, "source_factory",
+                          side_effect=AssertionError("source opened after unknown job")), \
+             patch.object(self.coordinator, "_roles",
+                          side_effect=AssertionError("provider constructed after unknown job")), \
+             patch.object(self.coordinator, "_freeze",
+                          side_effect=AssertionError("source recaptured after unknown job")):
+            blocked = self.execute()
+        self.assertEqual(blocked["code"], "semantic_job_busy_or_unknown", blocked)
+        self.assertTrue(blocked["restored"], blocked)
+        self.assertEqual(blocked["job_states"].get("unknown"), 1)
+        self.assertEqual(blocked["job_states"].get("pending", 0), pending_jobs)
+        self.assertIn("text_provider_failed", blocked["job_error_codes"])
+        self.assertEqual(len(self.text.calls), text_calls)
+        self.assertEqual(self.managed.events.count("restored"), restores + 1)
+        self.assertEqual(len(journal_details(self.runtime_root, "test-run")["freeze_receipts"]), 1)
+        status = self.coordinator.status("test-run")
+        self.assertEqual(status["job_blocker"], "semantic_job_busy_or_unknown")
+        self.assertTrue(status["restored"])
+        self.assertEqual(status["restore_attempt_count"], 2)
+
+    def test_known_failed_job_is_reported_but_fresh_resume_retries_it(self):
+        from ai.semantic_provider import ProviderError
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        original = self.text.generate
+        with patch.object(self.text, "generate",
+                          side_effect=ProviderError("provider_timeout", retryable=True)):
+            failed = self.execute()
+        self.assertEqual(failed["code"], "provider_timeout", failed)
+        self.assertTrue(failed["restored"], failed)
+        status = self.coordinator.status("test-run")
+        self.assertIsNone(status["job_blocker"], status)
+        self.assertEqual(status["job_states"].get("failed"), 1)
+        pending_jobs = status["job_states"].get("pending", 0)
+        self.assertIn("provider_timeout", status["job_error_codes"])
+        with patch.object(self.text, "generate", side_effect=original):
+            resumed = self.execute()
+        self.assertIn("live_check", resumed, resumed)
+        status = self.coordinator.status("test-run")
+        self.assertIsNone(status["job_blocker"], status)
+        self.assertNotIn("failed", status["job_states"])
+        self.assertLess(status["job_states"].get("pending", 0), pending_jobs)
 
     def test_second_full_pass_captures_old_time_late_row_and_changed_content(self):
         from tests.test_monitor_source import raw_message
@@ -453,7 +586,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.assertTrue(run["acceptance"]["complete"])
 
     def test_resume_refreezes_intervening_legacy_note_without_replaying_historical_revisions(self):
-        self.coordinator.plan(PROFILE, run_id="test-run")
+        original = self.legacy_plan()
         def fault(phase):
             if phase == "after_freeze-1-processed-C0":
                 raise RebuildError("synthetic_before_cutover")
@@ -476,6 +609,153 @@ class RebuildCoordinatorTests(unittest.TestCase):
             old = conn.execute("SELECT metadata_json FROM legacy_mappings WHERE kind='annotation_history'").fetchone()
         self.assertEqual(count, old_count)
         self.assertEqual(Path(json.loads(old[0])["backup_path"]).read_bytes(), self.legacy.page_bytes)
+        compact = RebuildJournal(self.runtime_root, "test-run").read()
+        self.assertEqual(compact["plan_fingerprint"], original["plan_fingerprint"])
+        self.assertNotIn("history_policy", compact["plan"])
+
+    def test_source_first_preserves_earlier_freeze_even_when_source_construction_failed(self):
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        with patch.object(self.coordinator, "source_factory", side_effect=RebuildError("synthetic_source_unavailable")):
+            first = self.execute()
+        self.assertEqual(first["code"], "synthetic_source_unavailable", first)
+        (self.legacy.tree / "life.md").write_bytes(self.legacy.page_bytes + b"\nintervening personal note\n")
+        result = self.execute()
+        self.assertIn("live_check", result, result)
+        self.assertTrue(self.coordinator.verify("test-run")["complete"])
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        compact = journal.read()
+        self.assertEqual(len(compact["history_preservations"]), 2)
+        manifest = journal.verification(compact)
+        self.assertEqual(len(manifest["history_preservation_passes"]), 2)
+        from core.semantic.rebuild_payloads import is_ref
+        self.assertTrue(all(is_ref(p["legacy_inventory"]) for p in manifest["history_preservation_passes"]))
+        with closing(sqlite3.connect(plan["database"])) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM source_records WHERE source_namespace LIKE 'legacy:%'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM legacy_mappings WHERE kind='history_pass'").fetchone()[0], 2)
+        root = Path(plan["projection_root"], "Legacy/Index.md").read_text()
+        for declaration in manifest["history_preservation_passes"]:
+            self.assertIn(declaration["receipt_id"], root)
+
+    def test_source_first_queue_history_never_enters_semantic_jobs(self):
+        queue = self.root / "review_queue/pending.jsonl"
+        queue.parent.mkdir()
+        first = {"schema_version": "review_queue.v1", "id": "history-only", "status": "pending",
+                 "title": "旧任务 https://example.test/?token=private-value", "summary": "旧的生成摘要",
+                 "knowledge_topic_id": 1, "resources": {"links": [], "files": []}}
+        queue.write_text(json.dumps(first) + "\n")
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        def fault(phase):
+            if phase == "after_freeze-1-processed-C0":
+                raise RebuildError("synthetic_before_cutover")
+        self.coordinator.fault_hook = fault
+        self.assertTrue(self.execute()["restored"])
+        with queue.open("a") as stream:
+            stream.write(json.dumps(dict(first, status="reviewed")) + "\n")
+        self.coordinator.fault_hook = lambda _: None
+        self.assertIn("live_check", self.execute())
+        self.assertTrue(self.coordinator.verify("test-run")["complete"])
+        with closing(sqlite3.connect(plan["database"])) as conn:
+            rows = [json.loads(row[0])["input"]["payload"]["queue_item"] for row in conn.execute(
+                "SELECT metadata_json FROM legacy_mappings WHERE kind='history_record' "
+                "AND json_extract(metadata_json,'$.input.table')='review_queue'")]
+            self.assertEqual({row["status"] for row in rows}, {"pending", "reviewed"})
+            self.assertEqual(conn.execute("SELECT count(*) FROM source_records WHERE kind='legacy_queue'").fetchone()[0], 0)
+        manifest = RebuildJournal(self.runtime_root, "test-run").verification()
+        last = RebuildJournal(self.runtime_root, "test-run").payloads.get(manifest["publication_plan"])
+        document = next(d for d in last["documents"] if d["kind"] == "queue")
+        visible = Path(plan["projection_root"], document["path"]).read_text()
+        self.assertIn("reviewed", visible)
+        self.assertNotIn("private-value", visible)
+
+    def test_source_first_keeps_every_sqlite_backup_when_only_unknown_table_changes(self):
+        with closing(sqlite3.connect(self.legacy.db)) as conn:
+            conn.execute("CREATE TABLE unknown_extension(extension_id INTEGER PRIMARY KEY, payload BLOB)")
+            conn.execute("INSERT INTO unknown_extension VALUES(1,?)", (b"first exact extension state",))
+            conn.commit()
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        def fault(phase):
+            if phase == "after_freeze-1-processed-C0":
+                raise RebuildError("synthetic_before_cutover")
+        self.coordinator.fault_hook = fault
+        self.assertTrue(self.execute()["restored"])
+        with closing(sqlite3.connect(self.legacy.db)) as conn:
+            conn.execute("UPDATE unknown_extension SET payload=?", (b"second exact extension state",))
+            conn.commit()
+        self.coordinator.fault_hook = lambda _: None
+        result = self.execute()
+        self.assertIn("live_check", result, result)
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        run = journal.read()
+        freezes = [journal.payloads.get(reference) for reference in run["freeze_receipts"]]
+        self.assertEqual(freezes[0]["legacy_inventory"], freezes[1]["legacy_inventory"])
+        self.assertNotEqual(freezes[0]["databases"]["knowledge"]["sha256"], freezes[1]["databases"]["knowledge"]["sha256"])
+        manifest = journal.verification(run)
+        self.assertEqual(manifest["history_freeze_receipts"], run["freeze_receipts"])
+        self.assertEqual(len(manifest["history_preservation_passes"]), 1)
+        self.assertEqual(len(manifest["history_preservation_passes"][0]["freeze_receipts"]), 2)
+        from core.semantic.rebuild_payloads import is_ref
+        self.assertTrue(all(is_ref(value) for value in manifest["history_freeze_receipts"]))
+        verified = self.coordinator.verify("test-run")
+        self.assertTrue(verified["complete"], verified)
+        self.assertEqual(verified["counts"]["legacy_database_backups"], 2)
+        Path(freezes[0]["databases"]["knowledge"]["path"]).unlink()
+        report = self.coordinator.verify("test-run")
+        self.assertFalse(report["complete"], report)
+        self.assertIn("legacy_history_database_backup_missing", {row["code"] for row in report["issues"]})
+
+    def test_source_first_plan_cannot_rebind_existing_legacy_generation(self):
+        from core.semantic.store import SemanticStore
+        from core.semantic.legacy import import_legacy
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        store = SemanticStore(plan["database"], plan["generation_id"])
+        old = import_legacy(store, self.legacy.plan())
+        with patch.object(self.coordinator, "source_factory", side_effect=AssertionError("source before policy binding")):
+            with self.assertRaisesRegex(RebuildError, "rebuild_history_policy_mismatch"):
+                self.execute()
+        with closing(store.connect()) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM capture_batches WHERE purpose='legacy_import'").fetchone()[0], len(old.batch_ids))
+            self.assertNotIn("history_policy", json.loads(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]))
+
+    def test_restore_only_preserves_unknown_jobs_and_never_advances_run(self):
+        from core.semantic.jobs import JobStore
+        from core.semantic.store import SemanticStore
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        store = SemanticStore(plan["database"], plan["generation_id"])
+        jobs = JobStore(store)
+        job = jobs.ensure("extract_page", {"synthetic": "unknown"}, {"prompt": "synthetic"})
+        jobs.claim(job["job_id"], "synthetic-worker")
+        jobs.fail(job["job_id"], "synthetic-worker", "synthetic_unknown", unknown=True)
+        before = journal_details(self.runtime_root, "test-run")
+        self.assertEqual(self.coordinator.restore_runtime("test-run")["state"], "runtime_restore_planned")
+        self.assertEqual(journal_details(self.runtime_root, "test-run"), before)
+        self.assertEqual(self.managed.events, [])
+        with patch.object(self.coordinator, "source_factory", side_effect=AssertionError("restore opened source")), \
+             patch.object(self.coordinator, "_roles", side_effect=AssertionError("restore constructed provider")):
+            self.managed.restore_ok = False
+            failed = self.coordinator.restore_runtime("test-run", apply=True, allow_runtime_changes=True)
+            self.assertFalse(failed["restored"])
+            self.managed.restore_ok = True
+            restored = self.coordinator.restore_runtime("test-run", apply=True, allow_runtime_changes=True)
+        self.assertEqual(restored["state"], "runtime_restored")
+        self.assertEqual(self.source_calls, 0)
+        run = journal_details(self.runtime_root, "test-run")
+        self.assertNotIn("final_receipt", run)
+        self.assertEqual(run["phase"], "incomplete")
+        self.assertEqual([a["restored"] for a in run["runtime"]["restore_attempts"]], [False, True])
+        self.assertEqual(jobs.ensure("extract_page", job["inputs"], job["versions"])["state"], "unknown")
+
+    def test_restore_only_rejects_changed_managed_binding_and_half_cutover(self):
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        with self.assertRaisesRegex(RebuildError, "rebuild_restore_grant_required"):
+            self.coordinator.restore_runtime("test-run", apply=True)
+        changed = {**self.managed.inspect(), "program_arguments": ["/synthetic/different"]}
+        with patch.object(self.managed, "inspect", return_value=changed):
+            with self.assertRaisesRegex(RebuildError, "rebuild_runtime_changed"):
+                self.coordinator.restore_runtime("test-run", apply=True, allow_runtime_changes=True)
+        write_json(GenerationRegistry(self.runtime_root).journal_path, {"phase": "projections", "run_id": "test-run"})
+        with self.assertRaisesRegex(RebuildError, "cutover_recovery_required"):
+            self.coordinator.restore_runtime("test-run", apply=True, allow_runtime_changes=True)
+        self.assertEqual(self.managed.events, [])
 
     def test_restore_failure_and_provisional_write_failure_stay_incomplete(self):
         self.coordinator.plan(PROFILE, run_id="test-run")
@@ -483,8 +763,56 @@ class RebuildCoordinatorTests(unittest.TestCase):
         result = self.execute()
         self.assertEqual(result["state"], "incomplete", result)
         self.assertFalse(result["restored"])
+        status = self.coordinator.status("test-run")
+        self.assertFalse(status["restored"])
+        self.assertEqual(status["restore_code"], "runtime_restore_failed")
+        self.assertEqual(status["restore_attempt_count"], 1)
         self.assertEqual(GenerationRegistry(self.runtime_root).pin().generation_id,
                          journal_details(self.runtime_root, "test-run")["plan"]["generation_id"])
+        self.managed.restore_ok = True
+        with patch.object(self.coordinator, "source_factory",
+                          side_effect=AssertionError("finalization reopened source")), \
+             patch.object(self.coordinator, "_roles",
+                          side_effect=AssertionError("finalization constructed provider")):
+            resumed = self.execute()
+        status = self.coordinator.status("test-run")
+        self.assertTrue(resumed["restored"], resumed)
+        self.assertTrue(status["restored"])
+        self.assertIsNone(status["restore_code"])
+        self.assertEqual(status["restore_attempt_count"], 2)
+        attempts = journal_details(self.runtime_root, "test-run")["runtime"]["restore_attempts"]
+        self.assertEqual([attempt["restored"] for attempt in attempts], [False, True])
+        self.assertEqual(attempts[0]["code"], "runtime_restore_failed")
+        self.assertNotIn("code", attempts[1])
+        self.assertTrue(any(entry["code"] == "runtime_restore_failed"
+                            for entry in journal_details(self.runtime_root, "test-run")["errors"]))
+
+    def test_later_restore_failure_overrides_earlier_success_in_status_history(self):
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        def first_fault(phase):
+            if phase == "after_freeze-1-processed-C0":
+                raise RebuildError("synthetic_first_interruption")
+        self.coordinator.fault_hook = first_fault
+        first = self.execute()
+        self.assertTrue(first["restored"], first)
+        first_status = self.coordinator.status("test-run")
+        self.assertTrue(first_status["restored"])
+        self.assertIsNone(first_status["restore_code"])
+        self.coordinator.fault_hook = lambda _phase: None
+        self.managed.restore_ok = False
+        with patch.object(self.coordinator, "_freeze",
+                          side_effect=RebuildError("synthetic_later_failure")):
+            second = self.execute()
+        self.assertEqual(second["code"], "synthetic_later_failure", second)
+        self.assertFalse(second["restored"])
+        status = self.coordinator.status("test-run")
+        self.assertFalse(status["restored"])
+        self.assertEqual(status["restore_code"], "runtime_restore_failed")
+        self.assertEqual(status["restore_attempt_count"], 2)
+        attempts = journal_details(self.runtime_root, "test-run")["runtime"]["restore_attempts"]
+        self.assertEqual([attempt["restored"] for attempt in attempts], [True, False])
+        self.assertNotIn("code", attempts[0])
+        self.assertEqual(attempts[1]["code"], "runtime_restore_failed")
 
     def test_interrupted_capture_prefix_is_retained_then_new_full_pass_proves_h1(self):
         from core.semantic.source import SemanticCapture
@@ -557,7 +885,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
                  "title": "来源 https://example.test/?token=private-value", "summary": "记得回看这份资料",
                  "knowledge_topic_id": 1, "resources": {"links": ["https://example.test/?token=private-value"], "files": []}}
         queue.write_text(json.dumps(first, ensure_ascii=False) + "\n")
-        self.coordinator.plan(PROFILE, run_id="test-run")
+        self.legacy_plan()
         def fault(phase):
             if phase == "after_freeze-1-processed-C0":
                 raise RebuildError("synthetic_before_cutover")
@@ -793,6 +1121,22 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.assertTrue(ok["provider_refreshed"], ok)
         moved = journal_details(self.root / "profile-clean", "clean-run")
         self.assertEqual(moved["plan"]["provider_profile"]["secret_name"], "synthetic-key-refresh")
+
+    def test_stream_transport_refresh_allowed_only_before_jobs(self):
+        self.partial_run()
+        self.config_store.update(lambda value: value.update(custom_streaming=True))
+        with self.assertRaisesRegex(RebuildError, "relocation_provider_changed"):
+            self.relocate("test-run", destination_root=str(self._destination("stream-jobs")),
+                          apply=True, allow_runtime_changes=True)
+        self.coordinator.plan(PROFILE, run_id="clean-run")
+        self.config_store.update(lambda value: value.update(custom_streaming=False))
+        ok = self.relocate("clean-run", destination_root=str(self._destination("stream-clean")),
+                           apply=True, allow_runtime_changes=True)
+        self.assertEqual(ok["state"], "relocated", ok)
+        self.assertEqual(ok["job_count"], 0)
+        self.assertTrue(ok["provider_refreshed"])
+        moved = journal_details(self.root / "stream-clean", "clean-run")
+        self.assertIs(moved["plan"]["config"]["custom_streaming"], False)
 
     def test_interrupted_transfer_retry_resumes_without_losing_authority(self):
         self.partial_run()

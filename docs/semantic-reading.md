@@ -135,16 +135,24 @@ reused for a different input or route; a running/unknown result cannot be
 resubmitted under a new ID. A known validation failure can be retried explicitly
 with a fresh request. Calling the pure `plan` helper without a ledger is intended
 for isolated rendering tests, not runtime publication.
-Current Body artifact versions are `body-plan-v6` and `body-paged-v6`; these bind
-the composed prose/source distinction, incremental writing and program-owned metadata rather than
-reusing earlier prompts. The paged aggregate key carries the same version, so a revised prompt
-never resumes a paged plan produced by an earlier one.
+Current Body artifacts are `body-plan-v9` and `body-paged-v9`. They ask for one
+coherent reader-first note with grounded attribution, preserve each retained
+unit's unique home, and carry the program-owned metadata and exact explicit
+verbatim, step and counterevidence obligations from the canonical snapshot.
+The prompt enumerates every required unit index: overlapping units may share
+one prose block, but each still needs exactly one content home. Missing or
+duplicated indices fail validation; the program never assigns a missing home
+by guessing from similar text.
+The paged aggregate key carries the same version, so a revised prompt never
+resumes a paged plan produced by an earlier one. Accepted v2-v8 artifacts remain
+historical evidence under their original contracts; these prompt instructions
+are generation guidance, not proof of editorial acceptance or owner review.
 Before dispatch, the writer also checks unresolved page/fragment descendants of
 the stable request ID across Body versions. A new prompt or context budget
 cannot bypass an earlier unknown outcome by choosing a different partition.
-The independent rebuild verifier also recognizes retained accepted v2/v3/v4/v5 Body
-artifacts, whose attribution and evidence contracts remain valid; this prompt
-revision does not authorize rewriting accepted historical output.
+The current verifier accepts both v9 forms and the retained v2-v8 artifacts.
+Its allowlist must remain in lockstep with the writer; this prose does not
+authorize rewriting accepted historical output or weakening the verifier.
 
 `BodyPlanWriter(..., max_input_bytes=80000)` keeps small Items in one coherent
 writing call. Larger inputs use bounded pages of consecutive units and existing

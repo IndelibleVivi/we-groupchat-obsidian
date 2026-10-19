@@ -18,6 +18,8 @@ flowchart TD
     CONTROL --> BRIEF
     CAPTURE -. 来源不完整时停止 .-> STOP[保留进度，修复后继续]
     MODEL -. 失败或结果未知时停止 .-> STOP
+    INPUT -. 旧摘要、旧页、队列和资料 .-> HISTORY[独立历史保全]
+    HISTORY -. 不建立新 Item 或模型任务 .-> LEGACY_OUT[Legacy/ 可读历史]
 ```
 
 **正文是你真正要读的成果。** 同一件事可以跨天、跨群补充和更正，WGO 将证据接到
@@ -26,6 +28,13 @@ flowchart TD
 引用；不要求每页套同一个模板。实现入口是
 [`SemanticEngine`](../../core/semantic/engine.py) 与
 [`BodyPlanWriter`](../../core/semantic/projections.py)。
+
+**旧知识与原始消息走不同的 lane。** 新 plan 的 `source-first-v1` 只让 selected
+WeChat raw snapshots 进入 capture/extraction/resolution。旧 topic/event 摘要、原页、
+Review Queue、selection 和 resource envelope 作为 immutable history passes 保全，
+在 `Legacy/History/<manifest_id>/` 与 `Legacy/Index.md` 中可读；它们不产生新 Item，
+也不满足 semantic processing。只有没有 policy 字段的旧 plan 才走原来的
+`legacy-semantic-v1` import compatibility path。
 
 **`View` 是主题目录页。** 比如一个 Item 同时与「申请材料」和「签证」有关，两处
 目录都可以链接到它的正文或具体段落。正文仍只有一个维护位置。View 在 Obsidian 的
@@ -38,8 +47,8 @@ flowchart TD
 
 ## 全量洗笔记与以后更新
 
-首次重建先冻结范围、停止精确的受管理 app 并备份，再完整观察来源、处理旧知识与
-聊天历史、生成正文和索引。第二次独立来源观察和 conservation 校验通过后，才切换
+首次重建先冻结范围、停止精确的受管理 app 并备份，再完整观察来源、逐 pass 保全旧历史、
+处理原始聊天、生成正文和索引。第二次独立来源观察和 conservation 校验通过后，才切换
 active generation、恢复 app，并验证真实增量接续。抓到原始消息只是中间步骤；
 模型任务、正文生成和激活各有自己的完成证据。
 
@@ -114,7 +123,7 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 | `READING` | `projections/controls/briefing/delivery/reader_runtime` | `LEDGER` `BODY_PLAN` `BODY_PAGE` `PUB` `CONTROLS` `BRIEF_ACCEPT` `BRIEF_FILE` `DELIV` `READER_RT` `INBOX` `WGO` | `reader_*` durable 消费状态；Markdown 投影；交付 receipt |
 | `RES` | `resource_capture` / `resource_backup` / Drive | `RES_CAP` `RES_DB` `RES_BACK` `CAS` `MOUNTED` `OBSIDX` `DRIVE` `DRIVE_DB` `REMOTE` `EXT` `LINKS` | occurrence 身份、CAS v3 snapshot、独立投影状态、link 惰性面 |
 | `REBUILD` | `RebuildCoordinator` / `GenerationRegistry` | `COORD` `MANAGED` `JOURNAL` `PIN` `CUT` `VERIF` `COORD_V3`…`COORD_LIVE` `COORD_ROLLBACK` `RELOC` | 冻结计划、切换 journal、active pin、独立 verifier、分步切换/回滚 |
-| `LEGACY` | legacy topic/event、`semantic/legacy.py` | `LEG_PATH` `LEG_IMPORT` `LEG_NAV` `LEG_BLOCK` `LEG_DB` | 未 pin 前的真实兼容路径；旧 DB 只读、不改写 |
+| `LEGACY` | legacy topic/event、`semantic/legacy.py` | `LEG_PATH` `LEG_INVENTORY` `HISTORY_STORE` `HISTORY_PUB` `LEG_NAV` `LEG_BLOCK` `LEG_DB` | 未 pin 前的真实兼容路径；source-first 旧历史只读保全；旧 DB 不改写 |
 | `PLATFORM` | `core/platform`、`ConfigStore` | `CONFIG` `PLAT` `WIN` `ROOT_ERR` | 主配置唯一写入者；lock/path/private storage/secrets；runtime root 失败关闭 |
 | `INVAR` | 跨 region 约束 | `INV_*` | 只读来源、index 不决定 merge、身份不可推断、字节同意、不 ACK 等 |
 
@@ -171,10 +180,16 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
    upload；`REMOTE` 未知不升级为 verified。`EXT`（`(X)`）在 repo 外复用 transport；
    `LINKS`（`(O)`）已惰性化；`INV_BYTES` 保证 source-readable 不等于附件字节同意。
 10. **迁移与切换**：`COORD` 冻结计划、经 `MANAGED` 停精确 app + `AppInstanceLock`，
-    做 Online Backup 与 C0/C1 完整来源观测、固定投影发布、`verify` 与 legacy
-    conservation。切换顺序拆成显式小节点：`COORD_V3`（install_v3 CAS）→
+    做 Online Backup 与 C0/C1 完整来源观测、固定投影发布与 `verify`。新 plan 的
+    `HISTORY_PASS` 对每个 retained freeze 走 `LEG_INVENTORY`，写
+    `HISTORY_STORE` 的 immutable pass/file/backup receipts，再由 `HISTORY_PUB`
+    发布 `LEG_NAV`；旧历史不进入 semantic `STORE`、Item 或 job。无 policy 的旧
+    plan 才经 `LEGACY_SEM_IMPORT` 使用原 `capture_batch` compatibility path。
+    `VERIF` 按 pass 读取 history payload 和实际导航/备份，同时独立检查原始
+    source conservation。切换顺序拆成显式小节点：`COORD_V3`（install_v3 CAS）→
     `COORD_PIN`（active manifest）→ `COORD_PROV`（durable provisional receipt）→
-    `COORD_RELEASE`（释放锁）→ `COORD_RESTORE_APP`（exact restore）→ `COORD_LIVE`
+    `COORD_RELEASE`（释放锁）→ `COORD_RESTORE_APP`（exact restore，最新
+    `restore_attempts` 决定观察结果）→ `COORD_LIVE`
     （真实 applied/processing receipt 的 live 验收）。`COORD_ROLLBACK` 经
     `restore_checkpoint` revision CAS，保留新 captures/reading/delivery 证据；
     `CUT` 半切换启动 fail closed；`VERIF` 独立 conservation；`RELOC`（`(cand)`）
@@ -196,7 +211,7 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 | `APP` / UI 队列 / 合并刷新 | node | `app.py :: WeGroupchatObsidianApp.__init__`、`_process_main_queue`、`_chat_menu_source_pending` |
 | `T_*` timer | node | `app.py :: _configure_monitor_timer`、`_configure_semantic_reader_timer`、`_configure_source_guard_timer`、`_configure_resource_backup_timer`、`_configure_drive_sync_timer`、`_configure_daily_digest_timer` |
 | `MCP` / `MCP_SEND` | node | `mcp_server.py :: get_status`、`summarize_chat`、`_MCP_SEND_RETIRED_RESPONSE` |
-| `CLI_REBUILD` / `CLI_HEALTH` / `CLI_SOURCE` | node | `scripts/rebuild_knowledge.py :: main`；`scripts/health_check.py :: main`（`--semantic-json`）；`--allow-transient-wechat-source-read` |
+| `CLI_REBUILD` / `CLI_HEALTH` / `CLI_SOURCE` | node | `scripts/rebuild_knowledge.py :: main/status/restore-runtime`；`scripts/health_check.py :: main`（`--semantic-json`）；`--allow-transient-wechat-source-read` |
 | `WECHATDB` | node | `core/wechat_db.py :: WeChatDB.for_runtime` |
 | `SRC_INV` | node | `core/source_inventory.py :: SourceInventoryStore.inspect`、`reconcile` |
 | `ADAPTER` | node | `core/source_adapter.py :: read_source_page`、`decode_cursor_token`、`bind_source_inventory` |
@@ -229,12 +244,13 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 | `RES_BACK` / `CAS` / `MOUNTED` / `OBSIDX` | node | `core/resource_backup.py :: MountedResourceBackup.run/_run_owned/_run_locked/status` |
 | `DRIVE` / `DRIVE_DB` / `REMOTE` | node | `core/google_drive_file_sync.py :: GoogleDriveFileSync.scan/run/status`；`core/google_drive_auth.py :: GoogleDriveOAuth`、`ProtectedRefreshTokenStore`；`drive_scan_shards` 队列与 cursor token 见 `docs/WINDOWS-PORT-MAP.md` |
 | `LINKS` / `DISABLED_LINK_PREVIEW` | node | `core/link_preview.py :: fetch_link_preview`、`LINK_PREVIEW_STATE` |
-| `COORD` / `MANAGED` / `JOURNAL` | node | `core/semantic/rebuild.py :: RebuildCoordinator.plan/execute/resume/verify/rollback`、`ManagedRuntime.stop_and_lock/restore`、`RebuildJournal`、`core/semantic/rebuild_payloads.py` |
+| `COORD` / `MANAGED` / `JOURNAL` | node | `core/semantic/rebuild.py :: RebuildCoordinator.plan/execute/resume/status/restore_runtime/verify/rollback`、`_preserve_history`、`_job_state_summary`、`_restore_runtime`、`ManagedRuntime.stop_and_lock/restore`、`RebuildJournal`、`core/semantic/rebuild_payloads.py` |
 | `PIN` / `CUT` | node | `core/semantic/rebuild.py :: GenerationRegistry.pin`、`GenerationPin`、`RebuildJournal.begin_cutover/activate_pointer/finalize` |
 | `VERIF` | node | `core/semantic/verification.py :: RebuildVerifier.verify` |
 | `COORD_V3`…`COORD_LIVE` / `COORD_ROLLBACK` | node | `core/semantic/rebuild.py :: RebuildCoordinator._finish_cutover/_live_check/_finish_rollback_restore/_rollback_checkpoints`；`core/monitor_state.py :: install_v3/restore_checkpoint` |
 | `RELOC` | node | `core/semantic/rebuild.py :: RebuildCoordinator.relocate/_relocation_*` |
-| `LEG_IMPORT` / `LEG_NAV` / `LEG_BLOCK` | node | `core/semantic/legacy.py :: plan_legacy/import_legacy/derive_topic_item_map/record_legacy_resolution/record_legacy_backups/build_publication_plan/publish_legacy_navigation`；`core/semantic/runtime.py :: legacy_command_blocked` |
+| `HISTORY_PASS` / `LEG_INVENTORY` / `HISTORY_STORE` / `HISTORY_PUB` / `LEG_NAV` | node | `core/semantic/rebuild.py :: _preserve_history`；`core/semantic/legacy.py :: plan_legacy/preserve_legacy_history/record_legacy_backups/build_history_publication_plan/publish_legacy_navigation`；`core/semantic/verification.py :: _verify_history` |
+| `LEGACY_SEM_IMPORT` / `LEG_BLOCK` | node | `core/semantic/legacy.py :: import_legacy/derive_topic_item_map/record_legacy_resolution/build_publication_plan`（仅 `legacy-semantic-v1`）；`core/semantic/runtime.py :: legacy_command_blocked` |
 | `CONFIG` / `PLAT` / `WIN` | node | `core/config.py :: ConfigStore.update/inspect`；`core/platform/*`；`docs/WINDOWS-PORT-MAP.md` |
 | `ROOT_ERR` | node | `core/semantic/rebuild.py :: GenerationRegistry.pin`（`semantic_runtime_root_unavailable`）；`core/semantic/runtime.py :: SemanticRuntime.active`、`legacy_command_blocked`；`core/semantic/health.py :: semantic_health` |
 | 边 `SEM_CAP --> STORE` | edge | `core/semantic/store.py :: capture_batch` |
@@ -242,7 +258,7 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 | 边 `SCHED -.-> MS_CAP` | edge | `core/semantic/runtime.py :: check_monitor`（captured 先行） |
 | 边 `STORE --> BODY_PLAN/BRIEF_ACCEPT/WATCH` | edge | `core/semantic/projections.py :: CanonicalReadingAdapter.snapshot`；`core/semantic/briefing.py :: BriefingService.build`；`core/semantic/watches.py :: WatchService.evaluate` |
 | 边 `RES_DB --> RES_BACK --> CAS` | edge | `core/resource_backup.py :: MountedResourceBackup._run_owned/_run_locked` |
-| 边 `LEG_IMPORT --> LEG_NAV` | edge | `core/semantic/legacy.py :: build_publication_plan`、`publish_legacy_navigation` |
+| 边 `HISTORY_PASS --> HISTORY_PUB --> LEG_NAV` | edge | `core/semantic/rebuild.py :: _preserve_history`；`core/semantic/legacy.py :: build_history_publication_plan`、`publish_legacy_navigation` |
 | 边 `PUB --> CONTROLS`（冲突） | edge | `core/semantic/projections.py :: publish_document`、`resolve_proposal` |
 | 不变式 `INV_*` | inv | `core/semantic/runtime.py`、`core/semantic/store.py`、`core/source_inventory.py`、`core/url_safety.py :: redact_urls_in_text/redact_urls_with_offsets/sensitive_url_key` |
 
@@ -286,14 +302,16 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 ## 验证与渲染复现
 
 **结构校验**（quote-aware，一次性 `python3 -c`，未落库、未加依赖）：14 个 subgraph
-全部闭合、116 个节点、191 条边行、无重复节点定义、无悬空引用、所有
+全部闭合、120 个节点、198 条边行、无重复节点定义、无悬空引用、所有
 `class`/`classDef` 名称有效、node label 引号与括号平衡。这是结构校验，不等于
 Mermaid parser 通过。
 
-**实际渲染**：Mermaid renderer 已成功生成 [完整 SVG](../assets/architecture/semantic-implementation.zh-CN.svg)，
-并以原始缩放的分块截图检查文字和边。图源含 `accTitle` / `accDescr`；SVG 与
-`.mmd` 是同一个技术模型。自动布局的完整画布约 18,900 × 6,700，适合放大阅读，
-不宜作为窄栏缩略图。源存在与真实 activation 仍是不同事实。
+**实际渲染**：已用 Mermaid 12.2.0 与独立 Playwright Chromium headless shell
+重新生成[完整 SVG](../assets/architecture/semantic-implementation.zh-CN.svg)。
+已检查全图与放大的 legacy/history、rebuild/cutover 区域：source-first 保全分支、
+无 policy 的兼容分支、独立验证与恢复步骤均进入导出，标签没有截断或节点重叠。
+图源含 `accTitle` / `accDescr`；编辑以 `.mmd` 为准。完整画布约 10,266 × 13,398，
+适合放大阅读，不宜作为窄栏缩略图。源存在与真实 activation 仍是不同事实。
 
 使用已安装的 Mermaid CLI 重新生成（不要求 app runtime 安装 Mermaid）：
 

@@ -8,6 +8,16 @@ separate operator action. Every inventory and staged manifest is **private**:
 it may contain exact historical messages, URLs, paths and full personal notes.
 Public status contains bounded error codes and counts only.
 
+New rebuild plans freeze `history_policy="source-first-v1"` in the plan,
+generation metadata and verification manifest. Semantic knowledge is rebuilt
+from raw captured source messages. Old summaries, page layout, Review Queue and
+database metadata are conserved history: they do not create core captures,
+Items, model jobs or semantic-completion obligations. A plan with no policy
+field retains `legacy-semantic-v1`, including its original plan fingerprint,
+capture identities and model obligations. Resume never rewrites an existing
+plan to select the new policy. A populated legacy generation cannot acquire
+the new policy; unknown provider outcomes remain unknown.
+
 ## Inventory and capture
 
 `core/semantic/legacy.py` exposes:
@@ -20,13 +30,21 @@ private_dict = inventory.to_dict()
 inventory = LegacyInventory.from_dict(private_dict)
 for bounded_rows in iter_legacy_inputs(inventory, batch_size=100):
     ...
-result = import_legacy(store, inventory, generation_id=store.generation_id)
+# The coordinator has already explicitly bound the generation's source-first policy.
+receipt = preserve_legacy_history(store, inventory, generation_id=store.generation_id)
 record_legacy_backups(store, inventory, absolute_backup_paths)
-topic_item_map = derive_topic_item_map(store, inventory)
-# item_paths map canonical Item IDs to publisher-relative paths, e.g. Items/...
-publication = record_legacy_resolution(store, inventory, topic_item_map, item_paths)
+publication = build_history_publication_plan(inventory)
 result = publish_legacy_navigation(store, inventory, publication, publisher)
 ```
+
+`preserve_legacy_history` writes immutable `legacy_mappings` receipts for every
+`(legacy_ref, manifest_id)` with the exact complete input row, original bytes
+where applicable, provenance and resource envelope. A distinct `history_pass`
+receipt binds the complete inventory. File, selection and external-file evidence
+remain bound to that pass; whole-page backup acknowledgment uses the existing
+annotation owner plus immutable per-pass backup receipts. No schema migration
+is needed. Changing or dropping an earlier pass cannot be hidden by conserving
+only the newest freeze.
 
 All three input locations must be explicit. `managed_root` is the old vault
 root; `managed_subdir` scopes recursive discovery. Only database-recorded topic
@@ -49,10 +67,15 @@ raw evidence have `derived_summary`; a full preserved Markdown page has
 `manual_annotation`. `raw` requires an explicitly stored `raw_text` and an
 exact `source_message_id`. An old batch ID or message hash cannot substitute
 for an occurrence ID. Absent IDs receive stable opaque legacy references.
-Repeated exact occurrence IDs share one source identity; A→B→A is captured in
+In the legacy-semantic compatibility import, repeated exact occurrence IDs share
+one source identity; A→B→A is captured in
 order as three transitions, while repetition of the current payload adopts its
 current version. The complete old row remains separate mapping evidence, so an
-old row ID cannot manufacture a new independent witness.
+old row ID cannot manufacture a new independent witness. On the source-first
+path these provenance grades describe conserved history and create no source
+witness in the rebuilt semantic knowledge. In particular, `manual_annotation`
+on an old whole page means `unknown_preserve_entire_page`; it does not certify
+that the page contains only user-authored material.
 
 Owned pages retain **all original bytes**, including CRLF, aliases, unknown
 frontmatter and prose outside generated regions. Legacy pages have no trusted
@@ -62,7 +85,7 @@ root escape, nonregular files, mutation during a file read and configured file
 size limits fail closed. Missing pages stay explicit; loss of a page never
 retracts a source fact.
 
-`import_legacy` writes through the canonical `SemanticStore.capture_batch` and
+For an existing `legacy-semantic-v1` plan only, `import_legacy` writes through the canonical `SemanticStore.capture_batch` and
 the store transaction API. `legacy_mappings` retains exact row-to-source-version
 lineage, file inventory and the prior selection/alias snapshot.
 `annotation_preservation` starts at `captured_pending_backup`; source capture
@@ -78,7 +101,16 @@ canonical legacy source mapping. The whole file needs a verified backup; the
 separate redacted `Legacy/Review Queue.md` is history, not a fabricated action
 against the new reader controls. It does not reactivate delivery.
 
-Before-cutover resume uses a fresh frozen inventory. The importer durably records
+Before-cutover resume uses a fresh frozen inventory. Source-first preservation
+consumes every retained freeze in order, including a freeze left by a failure
+before source construction. Each distinct inventory gets immutable receipts,
+verified recovery copies and separate navigation; an identical inventory adopts
+its original exact backup. Earlier versions of pages and queue append logs remain
+verifiable after the current files change. Only the final frozen inventory must
+still match the current originals during acceptance. Recovery-copy publication
+for an earlier freeze never overwrites the current original page.
+
+For the legacy-semantic policy, the importer durably records
 the exact changed-row set before capture, adopts unchanged source mappings and
 reuses accepted work. It does not replay old A→B→A transitions as new changes
 when only a note or queue row changed. `allow_preserved_refresh=True` admits a
@@ -86,14 +118,32 @@ new page baseline only after verifying the earlier original backup; prior bytes
 remain in annotation history. A backup alone is not an import of intervening
 canonical or reader history. [The rebuild coordinator](semantic-rebuild.md)
 owns freezing, import, source passes and activation.
-Known attachment, URL and file references use the canonical capture
-`resources` envelope. Their exact metadata survives with `pending` byte status;
+Known attachment, URL and file references use the canonical `resources`
+envelope, in history receipts for source-first preservation and in source
+captures for legacy-semantic compatibility. Their exact metadata survives with `pending` byte status;
 no old path is promoted to an available attachment. The store associates a
 reference with an Observation/Item only through cited source evidence.
 Attachment/worker/digest metadata keeps empty text and its exact private payload;
 it is not converted into message prose or an invented Observation.
 
 ## Mapping and publication
+
+`build_history_publication_plan(inventory)` produces the distinct
+`we-groupchat-obsidian.legacy-history-publication.v1` contract. It contains no
+`topic_item_map` or `item_paths`. Every old topic gets a readable, redacted history
+entry, including topics with no page or an explicitly missing page. Entries label
+raw, excerpt and derived-summary provenance and retain resource references with
+unverified attachment-byte status. The whole original page remains its own
+history home; its navigation records exact anchor, reference and alias mappings.
+
+Each inventory publishes a separate `Legacy/History/<manifest_id>/Index.md`
+with topic, other-record, page and Review Queue entries. `Legacy/Index.md` links
+every preserved pass. Original page paths and anchors remain unchanged, while
+exact recovery bytes are published through the existing private
+`.wgo/legacy-history/*.bin` owner. Publication still requires verified coordinator
+backups, the same canonical database/generation and actual reading-publisher
+receipts. A conflict remains `projection_pending`; history preservation never
+manufactures a model disposition or a successful projection receipt.
 
 `build_publication_plan(inventory, topic_item_map, item_paths)` accepts only
 explicit legacy topic reference IDs and canonical Item IDs/paths. Titles never
@@ -102,7 +152,8 @@ produce a hub, and an unmapped topic stays pending. A historical page with no
 topic binding stays history. An explicit empty Item list requires terminal
 non-observed source dispositions for the entire topic family; omission means
 unresolved. `derive_topic_item_map` obtains active Items through canonical
-Observation/span/source-version joins and never compares titles. Every old heading/block anchor keeps its original
+Observation/span/source-version joins and never compares titles. These mapping
+functions remain solely for evidenced `legacy-semantic-v1` plans. Every old heading/block anchor keeps its original
 history home and the complete outgoing-reference inventory survives.
 
 The plan writes nothing. It requires a verified backup and preserves the full
@@ -126,8 +177,9 @@ to that original vault path and to `WGO/` Item paths. Navigation uses
 `ProjectionPublisher.publish_document`, so an unknown file at the target path
 becomes a preserved conflict proposal instead of being overwritten. Replay
 adopts identical copies and existing managed navigation. The result reports
-`published`, `semantic_pending` or `projection_pending`, plus actual projection
-receipts and history-copy identities. This does not activate a generation.
+`published` or `projection_pending`, plus actual projection receipts and
+history-copy identities. Only the legacy-semantic mapping path can additionally
+report `semantic_pending`. This does not activate a generation.
 
 ## Independent verifier input
 
@@ -140,6 +192,36 @@ the per-chat closed cutoff `h1` (`source_namespace`, `chat_id`,
 `inventory_digest`, `inventory_revision`, `cursors`),
 `embedding_profile_id` and `index_generation_id`. Optional `legacy_inventory`
 and `publication_plan` carry the private conservation inputs above.
+
+For source-first rebuilds, `history_policy` must agree with generation metadata.
+`history_preservation_passes` declares every unique preserved inventory as
+`receipt_id`, exact `legacy_inventory` and its `publication_plan`; the final
+entry also binds the top-level final inventory/publication. Each pass also
+declares its exact `freeze_receipts`; the top-level
+`history_freeze_receipts` must cover that set once each. Every freeze carries a
+distinct whole-database Online Backup receipt with path, digest, identity and
+legacy-input binding. Equal inventory rows from separate freezes remain separate
+evidence; a missing earlier database copy cannot be replaced by the final
+schema or by an unbound sidecar. Coordinator journals keep the inventories and
+publication plans as existing run-bound immutable payload references. The
+verifier receives the explicit
+`history_payload_loader=journal.payloads.get` and decodes one pass at a time;
+routine journal reads and phase transitions do not expand the historical corpus.
+A standalone synthetic caller can instead supply exact expanded inventories.
+No implicit path discovery or payload initialization occurs in verification.
+
+The verifier independently compares every row and resource envelope, per-pass
+file/selection evidence, whole-DB freeze backup, exact recovery copy,
+original-page annotation history, private history object, published document
+body and actual publisher receipt.
+It checks the current originals against the final freeze and keeps earlier
+backups and navigation independently accountable. Dropping an earlier pass,
+tampering with its backup or omitting its published page fails acceptance.
+Source-first generations cannot contain `legacy_import` batches or semantic
+legacy source-version mappings. An empty old topic map cannot substitute for
+the distinct history-publication contract. Real raw capture membership,
+extraction, resolver/processing receipts, index completeness, Body artifacts and
+Brief acceptance keep all their existing checks.
 
 When the rebuild intentionally makes several complete source traversals,
 `capture_passes` contains their full immutable snapshot receipts: unique
@@ -154,9 +236,10 @@ own valid semantic dispositions. An undeclared cursor reset remains a failure.
 `complete: false` and every durable batch receipt from that prefix. Such a
 prefix starts from zero, has continuous cursors and unchanged inventory, but
 cannot supply final H1. A later complete full pass is required. The verifier
-still checks all retained members and processing evidence. Each frozen legacy
-import has its own declared `legacy_capture_passes` entry containing its exact
-batch IDs; it cannot authorize a reset in a live source stream.
+still checks all retained members and processing evidence. For the
+legacy-semantic policy, each frozen legacy import has its own declared
+`legacy_capture_passes` entry containing its exact batch IDs; it cannot authorize
+a reset in a live source stream. Source-first history has no such capture pass.
 
 Verification distinguishes invalid/missing evidence, source work remaining,
 semantic work remaining, dense-index work remaining, and projection work
@@ -207,8 +290,8 @@ hashes bind the complete canonical attribution array, and v2 compaction page
 coverage includes its non-null strings. Writer/selection/compaction versions
 must match that input contract. The previous Brief v2 contract is checked as
 its exact historical shape, never treated as attribution-aware input.
-Full rebuild also requires an accepted Body artifact (`body-plan-v6` or
-`body-paged-v6`; retained v2/v3/v4/v5 artifacts remain supported)
+Full rebuild also requires an accepted Body artifact (`body-plan-v9` or
+`body-paged-v9`; retained v2/v3/v4/v5/v6/v7/v8 artifacts remain supported)
 for each current Item body. An unchanged body can reuse an earlier accepted
 revision under the same generation/provider route only when its blocks and
 unit fingerprints are identical. Missing, unknown or conflicting versions

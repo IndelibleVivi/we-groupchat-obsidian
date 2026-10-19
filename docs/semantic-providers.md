@@ -18,12 +18,30 @@ prompt, endpoint or credentials.
 The lower-level usage store raises `ProviderUsageError(code)`; Cloudflare
 adapters translate it to `ProviderError` without adding sensitive details.
 
-At Command Code's exact `https://api.commandcode.ai/provider/v1` endpoint,
-an explicit `thinking=False` with the DeepSeek thinking dialect also sends the
-gateway's `reasoning_effort="off"`; the output-token ceiling is unchanged.
-Semantic role composition enables JSON-object response mode at that endpoint.
-Ordinary prose summaries retain their normal response format. Other endpoints
-keep their explicitly selected dialect; this is no provider discovery or fallback.
+Two exact endpoints receive a gateway-specific explicit-off value when the
+caller sets `thinking=False` with the DeepSeek thinking dialect:
+`https://api.commandcode.ai/provider/v1` sends `reasoning_effort="off"`, and
+`https://amr-link.open-design.ai/v1` sends `reasoning_effort="none"`. The
+output-token ceiling is unchanged. Semantic role composition also enables
+`response_format={"type":"json_object"}` at these two endpoints so every
+semantic role receives JSON-object mode. Ordinary prose summaries retain their
+normal response format. The match is exact after a trailing slash is removed:
+other endpoints, paths and lookalike hosts keep their explicitly selected
+dialect, with no discovery, fallback or inferred gateway behavior.
+
+Custom OpenAI-compatible text calls may explicitly set config
+`custom_streaming: true` (strict boolean), which `ai.factory.create_provider`
+passes to `OpenAIProvider(..., streaming=True)`. The SDK receives the same
+model, token cap, thinking dialect and response-format arguments plus
+`stream=True`. The adapter collects content deltas and closes the response;
+only `finish_reason="stop"` permits a complete result. `length` is a known
+truncated output; an interrupted, malformed or otherwise unfinished stream
+returns no partial result. Semantic jobs retain their existing unknown-outcome
+handling and the SDK makes no automatic retries. Streaming does not prove
+that a gateway honors the selected model or removes every gateway timeout.
+The key is absent from defaults, so inspecting older configs does not change
+frozen fingerprints. Changing it is a material provider binding change;
+relocation can adopt it only for a generation with zero jobs.
 
 `ai.semantic_provider` exports:
 
