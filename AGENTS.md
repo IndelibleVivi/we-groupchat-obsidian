@@ -187,6 +187,16 @@
   context evidence or typed claim lineage remain valid. Invalid units reach
   the known-output correction loop before artifact acceptance, without silent
   trimming. Unknown parent or child outcomes block before provider dispatch.
+  Resolver proposals retain their `semantic-proposal-v1` first prompt and
+  `<job_id>:text` request. A complete bound-route response rejected by the
+  model-output validator may receive at most two deterministic corrections in
+  the same claim/worker/attempt. Feedback binds the exact frozen state, error
+  code and full required-key contract, including action `type`/`action_key`
+  and CREATE's `item_id`; never synthesize fields or trim actions. Provider,
+  route, unknown and non-model failures cannot enter correction. Unknown
+  correction outcomes block the original job; accepted artifacts replay without
+  calls. Existing failed/pending jobs retain inputs, versions and recorded
+  attempts under normal JobStore rules; this path adds no reset or new ledger.
   Units preserve concrete knowledge and scenes; pure communication actions
   without identifiable content may receive reasoned `context_only`, never a
   mechanical length, keyword or message-type filter. Source evidence and

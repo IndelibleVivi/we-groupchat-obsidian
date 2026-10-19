@@ -105,6 +105,12 @@ terminal primary fragments and admits content units only with pending core
 support. Context evidence and legitimate claim lineage remain available. Known
 invalid output uses the bounded correction loop; unknown parent or child work
 blocks before dispatch.
+Resolver proposals also admit two corrections after a complete, bound-route
+response fails model-output validation. They retain the original first prompt,
+request, frozen state and claim, and do not synthesize missing fields. Provider,
+route and unknown failures stop; accepted proposals replay without calls.
+This is candidate recovery support, not evidence of real note quality or a
+completed migration. See [semantic-engine.md](semantic-engine.md) for limits.
 New extraction pages include the preceding bounded page as ordered non-core
 context instead of only its last two messages. Existing page jobs keep their
 frozen inputs and outcomes; this change does not silently re-extract old work.

@@ -69,12 +69,15 @@ cannot manufacture a later recovery test.
 New extraction jobs bind these fields under
 `semantic-extraction-v2-attribution`; bounded pages use
 `semantic-extraction-pages-v2-attribution`. Fresh page and coverage jobs also
-bind `unit_policy="retained-knowledge-v4"`. Earlier `retained-knowledge-v1` and
-`retained-knowledge-v2` / `retained-knowledge-v3` pages are frozen candidate variants: their exact input,
+bind `unit_policy="retained-knowledge-v5"`. Earlier None/v1/v2/v3/v4 unit
+policies are frozen candidate variants: their exact input,
 version and accepted/unknown outcome survive resume without being reinterpreted.
-The v4 units describe retained knowledge and complete scenes, not a provenance
+The v5 units describe retained knowledge and complete scenes, not a provenance
 audit or message directory. Source evidence, resources and exact source spans
 remain separately preserved; a display name never supplies gender or identity.
+Pure communication actions or isolated invitations without identifiable content
+may receive reasoned `context_only`; length, keywords and message type do not
+mechanically decide which daily experiences, stories or meaningful words survive.
 URL slugs and filenames establish a reference, not an unseen page title, author
 or conclusion. Expected and erroneous values are not competing reports unless
 they actually assert contrary facts in the same scope.
@@ -116,7 +119,9 @@ artifacts remain unchanged when their parent applies this metadata disposition.
 
 Before an unaccepted parent aggregates, every member still `unclassified` gets
 at most one bounded adjacent-context coverage re-read (`extract_coverage`, phase
-`bounded-adjacent-context-v2`). Only pending members are core. Up to four
+`bounded-adjacent-context-v2`). Fresh jobs bind `planning="pending-fragments-v1"`
+and exact `pending_span_ids`; terminal classified fragments and already-cited
+spans do not reenter core because another fragment of their source is pending. Up to four
 neighbouring messages from the same frozen batch supply their original first
 span as non-core context, with an 8,000-character total limit. Context can be
 cited alongside a pending core member, using its exact source/span pair; it
@@ -124,15 +129,20 @@ cannot support a new Observation alone. No context text is reassigned to a core
 source. The coverage pass reuses the shared page generation
 and known-output correction path, binds exact source/span/context inputs, reuses
 accepted page artifacts byte-for-byte and never reopens the protected WeChat source. It
-contributes a new Observation only when that Observation cites a pending core
-member, and it replaces a pending disposition only when every still-unclassified
+contributes retained content only when each unit cites that page's pending core
+spans. A core reference only on the Observation cannot ground units supported
+entirely by old context. Joint core/context units, richer non-core evidence and
+separately grounded typed claim lineage remain valid. It replaces a pending
+disposition only when every still-unclassified
 fragment of that member reaches a terminal state. A still-unclassified or unknown
 coverage result keeps the member unread with no processing ACK; a distinct
 coverage job is never re-sent under a new prompt, and no uniform `noise` or
 forced `context_only` disposition may bypass the gap. An already accepted parent
 keeps its exact artifact and receipt. An unknown coverage job blocks even a
-prompt-version upgrade; an accepted older coverage artifact in an unfinished
-parent requires explicit reconciliation rather than a new parallel interpretation.
+prompt-version upgrade. Frozen None/v1-v4 unit-policy children using the same
+coverage prompt retain their exact scope and artifacts. An accepted artifact
+from a different historical coverage prompt version still requires explicit
+reconciliation rather than a new parallel interpretation.
 
 Relations describe evidence (`replay_same_source`, `same_material`, `restates`,
 `independent_support`, `refines_scope`, `changes_over_time`, `disputes`,
@@ -196,6 +206,32 @@ canonical acceptance or ACK. Waiting for configured
 rate capacity renews the owned job lease without holding a database transaction.
 The role defaults, explicit rate ceilings and process scope are documented in
 [semantic-providers.md](semantic-providers.md#bounded-provider-admission).
+
+Resolver `propose` jobs retain the exact `semantic-proposal-v1` initial prompt,
+frozen state and original `<job_id>:text` request ID. After a complete response
+matches the job's bound text route, a model-output validation failure may receive
+at most two corrections inside the same claim, worker and durable attempt
+(three text calls total). Follow-up IDs are `<job_id>:text:correction-1` and
+`<job_id>:text:correction-2`. Their
+`semantic-proposal-known-output-correction-v1` feedback carries the error code,
+rejected JSON as untrusted data and the complete required-key contract: root,
+novelty, every action including shared `type`/`action_key`, CREATE's `item_id`,
+CREATE-shaped split outputs and claim relations. Every follow-up retains the
+exact frozen state; the program does not fill fields, trim actions or relax
+validation. The original first prompt remains unchanged for frozen identity.
+
+Only received model-output failures enter proposal correction. Provider errors,
+unknown outcomes, wrong routes, empty/non-text responses and program-owned
+read-set or other non-model failures stop the claim. A correction call with an
+unknown outcome makes the original job unknown and blocks resume without another
+call; no repair child, new proposal version or second ledger is created. Three
+known-invalid responses leave one failed attempt without an accepted proposal
+or canonical action commit. Existing pending/failed v1 jobs keep their original
+inputs, versions and identity when the existing JobStore claim rules permit a
+normal invocation; earlier failed attempts remain recorded, and an old error
+code alone does not authorize correction. No row is reset. Accepted artifacts
+continue to replay without provider calls or renewed validation. Decision,
+read-set/CAS and canonical commit contracts remain unchanged.
 
 `SemanticEngine(store, text_provider, decision_provider, *, retriever=None,
 jobs=None, worker_id=None, view_ids=())` exposes these synchronous operations:
