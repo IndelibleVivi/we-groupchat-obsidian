@@ -423,12 +423,13 @@ class ReadingRelation:
 LEGACY_READING_POLICY = "derived-verbatim-v1"
 CONTENT_READING_POLICY = "content-responsibility-v1"
 SOURCE_READING_POLICY = "source-composition-v1"
+EDITORIAL_READING_POLICY = "editorial-composition-v1"
 
 
 def reading_policy(binding) -> str:
     """Missing metadata is the frozen derived-wording contract, never an upgrade."""
     value = binding.get("reading_policy", LEGACY_READING_POLICY)
-    if value not in (LEGACY_READING_POLICY, CONTENT_READING_POLICY, SOURCE_READING_POLICY):
+    if value not in (LEGACY_READING_POLICY, CONTENT_READING_POLICY, SOURCE_READING_POLICY, EDITORIAL_READING_POLICY):
         raise ReadingError("reading_policy_invalid")
     return value
 
@@ -494,7 +495,8 @@ def _snapshot_reading_policy(snapshot):
 
 def _body_prompt_version(snapshot, *, paged=False):
     policy = _snapshot_reading_policy(snapshot)
-    version = "v13" if policy == SOURCE_READING_POLICY else "v12" if policy == CONTENT_READING_POLICY else "v11"
+    version = ("v14" if policy == EDITORIAL_READING_POLICY else "v13" if policy == SOURCE_READING_POLICY
+               else "v12" if policy == CONTENT_READING_POLICY else "v11")
     return ("body-paged-" if paged else "body-plan-") + version
 
 
@@ -645,7 +647,7 @@ class CanonicalReadingAdapter:
         return ReadingSnapshot(item_id, item["content_revision"], item["title"], self._time(item["semantic_updated_at"]),
                                tuple(units), tuple(excerpts.values()), tuple(resource_by_id.values()),
                                tuple(relations), item["kind"], generation_metadata.get("reading_policy"),
-                               item["identity_scope"] if policy == SOURCE_READING_POLICY else None)
+                               item["identity_scope"] if policy in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY) else None)
 
 
 @dataclass(frozen=True)
@@ -760,7 +762,7 @@ class BodyPlanWriter:
         if ledger is not None and ledger.generation_id != self.generation_id:
             raise ReadingError("reading_generation_mismatch")
         policy = _snapshot_reading_policy(snapshot)
-        if policy == SOURCE_READING_POLICY:
+        if policy in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY):
             material = {e.id for e in snapshot.evidence if e.text or e.context}
             resources = {r.id for r in snapshot.resources}
             if any(not (set(u.evidence_ids) & material or set(u.resource_ids) & resources or any(u.verbatim)) for u in snapshot.units):
@@ -802,6 +804,8 @@ class BodyPlanWriter:
 
     @staticmethod
     def _prompt(snapshot, previous, unchanged, **context):
+        if _snapshot_reading_policy(snapshot) == EDITORIAL_READING_POLICY:
+            return BodyPlanWriter._editorial_prompt(snapshot, previous, unchanged, **context)
         if _snapshot_reading_policy(snapshot) == SOURCE_READING_POLICY:
             return BodyPlanWriter._source_prompt(snapshot, previous, unchanged, **context)
         # Canonical unit order expresses retained responsibilities, and can
@@ -914,6 +918,71 @@ class BodyPlanWriter:
             # context for that material rather than generic demonstrations.
             prompt.pop("input_semantics")
             prompt.pop("writing_examples")
+        return redact_urls_in_text(json_text(prompt))
+
+    @staticmethod
+    def _editorial_prompt(snapshot, previous, unchanged, **context):
+        # This is a presentation of the canonical snapshot, never a reduced
+        # canonical plan. Identity, revision and fingerprints stay program-owned.
+        dated, undated = [], []
+        for evidence in snapshot.evidence:
+            value = asdict(evidence)
+            value.pop("known_at")
+            value.pop("label")
+            try:
+                instant = datetime.fromisoformat(evidence.source_time)
+                if instant.utcoffset() is None:
+                    raise ValueError
+            except (TypeError, ValueError):
+                undated.append(value)
+            else:
+                dated.append((instant, value))
+        dated.sort(key=lambda entry: entry[0])
+        prior = None
+        if previous:
+            prior = {"blocks": [{key: value for key, value in asdict(block).items() if key != "primary_home"}
+                                for block in previous.blocks]}
+        prompt = {
+            "task": "把材料编辑成值得再读的 Obsidian 正文，直接写完整事情本身。技术正文讲清问题、做法、操作顺序、"
+                    "前提、条件、已观察结果、分歧与限制；生活正文连起具体经历、场景和有意味的反应。"
+                    "按事情的内在关系组织，一事只讲一次，不以发图、问答或先后发言作为段落骨架。\n"
+                    "只返回 schema 要求的 JSON 对象 {blocks:[...]}。required_unit_indices 每个序号在 unit_indices "
+                    "中恰好一次；重叠责任可以合写在同一个 block。单元 text 是完整内容责任，不是逐字底稿："
+                    "忠实重组措辞，完整保留实质细节、步骤、先后、条件、限定、反证、更正、归属和资源。"
+                    "不要输出处理说明、责任清单、frontmatter 或 H1；标题由 publisher 提供。\n"
+                    "读完整 evidence.text/context，以来源校准单元的派生说明。事实只来自所供来源，不补背景、因果、"
+                    "动机、感受、结果或结尾启示。问题、猜测、转述保持原性质；只在影响理解时表达不确定性，"
+                    "不反复交代‘未记录/无法证实’或写取证审计旁白。speaker_name 是来源称呼，‘您’不是在叫读者。"
+                    "发言者、经历主体和引文作者分清；性别未明确时只用名字或中性称呼，不从名字或口吻推断‘他/她’。"
+                    "URL slug 和文件名不能证明未读图文内容。\n"
+                    "正文和引用择其合适方式承载同一内容，不先转述一遍再整段引用重复。短而有意味的原话自然嵌入，"
+                    "长引文带准确归属；引号和 blockquote 内必须是所引 evidence 的准确原话，不能引用 unit 派生说明。"
+                    "只有实际提供的 unit.verbatim 是逐字义务，每段含标点和术语原样保全在其 home；"
+                    "kind、role、status 都不产生额外逐字义务。\n"
+                    "evidence 完整对象已按 offset-aware source_time 排列；同刻不代表因果。undated_evidence 是先后未知的"
+                    "独立材料，列表位置不建立时序。单元序号不是事件顺序。时间仅在理解需要时写，具体时分带来源 UTC offset。\n"
+                    "增量保留已有 block ID 与 retained unit/evidence/resource 原 home；新增细节可融入接收它的自动段落，"
+                    "未收到新增或变化单元的 block 保持原字节。retracted/contested 用 correction/historical/counterevidence "
+                    "role 和对应 status，不继续写成当前结论。binding 仅为程序身份绑定，不是写作内容。手改冲突由程序处理。\n" + MARKDOWN_CONTRACT,
+            "binding": {"item_id": snapshot.item_id, "content_revision": snapshot.content_revision},
+            "schema": {"blocks": [{"id": "stable-block-id", "role": "narrative", "text": "complete Markdown block",
+                                     "unit_indices": [0]}] if snapshot.units else []},
+            "required_unit_indices": list(range(len(snapshot.units))),
+            "snapshot": {"units": [asdict(unit) for unit in snapshot.units],
+                         "evidence": [value for _instant, value in dated], "undated_evidence": undated,
+                         "resources": [asdict(resource) for resource in snapshot.resources],
+                         "relations": [{"type": r.type, "reason": r.reason, "direction": r.direction}
+                                       for r in snapshot.relations]},
+            "previous": prior, "unchanged_blocks": list(unchanged),
+            **{key: value for key, value in context.items() if key != "snapshot_binding"},
+        }
+        if previous is None and not context.get("phase", "").endswith("fragment_v1"):
+            # Reuse the pure synthetic editorial examples, with v12's editable
+            # step wording. They never supply facts for the current note.
+            examples = json.loads(BodyPlanWriter._prompt(replace(snapshot, reading_policy=CONTENT_READING_POLICY,
+                units=(), evidence=(), resources=(), relations=(), identity_scope=None), None, {}))
+            prompt["writing_examples"] = examples["writing_examples"]
+            prompt["example_semantics"] = "纯合成编辑示范，不是当前材料；示范的人名、事实和内容不能写入当前正文。"
         return redact_urls_in_text(json_text(prompt))
 
     @staticmethod
@@ -1083,7 +1152,7 @@ class BodyPlanWriter:
     def _partial(snapshot, units, *, include_supplemental=False):
         evidence = {id_ for unit in units for id_ in unit.evidence_ids}
         resources = {id_ for unit in units for id_ in unit.resource_ids}
-        source = _snapshot_reading_policy(snapshot) == SOURCE_READING_POLICY
+        source = _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY)
         if source and include_supplemental:
             evidence.update(e.id for e in snapshot.evidence if not any(e.id in unit.evidence_ids for unit in snapshot.units))
             resources.update(r.id for r in snapshot.resources if not any(r.id in unit.resource_ids for unit in snapshot.units))
@@ -1125,7 +1194,7 @@ class BodyPlanWriter:
             by_group[key].append(unit)
         accepted, pending, page_number = [], [], 0
         supplemental_unit = None
-        if _snapshot_reading_policy(snapshot) == SOURCE_READING_POLICY:
+        if _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY):
             # Supplemental sources/resources go to the first group that needs
             # writing, even when preceding stable groups bypass the provider.
             supplemental_unit = next((group[0].id for key, group in groups
@@ -1198,10 +1267,9 @@ class BodyPlanWriter:
                                *, include_supplemental=False):
         """Pack adjacent complete sources into bounded windows at one home.
 
-        Hidden derived prose never creates pages or empty provider calls. Core
-        windows require the model's unit_indices mapping. Context-only tails
-        have no required units or narrative output; successfully mapped core
-        and explicit literals alone can establish a canonical content home.
+        V13 omits derived prose; v14 supplies editable responsibility slices in
+        these same continuations. Core windows require the model's unit_indices
+        mapping. Context-only tails have no required units or narrative output.
         """
         active = [u for u in units if not preserve_previous or u.id not in previous.unit_ids]
         partial = self._partial(snapshot, units, include_supplemental=include_supplemental)
@@ -1213,6 +1281,12 @@ class BodyPlanWriter:
         covered = {u for u in previous.unit_ids} if preserve_previous else set()
         delivered_resources, counter = set(), 0
         limit = max(128, (self.max_input_bytes - 5000) // 4)
+        editorial = _snapshot_reading_policy(snapshot) == EDITORIAL_READING_POLICY
+        # Long editable responsibilities share these same source continuations;
+        # consume successive slices, never a meaning x source cross product.
+        # A short responsibility remains available beside each source window.
+        meanings = {u.id: self._pieces(redact_urls_in_text(u.text), limit) for u in active} if editorial else {}
+        meaning_at = {u.id: 0 for u in active}
         # Sort the real excerpts by the same source-time contract as the prompt;
         # undated material retains its observed order, without invented dates.
         chronology = json.loads(self._source_prompt(replace(partial, units=(), resources=(),
@@ -1221,18 +1295,35 @@ class BodyPlanWriter:
         ordered = [evidence_by_id[id_] for id_ in chronology["source_sequence"] + chronology["undated_evidence"]]
 
         def prepare(batch, evidence, resources, index):
-            local = tuple(replace(u, evidence_ids=tuple(e.id for e in evidence),
-                                  resource_ids=tuple(r.id for r in resources if r.id in u.resource_ids), verbatim=()) for u in batch)
-            page = replace(partial, units=local, evidence=tuple(evidence), resources=tuple(resources))
+            local = []
+            for unit in batch:
+                text = unit.text
+                if editorial and meanings[unit.id]:
+                    pieces, position = meanings[unit.id], meaning_at[unit.id]
+                    text = pieces[0] if len(pieces) == 1 else pieces[position] if position < len(pieces) else ""
+                local.append(replace(unit, text=text, evidence_ids=tuple(e.id for e in evidence),
+                    resource_ids=tuple(r.id for r in resources if r.id in unit.resource_ids), verbatim=()))
+            page = replace(partial, units=tuple(local), evidence=tuple(evidence), resources=tuple(resources))
+            meaning_context = ({"responsibility_slices": [{"unit_id": u.id, "index": meaning_at[u.id],
+                "total": len(meanings[u.id])} for u in batch if len(meanings[u.id]) > 1]} if editorial else {})
             prompt = self._prompt(page, None, {}, snapshot_binding=binding, phase="body_source_fragment_v1",
                 continuation={"index": index, "home_id": previous.id if previous else None,
                     "core_evidence_ids": [e.id for e in evidence if e.text],
                     "context_only_evidence_ids": [e.id for e in evidence if not e.text and e.context],
-                    "instruction": "Compose this ordered source window as one connected continuation, without a new introduction or recap. "
+                    **meaning_context,
+                    "instruction": ("Compose this ordered continuation at the same home, without a new introduction or recap. "
+                        "Unit text is substantive editable responsibility, never source quotation or required literal wording. "
+                        "For long responsibilities, successive indexed text slices are supplied completely, once in order alongside source windows; "
+                        "empty text means its responsibility slices have already been supplied. Preserve all concrete meaning without copying the reporting wrapper. "
+                        "A remaining responsibility-only slice is a derived continuation, not new source evidence; do not invent quotations. "
+                        "Read source text together with supporting context, without narrating that context a second time. "
+                        "When there are no required units, inspect supporting context and return blocks: []. "
+                        "Preserve steps, conditions, limits, counterevidence, attribution and typed status." if editorial else
+                        "Compose this ordered source window as one connected continuation, without a new introduction or recap. "
                         "Map every required unit index to its existing content home; do not reconstruct hidden derived prose. "
                         "Read each source text together with its context. Context is supporting material, not a second narrative responsibility: "
                         "do not write it again after the core. A context-only window has no required units and must return blocks: []. "
-                        "Preserve substantive steps, conditions, limits, counterevidence, attribution and typed status."})
+                        "Preserve substantive steps, conditions, limits, counterevidence, attribution and typed status.")})
             return page, prompt
 
         def dispatch(candidates, evidence=(), resources=()):
@@ -1254,6 +1345,9 @@ class BodyPlanWriter:
                 counter += 1
                 output.extend(block.text for block in part.blocks)
                 covered.update(id_ for block in part.blocks for id_ in block.unit_ids)
+                if editorial:
+                    for unit in batch:
+                        meaning_at[unit.id] += 1
                 delivered_resources.update(r.id for r in resources)
                 pending = pending[len(batch):]
 
@@ -1318,6 +1412,10 @@ class BodyPlanWriter:
                 candidates = [u for u in active if resource.id in u.resource_ids] or active[:1]
                 if candidates:
                     dispatch(candidates, resources=(resource,))
+        if editorial:
+            for unit in active:
+                while meaning_at[unit.id] < len(meanings[unit.id]):
+                    dispatch((unit,))
         for unit in active:
             for fragment in unit.verbatim:
                 visible = redact_urls_in_text(fragment)
@@ -1325,7 +1423,8 @@ class BodyPlanWriter:
                     continue
                 literal_parts = []
                 for piece in self._pieces(visible, limit):
-                    local = replace(unit, evidence_ids=(), resource_ids=(), verbatim=(piece,))
+                    local = replace(unit, evidence_ids=(), resource_ids=(), verbatim=(piece,),
+                                    **({"text": ""} if editorial else {}))
                     page = replace(partial, units=(local,), evidence=(), resources=())
                     prompt = self._prompt(page, None, {}, snapshot_binding=binding, phase="body_literal_fragment_v1",
                         continuation={"index": counter, "instruction": "Return exactly the explicit unit.verbatim segment as one block, "
@@ -1357,7 +1456,7 @@ class BodyPlanWriter:
         literal obligations use exact continuation. Every evidence/context
         segment is still supplied, including pages with no narrative output.
         """
-        if _snapshot_reading_policy(snapshot) == SOURCE_READING_POLICY:
+        if _snapshot_reading_policy(snapshot) in (SOURCE_READING_POLICY, EDITORIAL_READING_POLICY):
             return self._source_fragment_group(snapshot, units, previous, preserve_previous, binding, request_id, ledger,
                                                include_supplemental=include_supplemental)
         legacy = _snapshot_reading_policy(snapshot) == LEGACY_READING_POLICY

@@ -58,12 +58,13 @@ would not pass the new admission rule. Unknown parent or child outcomes block
 before another provider call; they never become fresh-policy replacements.
 
 Reading policy is frozen per rebuild plan and generation. New plans bind
-`reading_policy="source-composition-v1"` in the plan and generation
-`metadata_json`; they use `body-plan-v13` / `body-paged-v13`. The previously bound
-`content-responsibility-v1` continues to use v12 unchanged. Missing policy fields
+`reading_policy="editorial-composition-v1"` in the plan and generation
+`metadata_json`; they use `body-plan-v14` / `body-paged-v14`. Previously bound
+`source-composition-v1` and `content-responsibility-v1` continue to use v13 and
+v12 unchanged. Missing policy fields
 retain `derived-verbatim-v1` and the v11 writer, including its automatic literal
 obligations for derived steps, counterevidence and units affected by withdrawn or
-contested claims. These are three separate frozen contracts; resume never
+contested claims. These are four separate frozen contracts; resume never
 upgrades an accepted, failed or unresolved historical invocation.
 `bind_reading_policy(conn, binding)` is the canonical binding seam inside the
 caller's generation transaction: first adoption requires every canonical and
@@ -73,12 +74,36 @@ Old missing-field plans and metadata remain missing, preserving their original
 fingerprints and prompt bytes. The adapter carries this binding in the snapshot,
 and the writer checks it against the canonical ledger before reuse or dispatch.
 The independent verifier checks manifest/generation policy agreement and accepts
-v13 only for source composition, v12 only for content responsibility, and v2-v11
+v14 only for editorial composition, v13 only for source composition, v12 only for content responsibility, and v2-v11
 only for the missing-field/legacy reading policy. It also checks unit homes,
 evidence/resources, typed status and legacy literal obligations. None of these
 structural checks proves natural-language semantic completeness or prose quality.
 
-Under source composition, canonical units and their exact fingerprints remain
+Editorial composition presents complete substantive `unit.text` responsibilities
+as editable meaning, with role, evidence/resource handles, typed status/reason and
+actual explicit `verbatim`. Complete original text/context, captured speaker and
+source time remain attached to each evidence object. Offset-aware dated evidence
+objects are directly sorted by source instant; full undated objects occupy a
+separate `snapshot.undated_evidence` collection. Equal instants establish no
+causality; undated list positions establish no chronology. This preserves source
+and speaker bindings without asking the author to reconstruct order from a UUID
+list. Ordinary requests, bounded pages and source windows use the same contract.
+
+The editorial payload omits derived Item titles, Item kind/identity scope,
+commit/known times and provenance audit labels. A minimal `binding` envelope
+retains Item ID and content revision solely for the existing exact request/cache
+identity; neither is prose material. Prior blocks retain their IDs, text and
+unit/evidence/resource/status mappings without a second copy of Item/revision or
+unit fingerprints. The full canonical snapshot, fingerprints and validator remain
+program-owned. Canonical units, exact source pages, resources and claim obligations
+are unchanged. Guidance begins with the thing itself: technical problems,
+procedures, conditions, observed results and limits; life experiences and
+meaningful reactions. It retains strong gender/attribution and grounded quotation
+rules, without making derived responsibility wording literal. Structural tests
+verify these inputs and recovery boundaries, not the author's semantic or
+editorial success.
+
+Under the retained source-composition policy, canonical units and their exact fingerprints remain
 intact, including derived `unit.text` and the Item title. Only the model's
 presentation payload omits these two prose fields (and related Item display
 titles). It keeps unit index/ID/role, evidence and resource refs, typed status,
@@ -114,7 +139,7 @@ home, not automatically added as another chronological supplement. Other
 independent parts of the Item may still use new blocks. Required verbatim fragments
 and exact grounded quotations remain protected; an unrelated block cannot be
 rewritten just because another block gained detail. This rule also applies to
-bounded pages and oversized continuations. Under source composition and the
+bounded pages and oversized continuations. Under editorial composition, source composition and the
 retained content-responsibility policy,
 steps and counterevidence retain their complete substantive content, conditions,
 order, scope and attribution without freezing the agent's derived phrasing.
@@ -212,8 +237,9 @@ after dispatch remains unresolved and blocks subsequent calls, including across
 Body versions and page/fragment repartitioning. Calling the pure `plan` helper
 without a ledger is intended for isolated rendering tests, not runtime
 publication and does not perform this durable repair.
-New source-composition Body artifacts are `body-plan-v13` and `body-paged-v13`.
-The bound content-responsibility policy continues to write v12, and the
+New editorial Body artifacts are `body-plan-v14` and `body-paged-v14`.
+The bound source-composition policy continues to write v13,
+the bound content-responsibility policy continues to write v12, and the
 missing-field legacy policy continues to write v11. All ask for one
 coherent reader-first note with grounded attribution, preserve each retained
 unit's unique home, and carry the program-owned metadata and exact explicit
@@ -223,21 +249,25 @@ The prompt enumerates every required unit index: overlapping units may share
 one prose block, but each still needs exactly one content home. Missing or
 duplicated indices fail validation; the program never assigns a missing home
 by guessing from similar text.
-Source-composition inputs contain source excerpts with provenance labels,
+Retained source-composition inputs contain source excerpts with provenance labels,
 unit responsibility metadata and explicit literal obligations, without a
 machine-written unit synopsis or Item title to reuse. Frozen v11/v12 composition
 prompts retain their synthetic technical/life demonstrations and original bytes;
-v13 uses its own source-only writing contract. The examples are not current evidence
-and cannot supply names or facts for the real note. They are omitted when a
-prior plan or literal fragment controls the work, preserving bounded context
+v13 uses its own source-only writing contract. V14 reuses the pure synthetic
+technical/life examples with editable responsibility wording. The examples are
+not current evidence and cannot supply names or facts for the real note.
+They are omitted from prior-plan and continuation work, preserving bounded context
 for the actual material. This guidance does not change validation, authorize
 rewriting accepted artifacts, or establish editorial quality.
 Exact message times normally stay on source pages. If the body needs a time of
 day to explain a change, writer guidance requires the supplied UTC offset;
 it must not present a revision time as the event time or silently assume the
 reader's local timezone. Editorial acceptance still checks the actual output.
-The writer receives `source_sequence`, ordered only by offset-aware source
-timestamps, and separate `undated_evidence`. Equal timestamps do not imply
+Frozen v11-v13 writers receive `source_sequence`, a UUID list ordered only by
+offset-aware source timestamps, and separate undated UUIDs. Their ordinary
+evidence arrays retain their frozen order. V14 instead sends directly ordered
+complete evidence objects and separately grouped complete undated objects.
+Equal timestamps do not imply
 causality, and unit order or commit order never establishes event order. This
 input preserves the original unit indices, evidence identities and paragraph
 homes; it supplies chronology for composition, not a new canonical clock.
@@ -248,13 +278,13 @@ Both ordinary and repair prompts explicitly request a JSON object, including
 localized writing instructions. This preserves the input requirement of
 endpoints that enforce the JSON keyword when JSON-object mode is selected.
 The paged aggregate key carries its policy's version, so a revised prompt never
-resumes a paged plan produced by an earlier one. Accepted v2-v12 artifacts remain
+resumes a paged plan produced by an earlier one. Accepted v2-v13 artifacts remain
 historical evidence under their original contracts; these prompt instructions
 are generation guidance, not proof of editorial acceptance or owner review.
 Before dispatch, the writer also checks unresolved page/fragment descendants of
 the stable request ID across Body versions. A new prompt or context budget
 cannot bypass an earlier unknown outcome by choosing a different partition.
-The verifier accepts v13 forms only for source composition, v12 only for the
+The verifier accepts v14 forms only for editorial composition, v13 only for source composition, v12 only for the
 bound content policy and retained v2-v11 only for the legacy reading policy.
 Its allowlist remains in lockstep with the writer; this prose does not authorize
 rewriting accepted historical output or weakening the verifier.
@@ -269,16 +299,26 @@ the aggregate validates every unit exactly once, stable previous homes,
 verbatim obligations, claim status and references. A single oversized paragraph
 uses bounded continuation tasks: all unit, evidence and context text is supplied
 in ordered segments, then accepted prose joins at one stable home.
-Source-composition budgets the actual presentation payload: hidden derived text
-cannot force pages or echo calls. Ordered source windows first pack adjacent
+Editorial and retained source-composition modes budget their actual presentation
+payloads. V13 hidden derived text cannot force pages or echo calls; v14 complete
+editable responsibilities count toward that budget. Ordered source windows first pack adjacent
 complete excerpts with their context
 under the actual prompt budget; several sources may share one writing call and
 one original home. Only a source that cannot fit alone is split into paired
 text/context segments. Core windows retain unit mapping and status checks;
 context-only tails have no required units and must return no new narrative.
 Context supports its source instead of becoming a second content/home obligation.
-No window falls back to derived prose. Supplemental sources/resources accompany the first group that needs writing, even if earlier
-unchanged groups bypass the provider. A hidden unit with no source material,
+V13 windows do not fall back to hidden derived prose. V14 supplies full editable
+responsibilities beside the source windows; oversized responsibility text is
+supplied completely in ordered, nonliteral slices, consumed successively alongside
+source windows. Remaining responsibility slices continue at the same home without
+duplicating all source windows. This is one bounded continuation owner, without a
+second writer/mapper stage or a responsibility-by-source cross product. Context-only
+tails with no required units still return no narrative. Exact explicit literals
+retain their strict accepted continuation path. Truly indivisible metadata that
+cannot fit the actual prompt budget fails closed rather than being truncated.
+Supplemental sources/resources accompany the first group that needs writing, even if earlier
+unchanged groups bypass the provider. A unit with no source material,
 resource or explicit literal fails before dispatch rather than creating an empty
 call. Frozen v12 derived continuations remain editable under their original
 contract, and v11 retains its exact-text continuations. Actual explicit literals

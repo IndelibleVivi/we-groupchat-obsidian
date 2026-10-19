@@ -13,7 +13,7 @@ from core.semantic.projections import (
     BodyBlock, BodyPlan, BodyPlanWriter, CanonicalReadingAdapter, EvidenceExcerpt, ProjectionPublisher,
     ReadingError, ReadingLedger, ReadingRelation, ReadingResource, ReadingSnapshot,
     ReadingUnit, anchor, fingerprint, property_value, region_body, validate_body_plan, wikilink,
-    bind_reading_policy, CONTENT_READING_POLICY, SOURCE_READING_POLICY,
+    bind_reading_policy, CONTENT_READING_POLICY, SOURCE_READING_POLICY, EDITORIAL_READING_POLICY,
 )
 
 
@@ -250,6 +250,357 @@ class ProjectionTests(ReadingHarness):
             prompt = BodyPlanWriter._prompt(snapshot, prior, unchanged, **context)
             self.assertEqual(len(prompt.encode()), size)
             self.assertEqual(fingerprint(prompt), expected)
+
+    def test_v13_prompt_bytes_remain_frozen_for_ordinary_previous_and_fragments(self):
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY)
+        previous = self.plan(snapshot)
+        cases = ((None, {}, {}, 4587, "ab1845d3bbed50230c29971d2eaa5199a2f093be8d198232b0eaeb9b74012fc2"),
+                 (previous, {b.id: b for b in previous.blocks}, {}, 4945,
+                  "4a12f7ba37e8616dabe2b76cb4ca4426bdadd03f97303d7f71c38e361c0b0df8"),
+                 (None, {}, {"phase": "body_fragment_v1"}, 4614,
+                  "fec9ed78fe8f6b91173316af36d29b94b6ce97e4cc482b8191f7db65fb1b7ac6"),
+                 (None, {}, {"phase": "body_source_fragment_v1", "snapshot_binding": "synthetic-binding",
+                             "continuation": {"index": 0, "core_evidence_ids": ["e1"]}}, 4714,
+                  "ffa28b5a5b49963d01ca419f951fd913a3e9b92c648c94aad9c225c6d5ae3085"))
+        for prior, fixed, context, size, expected in cases:
+            prompt = BodyPlanWriter._prompt(snapshot, prior, fixed, **context)
+            self.assertEqual((len(prompt.encode()), fingerprint(prompt)), (size, expected))
+
+    def test_missing_policy_v11_prompt_bytes_remain_frozen(self):
+        snapshot = self.snapshot()
+        previous = self.plan(snapshot)
+        cases = ((None, {}, {}, 7232, "246c56e467841d13c8155b1f85bd74960590ac7a5072fa7a194aa8c3a0b2d4fc"),
+                 (previous, {b.id: b for b in previous.blocks}, {}, 5264,
+                  "4a8cc9a9b896cb46edf4706527269d106f0f613c3b21d57e175f08761a008f64"),
+                 (None, {}, {"phase": "body_fragment_v1"}, 4933,
+                  "18dd55db1123248a9ff30348a3f1f92841799bfb81f0e5c572a024609ee81594"))
+        for prior, fixed, context, size, expected in cases:
+            prompt = BodyPlanWriter._prompt(snapshot, prior, fixed, **context)
+            self.assertEqual((len(prompt.encode()), fingerprint(prompt)), (size, expected))
+
+    def test_old_modes_keep_original_job_key_recipe_and_accepted_zero_call_replay(self):
+        for policy, version in ((None, "body-plan-v11"), (CONTENT_READING_POLICY, "body-plan-v12"), (SOURCE_READING_POLICY, "body-plan-v13")):
+            snapshot = replace(self.snapshot(), reading_policy=policy)
+            provider = ScriptedTextProvider(self.source_response)
+            writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+            request = "frozen-hash-" + version
+            plan = writer.plan(snapshot, request_id=request)
+            row = dict(self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request,)))
+            expected = fingerprint(json.dumps([self.ledger.generation_id, version, row["provider_route"], provider.calls[0][0]],
+                ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            self.assertEqual(row["job_key"], expected)
+            self.assertEqual(writer.plan(snapshot, request_id=request), plan)
+            self.assertEqual(len(provider.calls), 1)
+            self.assertEqual(dict(self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request,))), row)
+
+    def test_editorial_input_has_complete_meaning_and_direct_source_order_without_machine_facts(self):
+        policy = "editorial-composition-v1"
+        evidence = (EvidenceExcerpt("a", "我的是这个情况", "B 的补充上下文", "2026-10-09T10:02:00+08:00", "MACHINE-KNOWN", "MACHINE-LABEL", "B", "乙"),
+                    EvidenceExcerpt("m", "我一般三分钟", "B 的回复上下文", "2026-10-09T02:01:00+00:00", speaker_id="B", speaker_name="乙"),
+                    EvidenceExcerpt("z", "需要长等一阵", "A 的问题上下文", "2026-10-09T10:00:00+08:00", speaker_id="A", speaker_name="甲"),
+                    EvidenceExcerpt("tie", "另一个同刻事实", source_time="2026-10-09T10:01:00+08:00"),
+                    EvidenceExcerpt("unknown", "没有可靠先后", "无日期上下文", "2026-10-09"))
+        unit = ReadingUnit("responsibility", "保留两个人各自的等待经历与后续限定。", tuple(e.id for e in evidence), ("log",), role="step")
+        snapshot = replace(self.snapshot(), reading_policy=policy, title="MACHINE-TITLE", kind="MACHINE-KIND",
+            semantic_at="MACHINE-COMMIT", identity_scope={"chat": "MACHINE-IDENTITY"}, units=(unit,), evidence=evidence,
+            resources=(ReadingResource("log", "日志"),))
+        prompt = BodyPlanWriter._prompt(snapshot, None, {})
+        data = json.loads(prompt)
+        self.assertNotIn("MACHINE", prompt)
+        self.assertEqual(data["snapshot"]["units"][0], json.loads(json.dumps(asdict(unit))))
+        self.assertEqual([e["id"] for e in data["snapshot"]["evidence"]], ["z", "m", "tie", "a"])
+        self.assertEqual([e["id"] for e in data["snapshot"]["undated_evidence"]], ["unknown"])
+        supplied = data["snapshot"]["evidence"] + data["snapshot"]["undated_evidence"]
+        for e in evidence:
+            expected = asdict(e)
+            expected.pop("known_at"); expected.pop("label")
+            self.assertEqual(next(x for x in supplied if x["id"] == e.id), expected)
+        self.assertEqual(data["required_unit_indices"], [0])
+        self.assertEqual({e["kind"] for e in data["writing_examples"]}, {"technical", "life"})
+        self.assertEqual(snapshot.evidence, evidence)
+        provider = ScriptedTextProvider({"blocks": [{"id": "one", "role": "narrative", "text": "甲需要等待；乙一般三分钟，随后补充自己的情况。", "unit_indices": [0]}]})
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+        plan = writer.plan(snapshot, request_id="editorial-small")
+        self.assertEqual(plan.blocks[0].unit_ids, (unit.id,))
+        self.assertEqual(set(plan.blocks[0].evidence_ids), set(unit.evidence_ids))
+        self.assertEqual(plan.blocks[0].resource_ids, ("log",))
+        self.assertEqual(self.ledger.one("SELECT prompt_version FROM reader_text_artifacts")[0], "body-plan-v14")
+        self.assertEqual(writer.plan(snapshot, request_id="editorial-small"), plan)
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_editorial_bounded_windows_keep_responsibilities_sources_and_one_home(self):
+        evidence = tuple(EvidenceExcerpt("e" + str(i), "具体操作与限定。" * 45 + str(i), "上下文范围。" * 8,
+            "2026-10-09T12:" + str(i).zfill(2) + ":00+08:00") for i in range(20))
+        snapshot = replace(self.snapshot(), reading_policy="editorial-composition-v1",
+            units=(ReadingUnit("whole", "先停服务，备份后切换格式；完整保留小文件限制与反例。", tuple(e.id for e in evidence), ("log",), role="step", status="contested"),),
+            evidence=tuple(reversed(evidence)), resources=(ReadingResource("log", "日志"),))
+        def compose(prompt):
+            data = json.loads(prompt)
+            for unit in data["snapshot"]["units"]:
+                self.assertEqual(unit["text"], snapshot.units[0].text)
+                self.assertEqual(unit["verbatim"], [])
+            return self.source_response(prompt)
+        provider = ScriptedTextProvider(*([compose] * 100))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
+        plan = writer.plan(snapshot, request_id="editorial-windows")
+        self.assertGreater(len(provider.calls), 1)
+        self.assertLess(len(provider.calls), len(evidence))
+        supplied = [e for call in provider.calls for e in json.loads(call[0])["snapshot"]["evidence"]]
+        self.assertEqual([e["id"] for e in supplied], [e.id for e in evidence])
+        for original, actual in zip(evidence, supplied):
+            self.assertEqual((actual["text"], actual["context"]), (original.text, original.context))
+        self.assertEqual(len(plan.blocks), 1)
+        self.assertEqual(plan.blocks[0].unit_ids, ("whole",))
+        self.assertEqual(plan.blocks[0].unit_statuses, {"whole": "contested"})
+        self.assertEqual(plan.blocks[0].resource_ids, ("log",))
+        self.assertTrue(all(len(call[0].encode()) <= 9000 for call in provider.calls))
+        count = len(provider.calls)
+        self.assertEqual(writer.plan(snapshot, request_id="editorial-windows"), plan)
+        self.assertEqual(len(provider.calls), count)
+
+    def test_editorial_long_meaning_is_sliced_once_with_complete_sources_and_strict_literals(self):
+        meaning = "".join("派生报告包装：步骤" + str(i) + "需要先验证条件与限定。" for i in range(160))
+        source = EvidenceExcerpt("long-source", "来源核心事实与操作顺序。" * 300, "仅在这个范围验证。" * 150,
+                                 "2026-10-09T12:00:00+08:00", speaker_name="甲")
+        literal = "显式原文的术语与标点。" * 150
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY,
+            units=(ReadingUnit("long-meaning", meaning, (source.id,), ("log",), role="step", verbatim=(literal,)),),
+            evidence=(source,), resources=(ReadingResource("log", "日志"),))
+        def compose(prompt):
+            data = json.loads(prompt)
+            units = data["snapshot"]["units"]
+            if not units:
+                return {"blocks": []}
+            text = "".join(literal for unit in units for literal in unit["verbatim"])
+            if not text:
+                text = "".join(unit["text"].replace("派生报告包装：", "操作：") for unit in units) or "补充的来源事实。"
+            return {"blocks": [{"id": "one-home", "role": "narrative", "text": text, "unit_indices": list(range(len(units)))}]}
+        provider = ScriptedTextProvider(*([compose] * 200))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000)
+        plan = writer.plan(snapshot, request_id="editorial-long-meaning")
+        calls = [json.loads(call[0]) for call in provider.calls]
+        meaning_calls = [data for data in calls if data["phase"] == "body_source_fragment_v1"]
+        slices = [u["text"] for data in meaning_calls for u in data["snapshot"]["units"]]
+        self.assertEqual("".join(slices), meaning)
+        self.assertTrue(any(data["snapshot"]["evidence"] for data in meaning_calls if data["snapshot"]["units"]))
+        self.assertNotIn("派生报告包装：", plan.blocks[0].text)
+        supplied = [e for data in calls for e in data["snapshot"]["evidence"]]
+        self.assertEqual("".join(e["text"] for e in supplied), source.text)
+        self.assertEqual("".join(e["context"] for e in supplied), source.context)
+        self.assertEqual(plan.blocks[0].unit_ids, ("long-meaning",))
+        self.assertEqual(plan.blocks[0].evidence_ids, (source.id,))
+        self.assertEqual(plan.blocks[0].resource_ids, ("log",))
+        self.assertIn(literal, plan.blocks[0].text)
+        self.assertTrue(all(len(call[0].encode()) <= 8000 for call in provider.calls))
+        source_calls = sum(bool(data["snapshot"]["evidence"]) for data in meaning_calls)
+        nonempty_slices = sum(bool(piece) for piece in slices)
+        self.assertLessEqual(len(meaning_calls), source_calls + nonempty_slices)
+        count = len(provider.calls)
+        self.assertEqual(writer.plan(snapshot, request_id="editorial-long-meaning"), plan)
+        self.assertEqual(len(provider.calls), count)
+
+    def test_editorial_policy_binding_is_empty_only_and_old_bindings_do_not_upgrade(self):
+        from core.semantic.store import SemanticStore
+        for previous in (None, CONTENT_READING_POLICY, SOURCE_READING_POLICY):
+            store = SemanticStore(self.base / (str(previous) + ".sqlite"), "binding")
+            ReadingLedger(store.connect, store.generation_id)
+            with store.transaction() as conn:
+                if previous:
+                    bind_reading_policy(conn, {"reading_policy": previous})
+                else:
+                    conn.execute("INSERT INTO reader_text_artifacts VALUES(?,?,?,?,?,?,?)", (
+                        "binding", "existing", "existing", "synthetic", "body-plan-v11", "unknown", ""))
+                before = conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]
+                with self.assertRaisesRegex(ReadingError, "reading_policy_mismatch"):
+                    bind_reading_policy(conn, {"reading_policy": EDITORIAL_READING_POLICY})
+                self.assertEqual(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0], before)
+        store = SemanticStore(self.base / "editorial-binding.sqlite", "editorial-binding")
+        with store.transaction() as conn:
+            bind_reading_policy(conn, {"reading_policy": EDITORIAL_READING_POLICY})
+        observation, span = self.canonical_extract(store, "fresh", "先停止服务，再备份。", unit_kind="step", unit_text="派生说明：先停止服务，再执行备份。")
+        self.canonical_actions(store, [{"action_key": "create", "type": "CREATE_ITEM", "item_id": "procedure", "title": "服务备份",
+            "kind": "technical", "identity_scope": {"topic": "服务备份"}, "observation_ids": [observation["observation_id"]]}])
+        snapshot = CanonicalReadingAdapter(store).snapshot("procedure")
+        self.assertEqual(snapshot.reading_policy, EDITORIAL_READING_POLICY)
+        self.assertEqual(snapshot.units[0].text, "派生说明：先停止服务，再执行备份。")
+        self.assertEqual(snapshot.units[0].verbatim, ())
+        with store.transaction() as conn:
+            before = conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]
+            self.assertEqual(bind_reading_policy(conn, {"reading_policy": EDITORIAL_READING_POLICY})["reading_policy"], EDITORIAL_READING_POLICY)
+            self.assertEqual(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0], before)
+
+    def test_editorial_minimal_identity_envelope_separates_distinct_items(self):
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY)
+        other = replace(snapshot, item_id="other-item", content_revision=2, title="另一标题")
+        provider = ScriptedTextProvider(self.source_response, self.source_response)
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+        first = writer.plan(snapshot, request_id="editorial-item-one")
+        second = writer.plan(other, request_id="editorial-item-two")
+        self.assertEqual(len(provider.calls), 2)
+        first_prompt, second_prompt = (json.loads(call[0]) for call in provider.calls)
+        self.assertEqual(first_prompt.pop("binding"), {"item_id": snapshot.item_id, "content_revision": snapshot.content_revision})
+        self.assertEqual(second_prompt.pop("binding"), {"item_id": other.item_id, "content_revision": other.content_revision})
+        self.assertEqual(first_prompt, second_prompt)
+        self.assertEqual((first.item_id, second.item_id), (snapshot.item_id, other.item_id))
+        self.assertEqual(second.blocks[0].primary_home, other.item_id)
+        rows = self.ledger.all("SELECT job_key FROM reader_text_artifacts")
+        self.assertEqual(len({row[0] for row in rows}), 2)
+        self.assertEqual(writer.plan(other, request_id="editorial-item-two"), second)
+        self.assertEqual(len(provider.calls), 2)
+
+    def test_editorial_repair_exhaustion_and_cross_version_unknown_trees_are_durable(self):
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY)
+        provider = ScriptedTextProvider({"blocks": []}, self.source_response)
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+        plan = writer.plan(snapshot, request_id="editorial-repair")
+        before = [dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")]
+        self.assertEqual([row["status"] for row in before], ["failed", "accepted"])
+        self.assertTrue(all(row["prompt_version"] == "body-plan-v14" for row in before))
+        self.assertEqual(writer.plan(snapshot, request_id="editorial-repair"), plan)
+        self.assertEqual(len(provider.calls), 2)
+        exhausted = replace(snapshot, item_id="exhausted")
+        bad = ScriptedTextProvider({"blocks": []}, {"blocks": []})
+        failing = BodyPlanWriter(bad, self.ledger.generation_id, self.ledger)
+        for _ in range(2):
+            with self.assertRaises(ReadingError):
+                failing.plan(exhausted, request_id="editorial-exhausted")
+        self.assertEqual(len(bad.calls), 2)
+        for version in ("body-plan-v11", "body-plan-v12", "body-plan-v13", "body-plan-v14"):
+            for suffix in ("", ":page:0", ":group:0:source:0", ":repair:original"):
+                root = "guard-" + version + suffix.replace(":", "-")
+                with self.ledger.transaction() as conn:
+                    conn.execute("INSERT INTO reader_text_artifacts VALUES(?,?,?,?,?,?,?)", (
+                        self.ledger.generation_id, root, root + suffix, "route", version, "unknown", ""))
+                unused = ScriptedTextProvider()
+                with self.assertRaisesRegex(ReadingError, "text_provider_outcome_unknown"):
+                    BodyPlanWriter(unused, self.ledger.generation_id, self.ledger).plan(snapshot, request_id=root)
+                self.assertEqual(unused.calls, [])
+        self.assertEqual([dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid LIMIT 2")], before)
+
+    def test_editorial_partial_pages_resume_exact_and_unknown_child_blocks(self):
+        units = tuple(ReadingUnit("u" + str(i), "条件完整的可编辑责任" + str(i), ("e" + str(i),)) for i in range(12))
+        evidence = tuple(EvidenceExcerpt("e" + str(i), "独立事实与适用范围。" * 25 + str(i), source_time="2026-10-09T12:00:00+08:00") for i in range(12))
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY, units=units, evidence=evidence)
+        provider = ScriptedTextProvider(*([self.source_response] * 100))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
+        original = writer._invoke
+        def interrupt(*args, **kwargs):
+            if provider.calls:
+                raise RuntimeError("synthetic process interruption between accepted children")
+            return original(*args, **kwargs)
+        with patch.object(writer, "_invoke", interrupt):
+            with self.assertRaises(RuntimeError):
+                writer.plan(snapshot, request_id="editorial-partial")
+        first_call = provider.calls[0]
+        first_row = dict(self.ledger.one("SELECT * FROM reader_text_artifacts"))
+        plan = writer.plan(snapshot, request_id="editorial-partial")
+        self.assertEqual(provider.calls.count(first_call), 1)
+        self.assertEqual(dict(self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (first_call[1],))), first_row)
+        self.assertEqual({u for block in plan.blocks for u in block.unit_ids}, {u.id for u in units})
+        count = len(provider.calls)
+        self.assertEqual(writer.plan(snapshot, request_id="editorial-partial"), plan)
+        self.assertEqual(len(provider.calls), count)
+        self.assertEqual(self.ledger.one("SELECT prompt_version FROM reader_text_artifacts WHERE request_id='editorial-partial'")[0], "body-paged-v14")
+        disconnected = ScriptedTextProvider(self.source_response, RuntimeError("synthetic disconnected"))
+        writer = BodyPlanWriter(disconnected, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
+        changed = replace(snapshot, item_id="unknown-pages")
+        with self.assertRaises(RuntimeError):
+            writer.plan(changed, request_id="editorial-unknown-pages")
+        calls = len(disconnected.calls)
+        with self.assertRaisesRegex(ReadingError, "text_provider_outcome_unknown"):
+            writer.plan(changed, request_id="editorial-unknown-pages")
+        self.assertEqual(len(disconnected.calls), calls)
+
+    def test_editorial_increment_preserves_unaffected_bytes_manual_conflicts_and_strict_sources(self):
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY,
+            units=(ReadingUnit("steps", "派生说明：先停服务。", ("e1",), role="step"), ReadingUnit("walk", "周末去散步。", ("e2",))),
+            evidence=(EvidenceExcerpt("e1", "先停服务。"), EvidenceExcerpt("e2", "周末散步。")))
+        first = self.plan(snapshot)
+        published = self.publisher.publish_item(snapshot, first)
+        changed = replace(snapshot, content_revision=2, units=snapshot.units + (ReadingUnit("backup", "停服务后备份。", ("e3",)),),
+            evidence=snapshot.evidence + (EvidenceExcerpt("e3", "停服务后备份。"),))
+        self.revisions[changed.item_id] = 2
+        response = {"blocks": [{"id": first.blocks[0].id, "role": first.blocks[0].role, "text": "停服务后备份。", "unit_indices": [0, 2]},
+                               {"id": first.blocks[1].id, "role": first.blocks[1].role, "text": first.blocks[1].text, "unit_indices": [1]}]}
+        provider = ScriptedTextProvider(response)
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger).plan(changed, previous=first, request_id="editorial-increment")
+        self.assertEqual(plan.blocks[1], first.blocks[1])
+        data = json.loads(provider.calls[0][0])
+        self.assertEqual(set(data["previous"]), {"blocks"})
+        self.assertNotIn("primary_home", data["previous"]["blocks"][0])
+        target = self.publisher.root / published.path
+        manual = target.read_bytes().replace(snapshot.units[0].text.encode(), "用户手改。".encode())
+        target.write_bytes(manual)
+        self.assertEqual(self.publisher.publish_item(changed, plan).status, "conflict")
+        self.assertEqual(target.read_bytes(), manual)
+        for literal, text, code in ((snapshot.evidence[0].text, "省掉了原话。", "body_plan_lost_evidence"),
+                                    (None, "> 先删除数据库。", "markdown_quote_not_grounded")):
+            strict = replace(snapshot, units=(replace(snapshot.units[0], verbatim=(literal,) if literal else ()),), evidence=(snapshot.evidence[0],))
+            with self.assertRaisesRegex(ReadingError, code):
+                BodyPlanWriter(ScriptedTextProvider({"blocks": [{"id": "x", "role": "narrative", "text": text, "unit_indices": [0]}]}),
+                    self.ledger.generation_id).plan(strict, request_id="strict-editorial")
+
+    def test_editorial_paged_increment_delivers_supplemental_and_bypasses_unchanged_homes(self):
+        units = tuple(ReadingUnit("u" + str(i), "内容责任" + str(i), ("e" + str(i),)) for i in range(30))
+        evidence = tuple(EvidenceExcerpt("e" + str(i), "具体原文与范围。" * 35 + str(i)) for i in range(30))
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY, units=units, evidence=evidence)
+        previous = self.plan(snapshot)
+        changed = replace(snapshot, content_revision=2,
+            units=tuple(replace(u, text=u.text + "新增限定") if i < 20 else u for i, u in enumerate(units)),
+            evidence=evidence + (EvidenceExcerpt("supplement", "完整保留的补充来源。"),))
+        def compose(prompt):
+            data = json.loads(prompt)
+            partial_units = data["snapshot"]["units"]
+            prior_homes = {u: block for block in data["previous"]["blocks"] for u in block["unit_ids"]}
+            self.assertFalse({u["id"] for u in partial_units} & {u.id for u in units[20:]})
+            return {"blocks": [{"id": prior_homes[u["id"]]["id"], "role": "narrative",
+                "text": "更新后的具体细节与限定" + u["id"], "unit_indices": [index]} for index, u in enumerate(partial_units)]}
+        provider = ScriptedTextProvider(*([compose] * 100))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
+        plan = writer.plan(changed, previous=previous, request_id="editorial-paged-increment")
+        self.assertGreater(len(provider.calls), 1)
+        self.assertEqual(plan.blocks[20:], previous.blocks[20:])
+        self.assertEqual({u for block in plan.blocks for u in block.unit_ids}, {u.id for u in units})
+        supplied = [e for call in provider.calls for e in json.loads(call[0])["snapshot"]["undated_evidence"]]
+        self.assertIn("supplement", {e["id"] for e in supplied})
+        self.assertEqual({e["id"] for e in supplied}, {e.id for e in evidence[:20]} | {"supplement"})
+        count = len(provider.calls)
+        self.assertEqual(writer.plan(changed, previous=previous, request_id="editorial-paged-increment"), plan)
+        self.assertEqual(len(provider.calls), count)
+
+    def test_editorial_context_only_tail_has_no_second_narrative_or_home(self):
+        source = EvidenceExcerpt("one", "唯一核心事实。", "完整的支持上下文。" * 600)
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY,
+            units=(ReadingUnit("one-unit", "完整保留核心事实与适用范围。", (source.id,)),), evidence=(source,))
+        supporting = []
+        def compose(prompt):
+            data = json.loads(prompt)
+            supplied = data["snapshot"]["evidence"] + data["snapshot"]["undated_evidence"]
+            if not any(e["text"] for e in supplied):
+                self.assertEqual(data["required_unit_indices"], [])
+                self.assertEqual(data["snapshot"]["units"], [])
+                supporting.append(data)
+                return {"blocks": []}
+            return {"blocks": [{"id": "home", "role": "narrative", "text": source.text, "unit_indices": [0]}]}
+        provider = ScriptedTextProvider(*([compose] * 100))
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000).plan(snapshot, request_id="editorial-context-tail")
+        self.assertTrue(supporting)
+        self.assertEqual(len(plan.blocks), 1)
+        self.assertEqual(plan.blocks[0].text, source.text)
+        supplied = [e for call in provider.calls for e in json.loads(call[0])["snapshot"]["undated_evidence"]]
+        self.assertEqual("".join(e["text"] for e in supplied), source.text)
+        self.assertEqual("".join(e["context"] for e in supplied), source.context)
+
+    def test_editorial_indivisible_metadata_over_budget_fails_before_dispatch(self):
+        snapshot = replace(self.snapshot(), reading_policy=EDITORIAL_READING_POLICY,
+            units=(ReadingUnit("one", "可编辑内容责任。", ("source",), role="counterevidence", status="contested",
+                               reason="必须完整保留的更正适用范围。" * 1000),),
+            evidence=(EvidenceExcerpt("source", "具体反例。"),))
+        provider = ScriptedTextProvider()
+        with self.assertRaisesRegex(ReadingError, "body_context_budget_exceeded"):
+            BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000).plan(snapshot, request_id="metadata-budget")
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(self.ledger.all("SELECT * FROM reader_text_artifacts"), [])
 
     def test_source_composition_hides_machine_prose_and_budgets_only_the_actual_payload(self):
         derived = "AGENT-DERIVED-REPORT-WRAPPER" * 10000

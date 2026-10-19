@@ -281,7 +281,7 @@ The role defaults, explicit rate ceilings and process scope are documented in
 
 Fresh resolver `propose` jobs select `semantic-proposal-v2` only when the
 generation's existing `generation_manifest.metadata_json.reading_policy` binding
-is `source-composition-v1`. Missing bindings, `derived-verbatim-v1` and
+is `source-composition-v1` or `editorial-composition-v1`. Missing bindings, `derived-verbatim-v1` and
 `content-responsibility-v1` retain `semantic-proposal-v1`. The existing metadata
 binder owns admission on a new empty generation; engine only reads its binding
 when selecting a new proposal version. This does not add a runtime policy switch.

@@ -289,7 +289,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
     def test_full_rebuild_real_store_history_migration_and_live_completion(self):
         plan = self.coordinator.plan(PROFILE, run_id="test-run")
         self.assertEqual(plan["history_policy"], "source-first-v1")
-        self.assertEqual(plan["reading_policy"], "source-composition-v1")
+        self.assertEqual(plan["reading_policy"], "editorial-composition-v1")
         self.managed.on_restore = self.live_increment
         result = self.execute()
         self.assertEqual(result["state"], "run_complete", result)
@@ -392,15 +392,13 @@ class RebuildCoordinatorTests(unittest.TestCase):
                         "paragraphs": [{"text": c["after"], "change_ids": [c["id"]],
                             "evidence_refs": [{"item_id": c["item_id"], "evidence_id": e} for e in c["evidence_ids"]],
                             "scopes": [], "corrections": []} for c in changes]}), self.route)
-                if prompt.startswith("{") and {"snapshot", "writing_units", "previous"} <= json.loads(prompt).keys():
+                if prompt.startswith("{") and {"snapshot", "required_unit_indices", "previous"} <= json.loads(prompt).keys():
                     snapshot = json.loads(prompt)["snapshot"]
+                    evidence = snapshot["evidence"] + snapshot.get("undated_evidence", [])
                     blocks = [{"id": "unit-" + unit["id"], "role": "narrative", "text": unit.get("text") or "\n".join(
-                                   e["text"] for e in snapshot["evidence"] if e["id"] in unit["evidence_ids"]),
-                               "unit_ids": [unit["id"]], "evidence_ids": unit["evidence_ids"],
-                               "resource_ids": unit["resource_ids"], "primary_home": snapshot["item_id"]}
-                              for unit in snapshot["units"]]
-                    return TextResult(json.dumps({"item_id": snapshot["item_id"],
-                        "content_revision": snapshot["content_revision"], "blocks": blocks}), self.route)
+                                   e["text"] for e in evidence if e["id"] in unit["evidence_ids"]),
+                               "unit_indices": [index]} for index, unit in enumerate(snapshot["units"])]
+                    return TextResult(json.dumps({"blocks": blocks}), self.route)
                 return super().generate(prompt, **kwargs)
         self.text = BodyText()
         self.roles = ProviderRoles(self.text, self.roles.decision, self.roles.embedding, self.roles.index)

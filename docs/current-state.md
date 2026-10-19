@@ -79,16 +79,19 @@ from the same material. Incomplete scope cannot combine separate trials, and a
 newer overlapping contrary report prevents an unconditional current-state match.
 Incremental BodyPlans may rewrite automatic prose when new details join its
 stable block; unchanged blocks, exact quotations and manual edits remain
-protected. Fresh rebuild plans freeze `reading_policy="source-composition-v1"`
-and use Body v13. The writer receives complete source evidence and context,
-attribution, typed obligations and unit mappings; machine-derived unit prose
-and Item titles stay out of its composition input. Full canonical units remain
-available to program-owned validation and stable-home binding. Explicit verbatim
+protected. Fresh rebuild plans freeze `reading_policy="editorial-composition-v1"`
+and use Body v14. The writer receives complete editable content responsibilities,
+source evidence and context, attribution, typed obligations and unit mappings.
+Complete source objects follow reliable source timestamps; undated evidence has
+no inferred chronology. Item identity classification, commit times and provenance
+labels stay out of the editorial input while canonical snapshots, fingerprints,
+validation and stable-home binding keep their full data. Explicit verbatim
 obligations and source quotations retain their exact-word checks.
-`content-responsibility-v1` plans/generations retain Body v12; missing fields
+`source-composition-v1` plans/generations retain Body v13 and its exact source-only
+inputs; `content-responsibility-v1` retains Body v12. Missing fields
 keep `derived-verbatim-v1`, Body v11 and their frozen inputs. A policy can first
 bind only an empty generation. Verification checks the manifest/generation
-binding and accepts the policy's versions: v13, v12, or retained v2-v11.
+binding and accepts the policy's versions: v14, v13, v12, or retained v2-v11.
 These are candidate source behaviors, not evidence of a private generation
 being repaired, re-rendered or activated.
 Frozen v11/v12 composition prompts distinguish derived text from source
@@ -120,7 +123,7 @@ Resolver proposals also admit two corrections after a complete, bound-route
 response fails model-output validation. They retain the original first prompt,
 request, frozen state and claim, and do not synthesize missing fields. Provider,
 route and unknown failures stop; accepted proposals replay without calls.
-New source-composition generations freeze `semantic-proposal-v2`, which asks
+New source-composition and editorial-composition generations freeze `semantic-proposal-v2`, which asks
 for short natural Item names without concatenating all people and actions or
 changing parameter meanings. Other modes retain v1. This is generation-bound
 guidance; the program does not trim or rewrite the model's title.

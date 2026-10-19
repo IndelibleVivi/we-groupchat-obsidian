@@ -257,13 +257,15 @@
   evidence; local roles do not fabricate Cloudflare accounts or usage.
 - `projections.py`, `controls.py`, `briefing.py`, `delivery.py` and
   `reader_runtime.py` under `core/semantic/` own the Obsidian reading surface.
-  Fresh plans freeze `reading_policy="source-composition-v1"` in plan and
-  generation metadata and write `body-plan-v13` / `body-paged-v13`. Explicit
-  content-responsibility-v1 bindings retain v12; missing-field plans/generations
+  Fresh plans freeze `reading_policy="editorial-composition-v1"` in plan and
+  generation metadata and write `body-plan-v14` / `body-paged-v14`. Explicit
+  source-composition-v1 bindings retain v13 and content-responsibility-v1 bindings
+  retain v12; missing-field plans/generations
   retain derived-verbatim-v1/v11, original prompt/fragment bytes and fingerprints. `bind_reading_policy` admits first binding only in an
   empty canonical/reader generation; populated or in-flight state cannot change
-  policy. Accepted v2-v12 artifacts remain historical and must not be rewritten.
-  The verifier checks manifest/generation policy agreement and accepts v13 only
+  policy. Accepted v2-v13 artifacts remain historical and must not be rewritten.
+  The verifier checks manifest/generation policy agreement and accepts v14 only
+  for editorial composition, v13 only
   for source composition, v12 only for content responsibility, v2-v11 only for
   legacy; writer and verifier stay in lockstep.
   BodyPlan has a unique home for each retained detail; accepted pages are
@@ -289,12 +291,19 @@
   prompt budget; only a source that cannot fit alone is split. Windows continue
   in source order at the original home; context-only tails have no required
   units or narrative. True explicit literals require accepted exact continuations.
-  V11/v12 continuation bytes remain frozen. Do not restore transcript copying
+  V11-v13 continuation bytes remain frozen. Do not restore transcript copying
   as a substitute for evidence preservation.
   Frozen v11/v12 composition inputs retain their original technical/life
   examples and input semantics; these examples are never current evidence.
   Their prior-plan and literal-fragment prompts retain the original omissions.
-  V13 uses a separate source-only composition contract. Validators and explicit
+  V13 retains its separate source-only composition contract. Fresh v14 supplies
+  complete editable unit responsibilities and complete source text/context with
+  captured attribution, directly ordered by reliable source timestamps. Its
+  provider input omits machine commit times, provenance labels and Item identity
+  classification; canonical snapshots, fingerprints and validators keep them.
+  Meaning, evidence, explicit literals and resources remain accountable through
+  the same bounded window owner and final stable homes. Do not make editable
+  derived prose a literal obligation. Validators and explicit
   literal obligations remain unchanged; prompt guidance is not prose acceptance.
   Writer evidence chronology uses offset-aware source timestamps only; unit
   order, commit order and semantic revision time never establish event order.

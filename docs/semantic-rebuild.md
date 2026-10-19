@@ -13,21 +13,29 @@
 它们不生成 semantic core capture、Item、model job 或旧知识导入 Obligation。
 Markdown 与 index 是 derived consumers。没有 policy 字段的旧 plan 仍按
 `legacy-semantic-v1` 的原 fingerprint 与模型义务恢复，不会在 resume 时静默改成新
-policy。新计划另行冻结 `reading_policy="source-composition-v1"`，在全新空
-generation 的 `metadata_json` 绑定，并选择 Body v13。canonical units、fingerprints
-与完整责任不变；只有模型 presentation payload 移除 derived `unit.text` 和 Item title。
-作者依据完整 source/context/attribution/time/resource 直接写正文，同一次响应用既有
+policy。新计划另行冻结 `reading_policy="editorial-composition-v1"`，在全新空
+generation 的 `metadata_json` 绑定，并选择 Body v14。canonical units、fingerprints
+与完整责任不变；模型 presentation payload 提供完整可编辑 unit 内容责任，
+保留 role/evidence/resource/status 与实际 explicit verbatim。完整原文 text/context、
+captured speaker/source_time 保持各自绑定，按 offset-aware 来源时间直接排列，
+无可靠日期的完整对象单列；同刻不推因果、undated 不造先后。Item kind、identity scope、
+derived title、commit/known time 与 provenance 审计标签不进入新写作 payload；
+仅保留 item_id/content_revision 的最小 binding envelope，复用现有精确请求/cache 身份。
+作者围绕事情本身写技术问题/做法/条件/已观察结果/限制或生活经历/反应，同一次响应用既有
 `unit_indices` 映射全部责任，不另加 draft/mapper 阶段。真正显式
 `ReadingUnit.verbatim`、精确来源、资源、typed status 与稳定 home 义务保持。
-已有 `content-responsibility-v1` / Body v12 完整冻结保留；没有 `reading_policy`
+已有 `source-composition-v1` / Body v13 与 `content-responsibility-v1` / Body v12 完整冻结保留；没有 `reading_policy`
 的旧计划仍使用 `derived-verbatim-v1` / Body v11，不补字段、
 不改原 fingerprint 或 frozen prompt。旧 populated/inflight generation 不能切换
-模式；显式 v12 binding 也不能自动改为 v13。首次绑定要求 canonical 和 reader 表
-均无记录，既有匹配绑定可正常恢复。v11/v12 prompt 和 fragment identities 不变，
+模式；显式 v12/v13 binding 不能自动改为 v14。首次绑定要求 canonical 和 reader 表
+均无记录，既有匹配绑定可正常恢复。v11/v12/v13 prompt 和 fragment identities 不变，
 accepted、known-failed 和 unknown 证据都不会重释。预算按实际 presentation payload
-计算；超长 derived prose 不触发分段。相邻来源优先将 text/context 一起装入同一
+计算；v14 超长的可编辑 responsibility 在原 continuation owner 中完整按序切片，
+与 source windows 顺次处理，不按 responsibility × source 生成调用、不要求照抄派生说明。
+旧 v13 继续隐藏 derived prose，不因其长度触发分段。相邻来源优先将 text/context 一起装入同一
 bounded window；只有单条无法独立放入预算时才成对切段。完整 source 顺序仍保留，
 context-only 尾段不再承担独立成文或 home，显式原文继续走 accepted strict 路径。
+真正不可分 metadata 超出实际 prompt budget 时 fail closed，不静默裁剪。
 独立 verifier 核对 plan-derived manifest、generation metadata 和 artifact version，
 不能通过改成 legacy mode 跳过原逐字保证；结构通过不代表自然语言质量验收。
 协议细节分别见 [store](semantic-store-contract.md)、
