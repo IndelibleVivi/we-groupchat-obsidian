@@ -1007,6 +1007,36 @@ class SemanticEngine:
             plan_revision = max(plan_revision + 1, row[0] or 1)
         return result
 
+    def _proposal_job(self, batch_id, state):
+        """Reuse frozen work across routes before choosing a new prompt."""
+        inputs = {"batch_id": batch_id, "state": state}
+        connection = self.store.connect()
+        try:
+            # semantic_jobs_batch selects this kind/batch before exact state
+            # comparison. Active TEXT routes may change; an old unknown or
+            # accepted invocation must remain discoverable under its own route.
+            frozen = list(connection.execute("SELECT inputs_json,versions_json,state FROM jobs WHERE kind='propose' "
+                "AND json_extract(inputs_json,'$.batch_id')=? AND json_extract(inputs_json,'$.state')=?",
+                (batch_id, _json(state))))
+            if any(row["state"] == "unknown" for row in frozen):
+                raise SemanticValidationError("semantic_job_busy_or_unknown")
+            if len(frozen) > 1:
+                raise SemanticValidationError("semantic_proposal_version_conflict")
+            if frozen:
+                inputs, versions = json.loads(frozen[0]["inputs_json"]), json.loads(frozen[0]["versions_json"])
+            else:
+                metadata = json.loads(connection.execute(
+                    "SELECT metadata_json FROM generation_manifest WHERE generation_id=?",
+                    (self.store.generation_id,)).fetchone()[0])
+                # The generation's existing metadata binder owns this policy;
+                # engine only selects a prompt and never binds or changes it.
+                version = "semantic-proposal-v2" if metadata.get("reading_policy") == "source-composition-v1" else "semantic-proposal-v1"
+                versions = {"prompt": version, "text_route": asdict(self.text_provider.route),
+                            "decision_route": asdict(self.decision_provider.route)}
+        finally:
+            connection.close()
+        return self.jobs.ensure("propose", inputs, versions)
+
     def _resolve_page_once(self, batch_id, *, extracted, plan_revision=1, page_no=0, complete_batch=True):
         observations = extracted["observations"]
         if not observations:
@@ -1066,9 +1096,10 @@ class SemanticEngine:
                  "new_item_ids": new_ids, "read_set": read_set, "global_catalog": catalog}
         if len(_json(state).encode()) > 70000:
             raise SemanticValidationError("semantic_resolver_context_too_large")
-        job = self.jobs.ensure("propose", {"batch_id": batch_id, "state": state},
-                               {"prompt": "semantic-proposal-v1", "text_route": asdict(self.text_provider.route),
-                                "decision_route": asdict(self.decision_provider.route)})
+        job = self._proposal_job(batch_id, state)
+        decision_route = job["versions"].get("decision_route")
+        if not isinstance(decision_route, dict):
+            raise SemanticValidationError("semantic_proposal_route_binding_missing")
 
         def invoke(job_id):
             prompt = (
@@ -1111,6 +1142,18 @@ class SemanticEngine:
                 "Item relatedness alone never retracts a claim. Do not invent claim IDs.\n"
                 + _json(state)
             )
+            if job["versions"]["prompt"] == "semantic-proposal-v2":
+                instructions, frozen_state = prompt.rsplit("\n", 1)
+                prompt = (instructions + "\nItem naming contract: Use a short, natural topic name in the "
+                    "source material's language that identifies the matter. Do not concatenate every person, "
+                    "utterance, action, diagnosis, suggestion and detail into the title. Do not promote guesses "
+                    "or reported experience into established conclusions. Preserve the meaning of specific "
+                    "parameters, quantities, conditions and steps: a wait-duration limit is not a retry-count "
+                    "limit. Do not infer gender or identity, or invent content from unread attachments. "
+                    "Body and sources retain the full details; a title may preserve useful names and technical "
+                    "terms without listing them all.\n" + frozen_state)
+            elif job["versions"]["prompt"] != "semantic-proposal-v1":
+                raise SemanticValidationError("semantic_proposal_version_conflict")
             initial_prompt = prompt
             for repair in range(3):
                 if asdict(self.text_provider.route) != job["versions"]["text_route"]:
@@ -1167,9 +1210,11 @@ class SemanticEngine:
         # Decision has its own accepted artifact. A crash after this call cannot
         # replay the already accepted text or choice on resume.
         decision_job = self.jobs.ensure("decision", {"proposal_job_id": job["job_id"], "proposal": proposal_artifact},
-                                        {"contract": "semantic-choice-v1", "route": asdict(self.decision_provider.route)})
+                                        {"contract": "semantic-choice-v1", "route": decision_route})
 
         def decide(job_id):
+            if asdict(self.decision_provider.route) != decision_route:
+                raise ProviderError("decision_provider_route_changed")
             request = DecisionRequest(
                 {"state": state, "proposal": proposal_artifact["proposal"]},
                 (DecisionQuestion("plan", "choice", "Are all supplied exact actions grounded and safe to commit? "
@@ -1187,6 +1232,8 @@ class SemanticEngine:
                                    "defer": "Keep captured Observations unresolved for later review."}),),
             )
             response = self.decision_provider.decide(request, request_id=job_id + ":choice", generation_id=self.store.generation_id)
+            if asdict(response.route) != decision_route:
+                raise ProviderError("decision_provider_route_changed")
             answers = parse_decision_answers({key: {k: v for k, v in asdict(answer).items() if v is not None}
                                               for key, answer in response.answers.items()}, request)
             return {"choice": answers["plan"].choice, "route": asdict(response.route),

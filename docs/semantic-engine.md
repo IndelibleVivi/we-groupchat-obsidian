@@ -207,8 +207,45 @@ rate capacity renews the owned job lease without holding a database transaction.
 The role defaults, explicit rate ceilings and process scope are documented in
 [semantic-providers.md](semantic-providers.md#bounded-provider-admission).
 
-Resolver `propose` jobs retain the exact `semantic-proposal-v1` initial prompt,
-frozen state and original `<job_id>:text` request ID. After a complete response
+Fresh resolver `propose` jobs select `semantic-proposal-v2` only when the
+generation's existing `generation_manifest.metadata_json.reading_policy` binding
+is `source-composition-v1`. Missing bindings, `derived-verbatim-v1` and
+`content-responsibility-v1` retain `semantic-proposal-v1`. The existing metadata
+binder owns admission on a new empty generation; engine only reads its binding
+when selecting a new proposal version. This does not add a runtime policy switch.
+The existing non-unique derived `semantic_jobs_batch` index selects
+`jobs(kind,json_extract(inputs_json,'$.batch_id'))` before exact frozen-state
+comparison. Lookup examines this batch's proposals across all provider routes,
+without parsing unrelated batches' job inputs. Matching proposals keep their
+original inputs, versions and identity before any metadata-based selection.
+Unknown work blocks first, and multiple conflicting frozen proposals fail
+closed. Invocation uses the job's frozen version, never the latest generation
+metadata.
+
+Active TEXT configuration can change, including a text-backed decision route.
+Such a change must not hide the old proposal or reissue accepted/unknown work.
+The coupled choice job uses the proposal's already frozen `decision_route`.
+Accepted proposal/choice artifacts replay without calls even when the current
+routes differ; an unknown proposal or choice still blocks. Unaccepted work
+requires its original bound route and fails before dispatch if the current
+provider differs. A returned choice must also match that bound route. Missing
+route bindings fail explicitly; the program does not infer a route for an
+incomplete fixture or add a route-migration registry.
+
+The v2 naming contract asks for a short, natural topic name in the source
+material's language that identifies the matter. A title should not concatenate
+every person, utterance, action, diagnosis, suggestion and detail. Guesses and
+reported experience retain their uncertainty; specific parameters, quantities,
+conditions and step meanings stay intact. A limit on waiting duration must not
+become a limit on retry count. Names and technical terms may clarify the topic
+without listing them all. Titles must not infer gender, identity or content of
+unread attachments. Body and sources retain the full details. The program keeps
+the model's title exactly and applies the same strict action validator; there
+is no title clipping, automatic rewriting or field completion. Synthetic tests
+establish version binding and preservation, not actual model naming quality.
+
+Both versions retain their exact initial prompt, frozen state and original
+`<job_id>:text` request ID; complete v1 prompt bytes remain unchanged. After a complete response
 matches the job's bound text route, a model-output validation failure may receive
 at most two corrections inside the same claim, worker and durable attempt
 (three text calls total). Follow-up IDs are `<job_id>:text:correction-1` and
@@ -226,7 +263,7 @@ read-set or other non-model failures stop the claim. A correction call with an
 unknown outcome makes the original job unknown and blocks resume without another
 call; no repair child, new proposal version or second ledger is created. Three
 known-invalid responses leave one failed attempt without an accepted proposal
-or canonical action commit. Existing pending/failed v1 jobs keep their original
+or canonical action commit. Existing pending/failed v1/v2 jobs keep their original
 inputs, versions and identity when the existing JobStore claim rules permit a
 normal invocation; earlier failed attempts remain recorded, and an old error
 code alone does not authorize correction. No row is reset. Accepted artifacts
@@ -445,7 +482,8 @@ Focused synthetic verification from the repository root:
 ```
 
 These tests use temporary canonical SQLite stores and deterministic fake
-providers. They cover life scenes, malformed provenance, accepted-artifact
+providers. They cover version-bound Item naming, strict proposal correction,
+life scenes, malformed provenance, accepted-artifact
 recovery, large capture paging, async index tails, profile isolation, directed
 corrections, identity merge/split, View reuse, named-case temporal negatives,
 independent witness revocation and the reader bridge. They do not establish

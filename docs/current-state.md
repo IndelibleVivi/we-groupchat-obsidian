@@ -79,22 +79,25 @@ from the same material. Incomplete scope cannot combine separate trials, and a
 newer overlapping contrary report prevents an unconditional current-state match.
 Incremental BodyPlans may rewrite automatic prose when new details join its
 stable block; unchanged blocks, exact quotations and manual edits remain
-protected. Fresh rebuild plans freeze `reading_policy="content-responsibility-v1"`
-and use Body v12: derived descriptions remain editable while their content,
-evidence, resources, claim status and stable homes remain responsibilities.
-Explicit verbatim obligations and source quotations retain their exact-word
-checks. Plans and generations without this field keep `derived-verbatim-v1`,
-Body v11 and their frozen inputs; the field can first bind only an empty
-generation. Verification checks the manifest/generation policy binding and
-accepts v12 only for the fresh policy, retaining v2-v11 for legacy artifacts.
+protected. Fresh rebuild plans freeze `reading_policy="source-composition-v1"`
+and use Body v13. The writer receives complete source evidence and context,
+attribution, typed obligations and unit mappings; machine-derived unit prose
+and Item titles stay out of its composition input. Full canonical units remain
+available to program-owned validation and stable-home binding. Explicit verbatim
+obligations and source quotations retain their exact-word checks.
+`content-responsibility-v1` plans/generations retain Body v12; missing fields
+keep `derived-verbatim-v1`, Body v11 and their frozen inputs. A policy can first
+bind only an empty generation. Verification checks the manifest/generation
+binding and accepts the policy's versions: v13, v12, or retained v2-v11.
 These are candidate source behaviors, not evidence of a private generation
 being repaired, re-rendered or activated.
-Composition prompts distinguish derived unit text from source wording
-and include synthetic technical/life examples of one content home without
-repeated prose. Prior-plan and literal-fragment work omit those examples;
-explicit required words, validation and unknown-outcome boundaries remain
-protected. Oversized fresh descriptions can be edited within their existing
-fragment owner; only true literal fragments require exact continuation.
+Frozen v11/v12 composition prompts distinguish derived text from source
+wording and retain their synthetic technical/life examples; prior-plan and
+literal-fragment work retain their original omissions. V13 composes directly
+from source material. Explicit required words, validation and unknown-outcome
+boundaries remain protected. Source-composition continuations page the actual evidence within
+the existing fragment owner; hidden derived prose does not create provider
+pages. True literal fragments require exact accepted continuation.
 These examples are guidance, not evidence that a real note passed editing.
 The writer receives an explicit evidence sequence ordered by offset-aware
 source timestamps; undated evidence stays undated. Unit order and commit order
@@ -117,6 +120,16 @@ Resolver proposals also admit two corrections after a complete, bound-route
 response fails model-output validation. They retain the original first prompt,
 request, frozen state and claim, and do not synthesize missing fields. Provider,
 route and unknown failures stop; accepted proposals replay without calls.
+New source-composition generations freeze `semantic-proposal-v2`, which asks
+for short natural Item names without concatenating all people and actions or
+changing parameter meanings. Other modes retain v1. This is generation-bound
+guidance; the program does not trim or rewrite the model's title.
+Frozen proposal and choice jobs retain their original routes across active
+configuration changes. Accepted work replays without calls, unknown work
+blocks, and unfinished work with a mismatched route stops before dispatch.
+The existing jobs table gains a derived kind/batch index so cross-route
+recovery reads one batch without scanning every stored JSON input. Index
+creation leaves canonical rows, attempts and artifacts unchanged.
 This is candidate recovery support, not evidence of real note quality or a
 completed migration. See [semantic-engine.md](semantic-engine.md) for limits.
 New extraction pages include the preceding bounded page as ordered non-core

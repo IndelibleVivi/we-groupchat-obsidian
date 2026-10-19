@@ -289,7 +289,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
     def test_full_rebuild_real_store_history_migration_and_live_completion(self):
         plan = self.coordinator.plan(PROFILE, run_id="test-run")
         self.assertEqual(plan["history_policy"], "source-first-v1")
-        self.assertEqual(plan["reading_policy"], "content-responsibility-v1")
+        self.assertEqual(plan["reading_policy"], "source-composition-v1")
         self.managed.on_restore = self.live_increment
         result = self.execute()
         self.assertEqual(result["state"], "run_complete", result)
@@ -394,7 +394,8 @@ class RebuildCoordinatorTests(unittest.TestCase):
                             "scopes": [], "corrections": []} for c in changes]}), self.route)
                 if prompt.startswith("{") and {"snapshot", "writing_units", "previous"} <= json.loads(prompt).keys():
                     snapshot = json.loads(prompt)["snapshot"]
-                    blocks = [{"id": "unit-" + unit["id"], "role": "narrative", "text": unit["text"],
+                    blocks = [{"id": "unit-" + unit["id"], "role": "narrative", "text": unit.get("text") or "\n".join(
+                                   e["text"] for e in snapshot["evidence"] if e["id"] in unit["evidence_ids"]),
                                "unit_ids": [unit["id"]], "evidence_ids": unit["evidence_ids"],
                                "resource_ids": unit["resource_ids"], "primary_home": snapshot["item_id"]}
                               for unit in snapshot["units"]]

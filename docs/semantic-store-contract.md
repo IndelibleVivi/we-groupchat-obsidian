@@ -8,6 +8,12 @@ remain outside this owner. This is source implementation, not live acceptance.
 This schema is a fresh candidate generation schema; opening a different schema
 or generation fails before DDL. It is not an in-place upgrader for a deployed
 knowledge database. Symlinks and non-regular database paths are rejected.
+Opening a valid existing generation also creates the derived
+`semantic_jobs_batch` index on job kind and the frozen input's batch ID if it is
+missing. This bounds recovery lookups to one batch across provider routes;
+it changes no columns, canonical revisions, job states, attempts or accepted
+artifacts. It is a query index, not a data-format migration or permission to
+reconcile unknown work.
 
 All public payloads below are dictionaries; IDs are strings. Errors expose only
 `SemanticStoreError.code`. `get_item`, `list_items`, `get_observation`,

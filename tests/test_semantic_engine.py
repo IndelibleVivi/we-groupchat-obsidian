@@ -272,15 +272,25 @@ class ProposalCorrectionTests(unittest.TestCase):
     def setUp(self):
         self.new_fixture()
 
-    def new_fixture(self):
+    def new_fixture(self, reading_policy=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.store = SemanticStore(Path(temporary.name).resolve() / "knowledge.sqlite", "synthetic-generation",
                                    now_func=lambda: 1000)
+        if reading_policy is not None:
+            self.fixture_reading_policy(reading_policy)
         capture(self.store, "proposal", ["一个完整且独立的合成生活场景。"])
         self.extracted = SemanticEngine(self.store, FakeText(), FakeDecision()).extract_batch("proposal")
 
-    def engine(self, *outputs):
+    def fixture_reading_policy(self, policy):
+        # Synthetic generation binding only. Tests that alter it after freezing
+        # probe the no-rebinding boundary; they do not authorize a runtime switch.
+        with self.store.transaction() as db:
+            metadata = json.loads(db.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0])
+            metadata["reading_policy"] = policy
+            db.execute("UPDATE generation_manifest SET metadata_json=?", (json.dumps(metadata),))
+
+    def engine(self, *outputs, title=None):
         store = self.store
         class ScriptedText(FakeText):
             def __init__(provider):
@@ -299,6 +309,8 @@ class ProposalCorrectionTests(unittest.TestCase):
                 if output in {"empty", "non-text"}:
                     return TextResult("" if output == "empty" else None, result.route)
                 value = json.loads(result.text)
+                if title is not None:
+                    value["actions"][0]["title"] = title
                 if output in {"missing", "wrong-route-invalid"}:
                     value["actions"][0].pop("action_key")
                     value["actions"][0].pop("item_id")
@@ -477,6 +489,271 @@ class ProposalCorrectionTests(unittest.TestCase):
             engine.resolve_batch("proposal", extracted=self.extracted)
         self.assertEqual(text.calls, [])
         self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind='propose'"), before)
+
+    def test_source_composition_v2_naming_contract_survives_known_output_correction(self):
+        self.new_fixture("source-composition-v1")
+        engine, text, _ = self.engine("missing", "valid", title="等待时长上限的设置")
+        result = engine.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual(result["status"], "complete")
+        job = self.rows("SELECT * FROM jobs WHERE kind='propose'")[0]
+        self.assertEqual(json.loads(job["versions_json"])["prompt"], "semantic-proposal-v2")
+        self.assertEqual(text.calls, [job["job_id"] + ":text", job["job_id"] + ":text:correction-1"])
+        self.assertEqual(text.claims, [(job["job_id"], "running", "proposal-worker", 1)] * 2)
+        for prompt in text.prompts:
+            self.assertIn("short, natural topic name", prompt)
+            self.assertIn("source material's language", prompt)
+            self.assertIn("wait-duration limit", prompt)
+            self.assertIn("retry-count limit", prompt)
+            self.assertIn("Do not concatenate every person", prompt)
+            self.assertIn("Do not promote guesses", prompt)
+            self.assertIn("Do not infer gender or identity", prompt)
+            self.assertIn("unread attachments", prompt)
+        self.assertEqual(text.prompts[0].rsplit("\n", 1)[1], text.prompts[1].rsplit("\n", 1)[1])
+        self.assertEqual(self.store.list_items()[0]["title"], "等待时长上限的设置")
+
+    def test_other_reading_modes_keep_exact_v1_prompt_contract(self):
+        for policy in (None, "derived-verbatim-v1", "content-responsibility-v1"):
+            with self.subTest(policy=policy):
+                self.new_fixture(policy)
+                engine, text, _ = self.engine("valid")
+                engine.resolve_batch("proposal", extracted=self.extracted)
+                job = self.rows("SELECT * FROM jobs WHERE kind='propose'")[0]
+                self.assertEqual(json.loads(job["versions_json"])["prompt"], "semantic-proposal-v1")
+                instructions, payload = text.prompts[0].rsplit("\n", 1)
+                self.assertEqual(hashlib.sha256(instructions.encode()).hexdigest(),
+                                 "6461e305fb6e38136871e5c9e25a10637fdbf0f55e6a25b712c6894f27286b98")
+                self.assertEqual(json.loads(payload), json.loads(job["inputs_json"])["state"])
+                self.assertNotIn("Item naming contract", text.prompts[0])
+
+    def test_frozen_v1_and_v2_pending_jobs_keep_their_prompt_after_metadata_drift(self):
+        for initial, changed, version in ((None, "source-composition-v1", "semantic-proposal-v1"),
+                                           ("source-composition-v1", "content-responsibility-v1", "semantic-proposal-v2")):
+            with self.subTest(version=version):
+                self.new_fixture(initial)
+                engine, text, _ = self.engine("valid")
+                frozen = self.freeze(engine)
+                self.assertEqual(frozen["versions"]["prompt"], version)
+                self.fixture_reading_policy(changed)
+                engine.resolve_batch("proposal", extracted=self.extracted)
+                jobs = self.rows("SELECT * FROM jobs WHERE kind='propose'")
+                self.assertEqual([job["job_id"] for job in jobs], [frozen["job_id"]])
+                self.assertEqual(json.loads(jobs[0]["versions_json"]), frozen["versions"])
+                self.assertEqual("Item naming contract" in text.prompts[0], version == "semantic-proposal-v2")
+
+    def test_frozen_v1_and_v2_accepted_jobs_replay_without_new_version_calls(self):
+        for initial, changed in ((None, "source-composition-v1"),
+                                 ("source-composition-v1", "content-responsibility-v1")):
+            with self.subTest(initial=initial):
+                self.new_fixture(initial)
+                engine, text, decision = self.engine("valid")
+                with patch.object(self.store, "apply_proposal", side_effect=RuntimeError("synthetic before commit")):
+                    with self.assertRaisesRegex(RuntimeError, "before commit"):
+                        engine.resolve_batch("proposal", extracted=self.extracted)
+                frozen = self.rows("SELECT * FROM jobs WHERE kind='propose'")
+                artifact = self.rows("SELECT * FROM accepted_job_artifacts WHERE job_id=?", (frozen[0]["job_id"],))
+                self.fixture_reading_policy(changed)
+                sent = list(text.calls), list(decision.calls)
+                with patch("core.semantic.engine.validate_proposal", side_effect=AssertionError("revalidated accepted proposal")):
+                    engine.resolve_batch("proposal", extracted=self.extracted)
+                self.assertEqual((text.calls, decision.calls), sent)
+                self.assertEqual([job["job_id"] for job in self.rows("SELECT * FROM jobs WHERE kind='propose'")],
+                                 [frozen[0]["job_id"]])
+                self.assertEqual(self.rows("SELECT * FROM accepted_job_artifacts WHERE job_id=?", (frozen[0]["job_id"],)), artifact)
+
+    def test_frozen_v1_and_v2_unknown_jobs_block_new_version_dispatch(self):
+        for initial, changed in ((None, "source-composition-v1"),
+                                 ("source-composition-v1", "content-responsibility-v1")):
+            with self.subTest(initial=initial):
+                self.new_fixture(initial)
+                engine, text, _ = self.engine("valid")
+                frozen = self.freeze(engine)
+                engine.jobs.claim(frozen["job_id"], "historical-worker")
+                engine.jobs.fail(frozen["job_id"], "historical-worker", "synthetic_unknown", unknown=True)
+                before = self.rows("SELECT * FROM jobs WHERE kind='propose'")
+                self.fixture_reading_policy(changed)
+                with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+                    engine.resolve_batch("proposal", extracted=self.extracted)
+                self.assertEqual(text.calls, [])
+                self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind='propose'"), before)
+
+    def test_v2_strict_shape_rejection_exhausts_without_filling_fields(self):
+        self.new_fixture("source-composition-v1")
+        engine, text, _ = self.engine("missing")
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_shape"):
+            engine.resolve_batch("proposal", extracted=self.extracted)
+        job = self.rows("SELECT * FROM jobs WHERE kind='propose'")[0]
+        self.assertEqual(json.loads(job["versions_json"])["prompt"], "semantic-proposal-v2")
+        self.assertEqual((job["state"], job["attempt"]), ("failed", 1))
+        self.assertEqual(len(text.calls), 3)
+        self.assertTrue(all("Item naming contract" in prompt for prompt in text.prompts))
+        self.assertFalse(self.rows("SELECT * FROM accepted_job_artifacts WHERE job_id=?", (job["job_id"],)))
+        self.assertFalse(self.rows("SELECT * FROM action_receipts"))
+
+    def test_v2_unknown_correction_stays_on_original_job_after_metadata_drift(self):
+        self.new_fixture("source-composition-v1")
+        engine, text, decision = self.engine("missing", ProviderError("synthetic_correction_unknown", outcome_unknown=True))
+        with self.assertRaisesRegex(ProviderError, "synthetic_correction_unknown"):
+            engine.resolve_batch("proposal", extracted=self.extracted)
+        job = self.rows("SELECT * FROM jobs WHERE kind='propose'")[0]
+        self.assertEqual(json.loads(job["versions_json"])["prompt"], "semantic-proposal-v2")
+        self.assertEqual((job["state"], job["attempt"]), ("unknown", 1))
+        self.assertEqual(len(text.calls), 2)
+        self.fixture_reading_policy("content-responsibility-v1")
+        sent = list(text.calls), list(decision.calls)
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            SemanticEngine(self.store, text, decision).resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual((text.calls, decision.calls), sent)
+        self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind='propose'"), [job])
+
+    def test_conflicting_frozen_proposals_fail_closed_with_unknown_priority(self):
+        engine, text, _ = self.engine("valid")
+        old = self.freeze(engine)
+        alternative = engine.jobs.ensure("propose", old["inputs"], dict(old["versions"], prompt="semantic-proposal-v2"))
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_proposal_version_conflict"):
+            engine.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual(text.calls, [])
+        engine.jobs.claim(alternative["job_id"], "historical-worker")
+        engine.jobs.fail(alternative["job_id"], "historical-worker", "synthetic_unknown", unknown=True)
+        before = self.rows("SELECT * FROM jobs WHERE kind='propose'")
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            engine.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual(text.calls, [])
+        self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind='propose'"), before)
+
+    def test_frozen_proposal_lookup_has_a_fixed_sqlite_work_budget(self):
+        self.new_fixture("source-composition-v1")
+        engine, _, _ = self.engine("valid")
+        frozen = self.freeze(engine)
+        for index in range(320):
+            engine.jobs.ensure("propose", {"batch_id": "unrelated-" + str(index),
+                "state": {"unrelated_material": "x" * 2048}}, frozen["versions"])
+        connect = self.store.connect
+        steps = [0]
+        def budget():
+            steps[0] += 1
+            return steps[0] > 1000
+        def bounded_connection():
+            connection = connect()
+            connection.set_progress_handler(budget, 1)
+            return connection
+        with patch.object(self.store, "connect", side_effect=bounded_connection):
+            reused = engine._proposal_job("proposal", frozen["inputs"]["state"])
+            fresh = engine._proposal_job("new-synthetic-batch", frozen["inputs"]["state"])
+        self.assertEqual(reused["job_id"], frozen["job_id"])
+        self.assertEqual(fresh["versions"]["prompt"], "semantic-proposal-v2")
+        self.assertLessEqual(steps[0], 1000)
+
+    def changed_route_engine(self):
+        engine, text, decision = self.engine("valid")
+        text.route = ProviderRoute("synthetic", "changed-text", "text")
+        decision.route = ProviderRoute("synthetic", "changed-decision", "decision")
+        return engine, text, decision
+
+    def test_changed_routes_cannot_bypass_unknown_proposal(self):
+        engine, _, _ = self.engine("missing", ProviderError("synthetic_proposal_unknown", outcome_unknown=True))
+        with self.assertRaisesRegex(ProviderError, "synthetic_proposal_unknown"):
+            engine.resolve_batch("proposal", extracted=self.extracted)
+        before = self.rows("SELECT * FROM jobs WHERE kind='propose'")
+        changed, text, decision = self.changed_route_engine()
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            changed.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual((text.calls, decision.calls), ([], []))
+        self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind='propose'"), before)
+
+    def test_changed_routes_reuse_accepted_proposal_and_choice_without_calls(self):
+        engine, _, _ = self.engine("valid")
+        with patch.object(self.store, "apply_proposal", side_effect=RuntimeError("synthetic before commit")):
+            with self.assertRaisesRegex(RuntimeError, "before commit"):
+                engine.resolve_batch("proposal", extracted=self.extracted)
+        artifacts = self.rows("SELECT a.* FROM accepted_job_artifacts a JOIN jobs j USING(job_id) WHERE j.kind IN ('propose','decision')")
+        changed, text, decision = self.changed_route_engine()
+        result = changed.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual((text.calls, decision.calls), ([], []))
+        self.assertEqual(self.rows("SELECT a.* FROM accepted_job_artifacts a JOIN jobs j USING(job_id) WHERE j.kind IN ('propose','decision')"), artifacts)
+
+    def test_changed_routes_cannot_bypass_unknown_choice(self):
+        engine, _, decision = self.engine("valid")
+        with patch.object(decision, "decide", side_effect=ProviderError("synthetic_choice_unknown", outcome_unknown=True)):
+            with self.assertRaisesRegex(ProviderError, "synthetic_choice_unknown"):
+                engine.resolve_batch("proposal", extracted=self.extracted)
+        before = self.rows("SELECT * FROM jobs WHERE kind IN ('propose','decision')")
+        changed, text, decision = self.changed_route_engine()
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            changed.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual((text.calls, decision.calls), ([], []))
+        self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind IN ('propose','decision')"), before)
+
+    def test_changed_route_does_not_dispatch_an_unaccepted_frozen_proposal(self):
+        engine, _, _ = self.engine("valid")
+        frozen = self.freeze(engine)
+        changed, text, decision = self.changed_route_engine()
+        with self.assertRaisesRegex(ProviderError, "text_provider_route_changed"):
+            changed.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual((text.calls, decision.calls), ([], []))
+        jobs = self.rows("SELECT * FROM jobs WHERE kind='propose'")
+        self.assertEqual([job["job_id"] for job in jobs], [frozen["job_id"]])
+        self.assertEqual(json.loads(jobs[0]["versions_json"]), frozen["versions"])
+        self.assertFalse(self.rows("SELECT * FROM action_receipts"))
+
+    def test_changed_route_does_not_dispatch_an_unaccepted_frozen_choice(self):
+        engine, _, _ = self.engine("valid")
+        accepted = engine._accepted
+        def before_choice(job, callback):
+            if job["kind"] == "decision":
+                raise RuntimeError("synthetic before choice dispatch")
+            return accepted(job, callback)
+        with patch.object(engine, "_accepted", side_effect=before_choice):
+            with self.assertRaisesRegex(RuntimeError, "before choice dispatch"):
+                engine.resolve_batch("proposal", extracted=self.extracted)
+        frozen = self.rows("SELECT * FROM jobs WHERE kind='decision'")[0]
+        changed, text, decision = self.changed_route_engine()
+        with self.assertRaisesRegex(ProviderError, "decision_provider_route_changed"):
+            changed.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual((text.calls, decision.calls), ([], []))
+        jobs = self.rows("SELECT * FROM jobs WHERE kind='decision'")
+        self.assertEqual([job["job_id"] for job in jobs], [frozen["job_id"]])
+        self.assertEqual(jobs[0]["versions_json"], frozen["versions_json"])
+        self.assertFalse(self.rows("SELECT * FROM action_receipts"))
+
+    def test_returned_choice_must_match_the_proposal_frozen_route(self):
+        engine, _, decision = self.engine("valid")
+        decide = decision.decide
+        def wrong_route(request, **kwargs):
+            result = decide(request, **kwargs)
+            return DecisionResult(result.answers, ProviderRoute("synthetic", "unexpected", "decision"))
+        with patch.object(decision, "decide", side_effect=wrong_route):
+            with self.assertRaisesRegex(ProviderError, "decision_provider_route_changed"):
+                engine.resolve_batch("proposal", extracted=self.extracted)
+        job = self.rows("SELECT * FROM jobs WHERE kind='decision'")[0]
+        self.assertEqual((job["state"], job["attempt"]), ("failed", 1))
+        self.assertEqual(len(decision.calls), 1)
+        self.assertFalse(self.rows("SELECT * FROM accepted_job_artifacts WHERE job_id=?", (job["job_id"],)))
+        self.assertFalse(self.rows("SELECT * FROM action_receipts"))
+
+    def test_incomplete_fixture_versions_cannot_invent_a_decision_route(self):
+        engine, text, decision = self.engine("valid")
+        ensure = engine.jobs.ensure
+        def incomplete_fixture(kind, inputs, versions):
+            if kind == "propose":
+                versions = {key: value for key, value in versions.items() if key != "decision_route"}
+            return ensure(kind, inputs, versions)
+        with patch.object(engine.jobs, "ensure", side_effect=incomplete_fixture):
+            with self.assertRaisesRegex(SemanticValidationError, "semantic_proposal_route_binding_missing"):
+                engine.resolve_batch("proposal", extracted=self.extracted)
+        before = self.rows("SELECT * FROM jobs WHERE kind='propose'")
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_proposal_route_binding_missing"):
+            engine.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual((text.calls, decision.calls), ([], []))
+        self.assertEqual(self.rows("SELECT * FROM jobs WHERE kind='propose'"), before)
+        self.assertFalse(self.rows("SELECT * FROM jobs WHERE kind='decision'"))
+
+    def test_v2_never_trims_or_rewrites_the_model_title(self):
+        self.new_fixture("source-composition-v1")
+        title = "称呼、动作和完整细节仍由模型选择，程序不会按字数截断这个不够简短的标题" * 3
+        engine, _, _ = self.engine("valid", title=title)
+        engine.resolve_batch("proposal", extracted=self.extracted)
+        self.assertEqual(self.store.list_items()[0]["title"], title)
 
 
 class EngineIntegrationTests(unittest.TestCase):

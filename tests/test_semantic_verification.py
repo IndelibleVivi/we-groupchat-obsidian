@@ -22,7 +22,7 @@ from core.semantic.engine import CapturedSource, prepare_spans, validate_accepte
 from core.semantic.jobs import JobStore
 from core.semantic.projections import (
     BodyBlock, BodyPlan, BodyPlanWriter, CanonicalReadingAdapter, ProjectionPublisher, ReadingLedger, provider_binding,
-    bind_reading_policy, CONTENT_READING_POLICY,
+    bind_reading_policy, CONTENT_READING_POLICY, SOURCE_READING_POLICY,
 )
 from core.semantic.retrieval import _INDEX_SCHEMA
 from core.semantic.store import SemanticStore
@@ -360,6 +360,20 @@ with tempfile.TemporaryDirectory() as directory:
             db.execute("UPDATE generation_manifest SET metadata_json='{}'")
             db.execute("UPDATE reader_text_artifacts SET prompt_version='body-plan-v11' WHERE request_id='synthetic-body'")
         self.assertIn("body_plan_literal_obligation_missing", self.codes(f.verify()))
+
+    def test_source_policy_verifies_v13_and_cannot_use_v12_artifact_or_metadata(self):
+        self.fixture = VerificationFixture(self.fixture.root / "source-v13", reading_policy=SOURCE_READING_POLICY,
+            unit_kind="step", unit_text="HIDDEN derived wording", body_text="周末去河边散步。")
+        self.brief_fixture(require_body=True)
+        f = self.fixture
+        self.assertTrue(f.verify().complete, f.verify().to_dict())
+        with f.store.transaction() as db:
+            row = db.execute("SELECT prompt_version FROM reader_text_artifacts WHERE request_id='synthetic-body'").fetchone()
+            self.assertEqual(row[0], "body-plan-v13")
+            db.execute("UPDATE reader_text_artifacts SET prompt_version='body-plan-v12' WHERE request_id='synthetic-body'")
+        self.assertIn("body_provider_version_conflict", self.codes(f.verify()))
+        f.manifest["reading_policy"] = CONTENT_READING_POLICY
+        self.assertIn("reading_policy_binding_mismatch", self.codes(f.verify()))
 
     def test_fresh_reading_verifier_keeps_unit_home_evidence_and_resource_obligations(self):
         self.fixture = VerificationFixture(self.fixture.root / "fresh-obligations", reading_policy=CONTENT_READING_POLICY)

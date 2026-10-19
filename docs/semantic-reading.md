@@ -58,21 +58,38 @@ would not pass the new admission rule. Unknown parent or child outcomes block
 before another provider call; they never become fresh-policy replacements.
 
 Reading policy is frozen per rebuild plan and generation. New plans bind
-`reading_policy="content-responsibility-v1"` in the plan and generation
-`metadata_json`; they use `body-plan-v12` / `body-paged-v12`. Missing policy fields
+`reading_policy="source-composition-v1"` in the plan and generation
+`metadata_json`; they use `body-plan-v13` / `body-paged-v13`. The previously bound
+`content-responsibility-v1` continues to use v12 unchanged. Missing policy fields
 retain `derived-verbatim-v1` and the v11 writer, including its automatic literal
 obligations for derived steps, counterevidence and units affected by withdrawn or
-contested claims. Omission does not upgrade a historical plan or generation.
+contested claims. These are three separate frozen contracts; resume never
+upgrades an accepted, failed or unresolved historical invocation.
 `bind_reading_policy(conn, binding)` is the canonical binding seam inside the
 caller's generation transaction: first adoption requires every canonical and
 reader table to be empty; subsequent calls must match the existing contract.
-It never rebases a populated generation. Old missing-field plans and metadata
-remain missing, preserving their original fingerprints and prompt bytes.
-The adapter carries this binding in the snapshot, and the writer checks it
-against the canonical ledger before reusing or creating a plan. The independent
-verifier checks manifest/generation policy agreement, policy-specific artifact
-versions, unit homes, evidence/resources, typed status and the legacy literal
-obligations. These structural checks do not prove natural-language completeness.
+It never rebases a populated generation or changes an explicit older binding.
+Old missing-field plans and metadata remain missing, preserving their original
+fingerprints and prompt bytes. The adapter carries this binding in the snapshot,
+and the writer checks it against the canonical ledger before reuse or dispatch.
+The independent verifier checks manifest/generation policy agreement and accepts
+v13 only for source composition, v12 only for content responsibility, and v2-v11
+only for the missing-field/legacy reading policy. It also checks unit homes,
+evidence/resources, typed status and legacy literal obligations. None of these
+structural checks proves natural-language semantic completeness or prose quality.
+
+Under source composition, canonical units and their exact fingerprints remain
+intact, including derived `unit.text` and the Item title. Only the model's
+presentation payload omits these two prose fields (and related Item display
+titles). It keeps unit index/ID/role, evidence and resource refs, typed status,
+explicit `verbatim`, canonical identity scope and relations. Complete source
+excerpts, context, captured attribution, source time and resource descriptors
+remain available. The author reads these sources and writes the complete thing;
+the same response maps content to the existing `unit_indices`. There is no
+second draft/mapper call, inferred home or silently reduced responsibility.
+Uncertainty, attribution, complete procedures and limits remain obligations.
+Source-only guidance also forbids invented gender and repeating a paraphrase
+followed by a full quotation; actual editorial acceptance still evaluates them.
 
 The projection input is `ReadingSnapshot`: an explicit immutable presentation
 snapshot containing canonical Item ID/content revision, semantic time, units,
@@ -97,7 +114,8 @@ home, not automatically added as another chronological supplement. Other
 independent parts of the Item may still use new blocks. Required verbatim fragments
 and exact grounded quotations remain protected; an unrelated block cannot be
 rewritten just because another block gained detail. This rule also applies to
-bounded pages and oversized continuations. Under the fresh content policy,
+bounded pages and oversized continuations. Under source composition and the
+retained content-responsibility policy,
 steps and counterevidence retain their complete substantive content, conditions,
 order, scope and attribution without freezing the agent's derived phrasing.
 Kind and claim status do not automatically populate `ReadingUnit.verbatim`.
@@ -194,8 +212,9 @@ after dispatch remains unresolved and blocks subsequent calls, including across
 Body versions and page/fragment repartitioning. Calling the pure `plan` helper
 without a ledger is intended for isolated rendering tests, not runtime
 publication and does not perform this durable repair.
-Fresh-policy Body artifacts are `body-plan-v12` and `body-paged-v12`; the
-missing-field legacy policy continues to write v11. Both ask for one
+New source-composition Body artifacts are `body-plan-v13` and `body-paged-v13`.
+The bound content-responsibility policy continues to write v12, and the
+missing-field legacy policy continues to write v11. All ask for one
 coherent reader-first note with grounded attribution, preserve each retained
 unit's unique home, and carry the program-owned metadata and exact explicit
 verbatim obligations and complete step/counterevidence responsibilities from
@@ -204,12 +223,11 @@ The prompt enumerates every required unit index: overlapping units may share
 one prose block, but each still needs exactly one content home. Missing or
 duplicated indices fail validation; the program never assigns a missing home
 by guessing from similar text.
-Fresh composition inputs explicitly distinguish derived unit responsibility,
-source excerpts with provenance labels, and literal `verbatim` obligations.
-Synthetic technical and life examples show several units sharing one prose
-home and a complete step appearing once. The fresh example rewrites the derived
-step wording while preserving the actual procedure; the frozen legacy example
-retains its older derived-literal contract. The examples are not current evidence
+Source-composition inputs contain source excerpts with provenance labels,
+unit responsibility metadata and explicit literal obligations, without a
+machine-written unit synopsis or Item title to reuse. Frozen v11/v12 composition
+prompts retain their synthetic technical/life demonstrations and original bytes;
+v13 uses its own source-only writing contract. The examples are not current evidence
 and cannot supply names or facts for the real note. They are omitted when a
 prior plan or literal fragment controls the work, preserving bounded context
 for the actual material. This guidance does not change validation, authorize
@@ -230,16 +248,16 @@ Both ordinary and repair prompts explicitly request a JSON object, including
 localized writing instructions. This preserves the input requirement of
 endpoints that enforce the JSON keyword when JSON-object mode is selected.
 The paged aggregate key carries its policy's version, so a revised prompt never
-resumes a paged plan produced by an earlier one. Accepted v2-v11 artifacts remain
+resumes a paged plan produced by an earlier one. Accepted v2-v12 artifacts remain
 historical evidence under their original contracts; these prompt instructions
 are generation guidance, not proof of editorial acceptance or owner review.
 Before dispatch, the writer also checks unresolved page/fragment descendants of
 the stable request ID across Body versions. A new prompt or context budget
 cannot bypass an earlier unknown outcome by choosing a different partition.
-The verifier accepts v12 forms only for the fresh content policy and retained
-v2-v11 forms only for the legacy reading policy. Its allowlist remains in lockstep
-with the writer; this prose does not
-authorize rewriting accepted historical output or weakening the verifier.
+The verifier accepts v13 forms only for source composition, v12 only for the
+bound content policy and retained v2-v11 only for the legacy reading policy.
+Its allowlist remains in lockstep with the writer; this prose does not authorize
+rewriting accepted historical output or weakening the verifier.
 
 `BodyPlanWriter(..., max_input_bytes=80000)` keeps small Items in one coherent
 writing call. Larger inputs use bounded pages of consecutive units and existing
@@ -250,12 +268,22 @@ Each page and the validated aggregate plan are durable before file publication;
 the aggregate validates every unit exactly once, stable previous homes,
 verbatim obligations, claim status and references. A single oversized paragraph
 uses bounded continuation tasks: all unit, evidence and context text is supplied
-in ordered segments, then accepted prose joins at one stable home. Fresh derived
-segments remain editable content responsibilities; they do not become implicit
-literals because they exceed the input budget. Legacy segments retain their
-original exact-text continuation contract. A fresh explicit literal that the
-accepted prose has not already preserved uses strict, accepted literal
-continuations at the same home, including literals larger than one page. The
+in ordered segments, then accepted prose joins at one stable home.
+Source-composition budgets the actual presentation payload: hidden derived text
+cannot force pages or echo calls. Ordered source windows first pack adjacent
+complete excerpts with their context
+under the actual prompt budget; several sources may share one writing call and
+one original home. Only a source that cannot fit alone is split into paired
+text/context segments. Core windows retain unit mapping and status checks;
+context-only tails have no required units and must return no new narrative.
+Context supports its source instead of becoming a second content/home obligation.
+No window falls back to derived prose. Supplemental sources/resources accompany the first group that needs writing, even if earlier
+unchanged groups bypass the provider. A hidden unit with no source material,
+resource or explicit literal fails before dispatch rather than creating an empty
+call. Frozen v12 derived continuations remain editable under their original
+contract, and v11 retains its exact-text continuations. Actual explicit literals
+not already preserved require strict accepted literal continuations at that
+same home, including literals larger than one page. The
 program cannot fill omitted literal output itself. Original verbatim fragments,
 status and resource associations remain bound to the complete unit.
 The effective budget never exceeds an injected provider's declared input limit.

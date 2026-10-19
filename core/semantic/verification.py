@@ -30,7 +30,7 @@ from .legacy import (LegacyError, LegacyInventory, legacy_resources,
                      history_policy, build_history_publication_plan, history_document_body, history_root_body,
                      _checked_path, _read_regular, _relative, _under, _opaque)
 from .projections import (ReadingError, property_value, region_body, reading_policy,
-                          LEGACY_READING_POLICY, CONTENT_READING_POLICY, _contains_verbatim)
+                          LEGACY_READING_POLICY, CONTENT_READING_POLICY, SOURCE_READING_POLICY, _contains_verbatim)
 from .rebuild_payloads import is_ref
 from .verification_storage import GroupMap, RowMap, Rows, ScratchMap, freeze_json, workspace
 
@@ -1189,7 +1189,8 @@ class RebuildVerifier:
                 if not matches or not any(a["status"] == "accepted" for a in matches):
                     self.issue("body_provider_artifact_missing", "semantic_pending")
                 else:
-                    versions = ({"body-plan-v12", "body-paged-v12"} if self.reading_policy == CONTENT_READING_POLICY else {
+                    versions = ({"body-plan-v13", "body-paged-v13"} if self.reading_policy == SOURCE_READING_POLICY else
+                        {"body-plan-v12", "body-paged-v12"} if self.reading_policy == CONTENT_READING_POLICY else {
                         "body-plan-v2", "body-paged-v2", "body-plan-v3", "body-paged-v3",
                         "body-plan-v4", "body-paged-v4", "body-plan-v5", "body-paged-v5",
                         "body-plan-v6", "body-paged-v6", "body-plan-v7", "body-paged-v7",

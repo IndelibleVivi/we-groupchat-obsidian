@@ -187,8 +187,14 @@
   context evidence or typed claim lineage remain valid. Invalid units reach
   the known-output correction loop before artifact acceptance, without silent
   trimming. Unknown parent or child outcomes block before provider dispatch.
-  Resolver proposals retain their `semantic-proposal-v1` first prompt and
-  `<job_id>:text` request. A complete bound-route response rejected by the
+  Fresh resolver proposals use `semantic-proposal-v2` only for an explicitly
+  bound `source-composition-v1` generation, adding concise natural Item naming.
+  Missing/derived-verbatim-v1/content-responsibility-v1 bindings retain v1.
+  Exact existing batch/state jobs retain their inputs, versions and IDs before
+  selecting a fresh version; invoke uses the frozen job version and unknown
+  work blocks first. A reused proposal's frozen decision_route also binds its
+  choice job; mismatched fresh dispatch stops before the provider. The first
+  request remains `<job_id>:text`. A complete bound-route response rejected by the
   model-output validator may receive at most two deterministic corrections in
   the same claim/worker/attempt. Feedback binds the exact frozen state, error
   code and full required-key contract, including action `type`/`action_key`
@@ -242,14 +248,15 @@
   evidence; local roles do not fabricate Cloudflare accounts or usage.
 - `projections.py`, `controls.py`, `briefing.py`, `delivery.py` and
   `reader_runtime.py` under `core/semantic/` own the Obsidian reading surface.
-  Fresh plans freeze `reading_policy="content-responsibility-v1"` in plan and
-  generation metadata and write `body-plan-v12` / `body-paged-v12`. Missing-field
-  plans/generations retain `derived-verbatim-v1` / v11, their original prompt
-  bytes and fingerprints. `bind_reading_policy` admits first binding only in an
+  Fresh plans freeze `reading_policy="source-composition-v1"` in plan and
+  generation metadata and write `body-plan-v13` / `body-paged-v13`. Explicit
+  content-responsibility-v1 bindings retain v12; missing-field plans/generations
+  retain derived-verbatim-v1/v11, original prompt/fragment bytes and fingerprints. `bind_reading_policy` admits first binding only in an
   empty canonical/reader generation; populated or in-flight state cannot change
-  policy. Accepted v2-v11 artifacts remain historical and must not be rewritten.
-  The verifier checks manifest/generation policy agreement and accepts v12 only
-  for the fresh policy, v2-v11 only for legacy; writer and verifier stay in lockstep.
+  policy. Accepted v2-v12 artifacts remain historical and must not be rewritten.
+  The verifier checks manifest/generation policy agreement and accepts v13 only
+  for source composition, v12 only for content responsibility, v2-v11 only for
+  legacy; writer and verifier stay in lockstep.
   BodyPlan has a unique home for each retained detail; accepted pages are
   durable before publishing. New units may rewrite their receiving block's
   automatic prose while retaining stable homes, evidence, resources and exact
@@ -263,17 +270,23 @@
   is derived content responsibility: step/counterevidence kind or
   retracted/contested status never makes its whole wording literal. The current
   canonical unit schema has no explicit literal field; do not invent one.
-  Injected `ReadingUnit.verbatim` remains strict. Fresh oversized derived
-  continuations remain editable while supplying all content/evidence/context/
-  resources; true explicit literals require accepted exact continuations.
-  Legacy continuation bytes remain frozen. Do not restore transcript copying
+  Injected `ReadingUnit.verbatim` remains strict. Source-composition presentation
+  omits derived unit.text and Item titles only; canonical units/fingerprints,
+  unit index/ID/role, refs, scope, relations, status, explicit literals and all
+  raw source/context/attribution/time/resources stay intact. The author maps
+  unit_indices in the same composition call, without a second mapper or guessed
+  home. Budget actual payload; hidden prose creates no pages or empty calls.
+  Source windows pack adjacent whole text/context records within the actual
+  prompt budget; only a source that cannot fit alone is split. Windows continue
+  in source order at the original home; context-only tails have no required
+  units or narrative. True explicit literals require accepted exact continuations.
+  V11/v12 continuation bytes remain frozen. Do not restore transcript copying
   as a substitute for evidence preservation.
-  Fresh composition inputs distinguish derived unit responsibility from source
-  quotation and explicit verbatim. Synthetic technical/life examples demonstrate
-  one content home without duplicate prose; they are never current evidence.
-  Prior-plan and literal-fragment prompts omit these examples so instructional
-  text does not displace their bounded material. Validators and literal obligations
-  remain unchanged; examples alone are not evidence of prose quality.
+  Frozen v11/v12 composition inputs retain their original technical/life
+  examples and input semantics; these examples are never current evidence.
+  Their prior-plan and literal-fragment prompts retain the original omissions.
+  V13 uses a separate source-only composition contract. Validators and explicit
+  literal obligations remain unchanged; prompt guidance is not prose acceptance.
   Writer evidence chronology uses offset-aware source timestamps only; unit
   order, commit order and semantic revision time never establish event order.
   Undated evidence stays undated, and chronology does not change unit indices,

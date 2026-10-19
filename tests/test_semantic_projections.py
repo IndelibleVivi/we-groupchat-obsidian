@@ -13,7 +13,7 @@ from core.semantic.projections import (
     BodyBlock, BodyPlan, BodyPlanWriter, CanonicalReadingAdapter, EvidenceExcerpt, ProjectionPublisher,
     ReadingError, ReadingLedger, ReadingRelation, ReadingResource, ReadingSnapshot,
     ReadingUnit, anchor, fingerprint, property_value, region_body, validate_body_plan, wikilink,
-    bind_reading_policy, CONTENT_READING_POLICY,
+    bind_reading_policy, CONTENT_READING_POLICY, SOURCE_READING_POLICY,
 )
 
 
@@ -238,6 +238,315 @@ class ProjectionTests(ReadingHarness):
         row = self.ledger.one("SELECT prompt_version FROM reader_text_artifacts WHERE request_id='fresh-oversized'")
         self.assertEqual(row[0], "body-paged-v12")
 
+    def test_v12_prompt_bytes_remain_frozen_in_all_three_composition_shapes(self):
+        snapshot = replace(self.snapshot(), reading_policy=CONTENT_READING_POLICY)
+        previous = self.plan(snapshot)
+        cases = ((None, {}, {}, 7555, "5c1ef9ba5a0ee5009e5a5c74fc7301dd08b02a935b64ed7110009293ce8d86f6"),
+                 (previous, {b.id: b for b in previous.blocks}, {}, 5671,
+                  "d404cbbcc2c9aa7e745c18799b7de58aa192061dd93e3530ec157ce344b9fee6"),
+                 (None, {}, {"phase": "body_fragment_v1"}, 5340,
+                  "71802c0fad9fb92ac3e5557f274091b0574028a3daabc9c8a3ea4d25fa286919"))
+        for prior, unchanged, context, size, expected in cases:
+            prompt = BodyPlanWriter._prompt(snapshot, prior, unchanged, **context)
+            self.assertEqual(len(prompt.encode()), size)
+            self.assertEqual(fingerprint(prompt), expected)
+
+    def test_source_composition_hides_machine_prose_and_budgets_only_the_actual_payload(self):
+        derived = "AGENT-DERIVED-REPORT-WRAPPER" * 10000
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY, title="AGENT-DERIVED-TITLE",
+            units=(ReadingUnit("step", derived, ("e1",), ("log",), role="step"),),
+            evidence=(EvidenceExcerpt("e1", "先停服务，备份后再切换 Y 格式。", "仅在小文件验证过。",
+                                      "2026-10-09T12:00:00+08:00", speaker_id="speaker", speaker_name="阿禾"),),
+            resources=(ReadingResource("log", "操作日志"),))
+        def compose(prompt):
+            self.assertNotIn("AGENT-DERIVED", prompt)
+            data = json.loads(prompt)
+            self.assertNotIn("title", data["snapshot"])
+            self.assertNotIn("text", data["snapshot"]["units"][0])
+            self.assertEqual(data["snapshot"]["evidence"][0], asdict(snapshot.evidence[0]))
+            self.assertEqual(data["snapshot"]["units"][0]["evidence_ids"], ["e1"])
+            self.assertEqual(data["snapshot"]["units"][0]["resource_ids"], ["log"])
+            return {"blocks": [{"id": "procedure", "role": "narrative", "unit_indices": [0],
+                "text": "先停服务，完成备份后再切换到 Y 格式；目前只验证过小文件。"}]}
+        provider = ScriptedTextProvider(compose)
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000)
+        plan = writer.plan(snapshot, request_id="source-only")
+        self.assertEqual(len(provider.calls), 1)
+        self.assertLessEqual(len(provider.calls[0][0].encode()), 8000)
+        self.assertEqual(plan.unit_fingerprints["step"], fingerprint(json.dumps(asdict(snapshot.units[0]),
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
+        self.assertEqual(plan.blocks[0].unit_ids, ("step",))
+        self.assertEqual(plan.blocks[0].resource_ids, ("log",))
+        self.assertEqual(self.ledger.one("SELECT prompt_version FROM reader_text_artifacts WHERE request_id='source-only'")[0],
+                         "body-plan-v13")
+        self.assertEqual(writer.plan(snapshot, request_id="source-only"), plan)
+        self.assertEqual(len(provider.calls), 1)
+
+    @staticmethod
+    def source_response(prompt):
+        snapshot = json.loads(prompt)["snapshot"]
+        units = snapshot["units"]
+        if not units:
+            return {"blocks": []}
+        literal = [fragment for unit in units for fragment in unit["verbatim"]]
+        text = "".join(literal) if literal else "\n".join(e["text"] or e["context"] for e in snapshot["evidence"]) or "来源关联资源。"
+        return {"blocks": [{"id": "source-home", "role": "counterevidence" if any(u["status"] != "current" for u in units) else "narrative",
+                            "text": text, "unit_indices": list(range(len(units)))}]}
+
+    def test_source_only_pages_preserve_all_mapping_and_supplemental_sources(self):
+        units = tuple(ReadingUnit("u-" + str(i), "HIDDEN-DERIVED" * 1000, ("e-" + str(i),), ("r-" + str(i),)) for i in range(30))
+        evidence = tuple(EvidenceExcerpt("e-" + str(i), "源材料的完整事实与限制。" * 25 + str(i)) for i in range(30))
+        evidence += (EvidenceExcerpt("supplement", "另一条保留的更正证据。"),)
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY, title="HIDDEN-TITLE", units=units, evidence=evidence,
+            resources=tuple(ReadingResource("r-" + str(i), "日志" + str(i)) for i in range(30)), identity_scope={"subject": "Y 格式"})
+        def compose(prompt):
+            self.assertNotIn("HIDDEN", prompt)
+            self.assertEqual(json.loads(prompt)["snapshot"]["identity_scope"], snapshot.identity_scope)
+            return self.source_response(prompt)
+        provider = ScriptedTextProvider(*([compose] * 100))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
+        plan = writer.plan(snapshot, request_id="source-pages")
+        self.assertGreater(len(provider.calls), 1)
+        self.assertEqual({u for block in plan.blocks for u in block.unit_ids}, {u.id for u in units})
+        self.assertEqual({e["id"] for call in provider.calls for e in json.loads(call[0])["snapshot"]["evidence"]}, {e.id for e in evidence})
+        self.assertEqual({r for block in plan.blocks for r in block.resource_ids}, {r.id for r in snapshot.resources})
+        self.assertTrue(all(len(call[0].encode()) <= 9000 for call in provider.calls))
+        self.assertEqual(self.ledger.one("SELECT prompt_version FROM reader_text_artifacts WHERE request_id='source-pages'")[0], "body-paged-v13")
+
+    def test_oversized_source_windows_pack_adjacent_records_without_context_narrative(self):
+        excerpts = tuple(EvidenceExcerpt("window-e-" + str(i), "来源" + str(i) + "的具体事实。" * 15,
+            "此前的限定。" + "来源" + str(i) + "的具体事实。" * 15 + "后续范围仍待验证。",
+            "2026-10-09T12:" + str(i).zfill(2) + ":00+08:00") for i in range(30))
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY, title="HIDDEN-TITLE",
+            units=(ReadingUnit("whole", "HIDDEN-DERIVED" * 1000, tuple(e.id for e in excerpts)),), evidence=excerpts)
+        observed = []
+        def compose(prompt):
+            data = json.loads(prompt)
+            self.assertNotIn("HIDDEN", prompt)
+            observed.append(data)
+            core = [e for e in data["snapshot"]["evidence"] if e["text"]]
+            if not core:
+                self.assertEqual(data["required_unit_indices"], [])
+                return {"blocks": []}
+            self.assertTrue(all(e["context"] for e in core))
+            return {"blocks": [{"id": "window-home", "role": "narrative",
+                "text": "\n".join(e["text"] for e in core), "unit_indices": [0]}]}
+        provider = ScriptedTextProvider(*([compose] * 100))
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000).plan(
+            snapshot, request_id="bounded-source-windows")
+        self.assertGreater(len(provider.calls), 1)
+        self.assertLess(len(provider.calls), len(excerpts))
+        self.assertTrue(any(len(data["snapshot"]["evidence"]) > 1 for data in observed))
+        self.assertEqual(len(plan.blocks), 1)
+        self.assertEqual(plan.blocks[0].unit_ids, ("whole",))
+        supplied = [e for data in observed for e in data["snapshot"]["evidence"]]
+        for original in excerpts:
+            self.assertEqual("".join(e["text"] for e in supplied if e["id"] == original.id), original.text)
+            self.assertEqual("".join(e["context"] for e in supplied if e["id"] == original.id), original.context)
+            self.assertEqual(plan.blocks[0].text.count(original.text), 1)
+        self.assertTrue(all(len(call[0].encode()) <= 8000 for call in provider.calls))
+
+    def test_single_oversized_source_keeps_context_tail_supporting_without_new_narrative(self):
+        original = EvidenceExcerpt("one-source", "唯一的核心事实。", "完整的支持上下文。" * 2000,
+                                   "2026-10-09T12:00:00+08:00")
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY,
+            units=(ReadingUnit("one", "HIDDEN derived", (original.id,)),), evidence=(original,))
+        windows = []
+        def compose(prompt):
+            data = json.loads(prompt)
+            windows.append(data)
+            if not any(e["text"] for e in data["snapshot"]["evidence"]):
+                self.assertEqual(data["required_unit_indices"], [])
+                self.assertEqual(data["snapshot"]["units"], [])
+                self.assertEqual(data["continuation"]["core_evidence_ids"], [])
+                self.assertEqual(data["continuation"]["context_only_evidence_ids"], [original.id])
+                return {"blocks": []}
+            return {"blocks": [{"id": "one-home", "role": "narrative", "text": original.text, "unit_indices": [0]}]}
+        provider = ScriptedTextProvider(*([compose] * 100))
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000).plan(
+            snapshot, request_id="context-tail")
+        self.assertGreater(sum(not data["required_unit_indices"] for data in windows), 0)
+        self.assertEqual(plan.blocks[0].text, original.text)
+        self.assertEqual(plan.blocks[0].unit_ids, ("one",))
+        supplied = [e for data in windows for e in data["snapshot"]["evidence"]]
+        self.assertEqual("".join(e["text"] for e in supplied), original.text)
+        self.assertEqual("".join(e["context"] for e in supplied), original.context)
+        self.assertTrue(all(len(call[0].encode()) <= 8000 for call in provider.calls))
+
+    def test_source_oversized_evidence_uses_raw_chronology_and_one_existing_home(self):
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY, title="HIDDEN-TITLE",
+            units=(ReadingUnit("later", "HIDDEN-DERIVED" * 1000, ("later-e",), ("log",), status="contested"),
+                   ReadingUnit("earlier", "HIDDEN-DERIVED" * 1000, ("earlier-e",))),
+            evidence=(EvidenceExcerpt("later-e", "后来的完整来源。" * 1000, "后来的完整上下文。" * 100,
+                                      "2026-10-09T13:00:00+08:00", speaker_name="阿禾"),
+                      EvidenceExcerpt("earlier-e", "此前的完整来源。" * 1000, "此前的完整上下文。" * 100,
+                                      "2026-10-09T12:00:00+08:00", speaker_name="阿岚")),
+            resources=(ReadingResource("log", "日志"),))
+        previous = BodyPlan(snapshot.item_id, 1, (BodyBlock("stable", "narrative", "旧自动正文。",
+            ("later", "earlier"), ("later-e", "earlier-e"), ("log",), snapshot.item_id),))
+        def compose(prompt):
+            self.assertNotIn("HIDDEN", prompt)
+            self.assertTrue(all("text" not in unit for unit in json.loads(prompt)["snapshot"]["units"]))
+            return self.source_response(prompt)
+        provider = ScriptedTextProvider(*([compose] * 500))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000)
+        plan = writer.plan(snapshot, previous=previous, request_id="source-huge")
+        self.assertEqual(len(plan.blocks), 1)
+        self.assertEqual(plan.blocks[0].id, "stable")
+        self.assertEqual(plan.blocks[0].unit_ids, ("later", "earlier"))
+        self.assertEqual(plan.blocks[0].unit_statuses, {"later": "contested"})
+        supplied = [e for call in provider.calls for e in json.loads(call[0])["snapshot"]["evidence"]]
+        self.assertEqual(list(dict.fromkeys(e["id"] for e in supplied)), ["earlier-e", "later-e"])
+        for original in snapshot.evidence:
+            self.assertEqual("".join(e["text"] for e in supplied if e["id"] == original.id), original.text)
+            self.assertEqual("".join(e["context"] for e in supplied if e["id"] == original.id), original.context)
+        self.assertTrue(all(len(call[0].encode()) <= 8000 for call in provider.calls))
+        count = len(provider.calls)
+        self.assertEqual(writer.plan(snapshot, previous=previous, request_id="source-huge"), plan)
+        self.assertEqual(len(provider.calls), count)
+
+    def test_source_explicit_oversized_literals_and_no_empty_hidden_prose_calls(self):
+        literal = "真正显式的原话必须准确。" * 300
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY,
+            units=(ReadingUnit("explicit", "HIDDEN-DERIVED" * 1000, (), verbatim=(literal,)),), evidence=())
+        provider = ScriptedTextProvider(*([self.source_response] * 100))
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000)
+        plan = writer.plan(snapshot, request_id="source-literal")
+        self.assertEqual(plan.blocks[0].text, literal)
+        self.assertTrue(all(":verbatim:" in call[1] for call in provider.calls))
+        self.assertTrue(all("HIDDEN" not in call[0] and len(call[0].encode()) <= 8000 for call in provider.calls))
+        missing = replace(snapshot, units=(replace(snapshot.units[0], verbatim=()),))
+        unused = ScriptedTextProvider()
+        with self.assertRaisesRegex(ReadingError, "body_source_material_missing"):
+            BodyPlanWriter(unused, self.ledger.generation_id).plan(missing, request_id="empty-hidden")
+        self.assertEqual(unused.calls, [])
+        def omit(prompt):
+            result = self.source_response(prompt)
+            result["blocks"][0]["text"] = "删掉显式原话。"
+            return result
+        bad = ScriptedTextProvider(*([omit] * 10))
+        with self.assertRaisesRegex(ReadingError, "body_plan_lost_evidence"):
+            BodyPlanWriter(bad, self.ledger.generation_id, self.ledger, max_input_bytes=8000).plan(
+                replace(snapshot, item_id="bad-literal"), request_id="bad-source-literal")
+        self.assertEqual(len(bad.calls), 2)
+
+    def test_source_policy_preserves_known_repair_and_cross_version_unknown_identity(self):
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY)
+        provider = ScriptedTextProvider({"blocks": []}, self.source_response)
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+        plan = writer.plan(snapshot, request_id="source-repair")
+        before = [dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")]
+        self.assertEqual([row["status"] for row in before], ["failed", "accepted"])
+        self.assertTrue(all(row["prompt_version"] == "body-plan-v13" for row in before))
+        self.assertEqual(writer.plan(snapshot, request_id="source-repair"), plan)
+        self.assertEqual(len(provider.calls), 2)
+        for version in ("body-plan-v11", "body-plan-v12"):
+            for status in ("unknown", "running"):
+                root = "source-guard-" + version + status
+                with self.ledger.transaction() as conn:
+                    conn.execute("INSERT INTO reader_text_artifacts VALUES(?,?,?,?,?,?,?)", (
+                        self.ledger.generation_id, root, root + ":group:0:fragment:0", "route", version, status, ""))
+                unused = ScriptedTextProvider()
+                with self.assertRaisesRegex(ReadingError, "text_provider_outcome_unknown"):
+                    BodyPlanWriter(unused, self.ledger.generation_id, self.ledger).plan(snapshot, request_id=root)
+                self.assertEqual(unused.calls, [])
+        self.assertEqual([dict(row) for row in self.ledger.all(
+            "SELECT * FROM reader_text_artifacts WHERE request_id=? OR request_id LIKE ? ORDER BY rowid",
+            ("source-repair", "source-repair:repair:%"))], before)
+
+    def test_source_increment_keeps_unaffected_bytes_and_canonical_mapping(self):
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY,
+            units=(ReadingUnit("step", "HIDDEN step prose", ("e1",), role="step"),
+                   ReadingUnit("other", "HIDDEN unrelated prose", ("e2",))),
+            evidence=(EvidenceExcerpt("e1", "先停服务。"), EvidenceExcerpt("e2", "周末散步。")))
+        first = BodyPlanWriter(ScriptedTextProvider({"blocks": [
+            {"id": "procedure", "role": "narrative", "text": "先停服务。", "unit_indices": [0]},
+            {"id": "other-home", "role": "narrative", "text": "周末散步。", "unit_indices": [1]}]}),
+            self.ledger.generation_id).plan(snapshot, request_id="source-before")
+        published = self.publisher.publish_item(snapshot, first)
+        new = replace(snapshot, content_revision=2, units=snapshot.units + (ReadingUnit("backup", "HIDDEN new prose", ("e3",)),),
+            evidence=snapshot.evidence + (EvidenceExcerpt("e3", "停服务后备份数据库。"),))
+        self.revisions[snapshot.item_id] = 2
+        def rewrite(prompt):
+            self.assertNotIn("HIDDEN", prompt)
+            return {"blocks": [
+                {"id": "procedure", "role": "narrative", "text": "停服务后备份数据库。", "unit_indices": [0, 2]},
+                {"id": "other-home", "role": "narrative", "text": "周末散步。", "unit_indices": [1]}]}
+        provider = ScriptedTextProvider(rewrite)
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger).plan(new, previous=first, request_id="source-after")
+        self.assertEqual(plan.blocks[1], first.blocks[1])
+        self.assertEqual(plan.blocks[0].unit_ids, ("step", "backup"))
+        target = self.publisher.root / published.path
+        manual = target.read_bytes().replace("先停服务。".encode(), "用户手改正文。".encode())
+        target.write_bytes(manual)
+        self.assertEqual(self.publisher.publish_item(new, plan).status, "conflict")
+        self.assertEqual(target.read_bytes(), manual)
+
+    def test_content_policy_binding_cannot_silently_become_source_composition(self):
+        from core.semantic.store import SemanticStore
+        store = SemanticStore(self.base / "frozen-content.sqlite", "frozen-content")
+        with store.transaction() as conn:
+            bind_reading_policy(conn, {"reading_policy": CONTENT_READING_POLICY})
+            before = conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]
+            with self.assertRaisesRegex(ReadingError, "reading_policy_mismatch"):
+                bind_reading_policy(conn, {"reading_policy": SOURCE_READING_POLICY})
+            self.assertEqual(conn.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0], before)
+        fresh = SemanticStore(self.base / "new-source.sqlite", "new-source")
+        with fresh.transaction() as conn:
+            bind_reading_policy(conn, {"reading_policy": SOURCE_READING_POLICY})
+        observation, _span = self.canonical_extract(fresh, "raw", "先停服务，再备份。", unit_kind="step", unit_text="HIDDEN canonical derived text")
+        self.canonical_actions(fresh, [{"action_key": "create", "type": "CREATE_ITEM", "item_id": "procedure", "title": "HIDDEN title",
+            "kind": "technical", "identity_scope": {"subject": "恢复服务"}, "observation_ids": [observation["observation_id"]]}])
+        actual = CanonicalReadingAdapter(fresh).snapshot("procedure")
+        self.assertEqual(actual.units[0].text, "HIDDEN canonical derived text")
+        self.assertEqual(actual.units[0].verbatim, ())
+        self.assertEqual(actual.identity_scope, {"subject": "恢复服务"})
+        self.assertNotIn("HIDDEN", BodyPlanWriter._prompt(actual, None, {}))
+        with fresh.transaction() as conn:
+            self.assertEqual(bind_reading_policy(conn, {"reading_policy": SOURCE_READING_POLICY})["reading_policy"], SOURCE_READING_POLICY)
+
+    def test_source_paged_increment_delivers_supplemental_after_unchanged_groups(self):
+        units = tuple(ReadingUnit("u-" + str(i), "HIDDEN derived", ("e-" + str(i),)) for i in range(30))
+        evidence = tuple(EvidenceExcerpt("e-" + str(i), "完整的来源正文。" * 40 + str(i)) for i in range(30))
+        first = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY, units=units, evidence=evidence)
+        previous = validate_body_plan(first, BodyPlan(first.item_id, 1, tuple(BodyBlock(
+            "home-" + str(i), "narrative", evidence[i].text, (unit.id,), unit.evidence_ids, primary_home=first.item_id)
+            for i, unit in enumerate(units))))
+        extra = ReadingUnit("new", "HIDDEN new derived", ("new-e",))
+        updated = replace(first, content_revision=2, units=units + (extra,),
+            evidence=evidence + (EvidenceExcerpt("new-e", "新增的具体条件。"), EvidenceExcerpt("supplement", "关联的更正原文。")))
+        def compose(prompt):
+            self.assertNotIn("HIDDEN", prompt)
+            data = json.loads(prompt)
+            self.assertIn("supplement", {e["id"] for e in data["snapshot"]["evidence"]})
+            self.assertEqual(len(data["previous"]["blocks"]), 1)
+            return {"blocks": [{"id": data["previous"]["blocks"][0]["id"], "role": "narrative",
+                "text": evidence[-1].text + "新增的具体条件。", "unit_indices": [0, 1]}]}
+        provider = ScriptedTextProvider(compose)
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000).plan(
+            updated, previous=previous, request_id="source-paged-increment")
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(plan.blocks[:-1], previous.blocks[:-1])
+        self.assertEqual(plan.blocks[-1].id, previous.blocks[-1].id)
+        self.assertEqual(plan.blocks[-1].unit_ids, (units[-1].id, "new"))
+
+    def test_source_fragment_unknown_blocks_new_budget_without_another_call(self):
+        snapshot = replace(self.snapshot(), reading_policy=SOURCE_READING_POLICY,
+            units=(ReadingUnit("raw", "HIDDEN derived", ("raw-e",)),),
+            evidence=(EvidenceExcerpt("raw-e", "真实来源内容。" * 2000),))
+        provider = ScriptedTextProvider(RuntimeError("synthetic unknown source fragment"))
+        with self.assertRaisesRegex(RuntimeError, "synthetic unknown source fragment"):
+            BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=8000).plan(snapshot, request_id="raw-unknown")
+        row = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id LIKE 'raw-unknown:%'")
+        self.assertEqual(row["status"], "unknown")
+        self.assertEqual(row["prompt_version"], "body-plan-v13")
+        self.assertIn(":group:0:source:0", row["request_id"])
+        unused = ScriptedTextProvider()
+        with self.assertRaisesRegex(ReadingError, "text_provider_outcome_unknown"):
+            BodyPlanWriter(unused, self.ledger.generation_id, self.ledger).plan(snapshot, request_id="raw-unknown")
+        self.assertEqual(unused.calls, [])
+        self.assertEqual(len(provider.calls), 1)
+
     def test_legacy_prompt_bytes_and_paged_identity_omit_the_new_policy_field(self):
         snapshot = self.snapshot()
         previous = self.plan(snapshot)
@@ -251,6 +560,7 @@ class ProjectionTests(ReadingHarness):
         from core.semantic.projections import reading_snapshot_payload
         expected_payload = asdict(snapshot)
         expected_payload.pop("reading_policy")
+        expected_payload.pop("identity_scope")
         self.assertEqual(reading_snapshot_payload(snapshot), expected_payload)
         legacy_key = fingerprint(json.dumps(expected_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         self.assertEqual(fingerprint(json.dumps(reading_snapshot_payload(snapshot), ensure_ascii=False,

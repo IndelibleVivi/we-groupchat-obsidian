@@ -52,6 +52,50 @@ class SemanticStoreTests(unittest.TestCase):
                 self.assertNotIn("private", str(raised.exception))
                 connection.close.assert_called_once_with()
 
+    def test_existing_job_ledger_gets_bounded_batch_lookup_without_changing_evidence(self):
+        target_state = {"identity": "frozen synthetic context"}
+        versions = {"prompt": "semantic-proposal-v1", "route": "original-synthetic-route"}
+        unknown = self.jobs.ensure("propose", {"batch_id": "target", "state": target_state}, versions)
+        self.jobs.claim(unknown["job_id"], "original-worker")
+        self.jobs.fail(unknown["job_id"], "original-worker", "synthetic_unknown", unknown=True)
+        accepted = self.jobs.ensure("propose", {"batch_id": "accepted", "state": {}}, versions)
+        self.jobs.claim(accepted["job_id"], "accepted-worker")
+        self.jobs.accept(accepted["job_id"], "accepted-worker", {"synthetic": "accepted evidence"},
+                         validate=lambda artifact: artifact)
+        with self.store.transaction() as db:
+            # Model the pre-index schema in this disposable fixture only.
+            db.execute("DROP INDEX IF EXISTS semantic_jobs_batch")
+            fillers = []
+            for index in range(1000):
+                inputs = {"batch_id": "other-" + str(index), "state": {"detail": "合成背景" * 500}}
+                key = self.jobs._key("propose", inputs, versions)
+                fillers.append(("job_" + key, key, "propose", dumps(inputs), dumps(versions), self.now, self.now))
+            db.executemany("INSERT INTO jobs(job_id,job_key,kind,inputs_json,versions_json,state,created_at,updated_at) "
+                           "VALUES(?,?,?,?,?,'pending',?,?)", fillers)
+            tables = ("generation_manifest", "jobs", "job_attempts", "accepted_job_artifacts")
+            before = {table: [tuple(row) for row in db.execute("SELECT * FROM " + table + " ORDER BY rowid")]
+                      for table in tables}
+        reopened = SemanticStore(self.store.path, self.store.generation_id, now_func=lambda: self.now)
+        with closing(reopened.connect()) as db:
+            after = {table: [tuple(row) for row in db.execute("SELECT * FROM " + table + " ORDER BY rowid")]
+                     for table in tables}
+            self.assertEqual(after, before)
+            # A table/JSON scan exceeds this VM budget; the indexed batch seek
+            # still returns the original unknown row, not an empty success.
+            steps = 0
+            def bounded():
+                nonlocal steps
+                steps += 1
+                return int(steps > 20)
+            db.set_progress_handler(bounded, 100)
+            try:
+                rows = db.execute("SELECT job_id,state FROM jobs WHERE kind='propose' "
+                    "AND json_extract(inputs_json,'$.batch_id')=? AND json_extract(inputs_json,'$.state')=?",
+                    ("target", dumps(target_state))).fetchall()
+            finally:
+                db.set_progress_handler(None, 0)
+            self.assertEqual([tuple(row) for row in rows], [(unknown["job_id"], "unknown")])
+
     def accept(self, artifact, kind="test", inputs=None, versions=None):
         self.number += 1
         versions = versions or ({"prompt": EXTRACTION_PROMPT_VERSION, "test": self.number} if kind == "extract" else {"v": 1, "test": self.number})
