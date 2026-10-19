@@ -143,6 +143,13 @@ completed migration. See [semantic-engine.md](semantic-engine.md) for limits.
 New extraction pages include the preceding bounded page as ordered non-core
 context instead of only its last two messages. Existing page jobs keep their
 frozen inputs and outcomes; this change does not silently re-extract old work.
+Fresh first pages can freeze a bounded raw tail from a prior capture in the
+same generation, source namespace and chat as non-core context. Capture order
+selects available context, not event chronology or Item identity; cursor
+continuity stays exact or unknown. The parent freezes the precise references
+and order. Store commits and independent verification admit only that bound
+context, while current capture membership, core coverage and ACK remain
+unchanged. This is source behavior, not evidence of a private run's acceptance.
 Fresh primary and coverage pages also freeze
 `evidence_contract="indexed-evidence-v1"`. Their model interface uses explicit
 source/evidence indices; program-owned binding restores exact source/span IDs

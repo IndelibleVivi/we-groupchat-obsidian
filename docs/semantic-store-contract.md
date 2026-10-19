@@ -18,6 +18,11 @@ The derived `semantic_jobs_parent` index similarly selects page/coverage childre
 by job kind and frozen parent ID. Repeated recovery checks do not scan unrelated
 children's JSON inputs. Existing rows and unknown outcomes retain the same
 evidence and authority when this index is created.
+The nonunique derived `capture_context_order` index on source namespace and chat
+supports a reverse-rowid seek for an earlier available capture in that scope.
+Rowid is only a current selection tool; frozen context stores batch, receipt,
+source and span identities, never rowid. Opening an existing ledger changes no
+capture/member/receipt/cursor rows when adding this index.
 
 All public payloads below are dictionaries; IDs are strings. Errors expose only
 `SemanticStoreError.code`. `get_item`, `list_items`, `get_observation`,
@@ -130,6 +135,46 @@ An accepted empty extraction needs explicit dispositions for all effective core
 inputs before completion. This API writes an extraction receipt, a typed
 `COMMIT_EXTRACTION` canonical transaction and Observation index outboxes in the
 same transaction. Extraction itself is not semantic source ACK.
+
+Fresh extraction parents can additionally freeze
+`versions.capture_context="preceding-capture-tail-v1"` and
+`inputs.preceding_context={generation_id,batch_id,receipt_id,source_ids,spans,
+cursor_continuity,unavailable_reason}`. `batch_id` here identifies the earlier
+capture; the parent's top-level batch remains the current work. The store
+selects only the most recent earlier raw-message capture in the same generation,
+source namespace and chat, skips versions already in the current capture, and
+admits only the ordered suffix selected by the frozen descriptor. This does
+not add capture members, change their core flags, reingest raw records or
+create a second cursor owner. Missing context fields preserve the historical
+commit contract. A previously frozen parent is never augmented on resume.
+
+The suffix uses at most 24 packets and 22,000 encoded bytes, including projected
+source attribution. Text is read in 8,192-byte chunks; Python retains at most
+48,000 redacted characters plus bounded URL-token and chunk buffers. SQLite
+projects only the attribution/anchor inputs consumed by the existing helper,
+with an 8,192-byte metadata limit, before Python reads payload data. Unrelated
+payload fields are never loaded for this selection. The canonical URL redactor
+produces the same span IDs, visible offsets, excerpts, raw offsets and replacement
+mappings as ordinary whole-source preparation, including tokens crossing chunk,
+suffix and canonical-span boundaries. An indivisible URL token above 65,536
+characters or oversized metadata freezes an empty context with
+`extraction_context_token_limit` or `extraction_context_metadata_limit`; partial
+tokens and fabricated exact mappings are never admitted. Streaming still reads
+the selected source's raw text linearly to preserve global redaction offsets.
+
+Commit reconstructs this bounded selection and rejects a changed generation,
+capture, receipt, source order, span, continuity claim or version. Only these
+exact external spans may supplement current members; each Observation still
+needs current effective core evidence. Context resources and cited subject,
+speaker and case anchors flow through the existing canonical checks. Earlier
+ownership/dispositions and current coverage obligations remain independent.
+The independent verifier reconstructs scope, predecessor, budgets, ordering and
+continuity without calling producer selection/admission, and checks each stored
+context span's complete canonical tuple, including raw replacement mappings.
+An external citation without a valid frozen binding fails verification. It
+does not infer chronology or same-scene identity from capture order. Nonempty
+matching cursor vectors are `exact` only when the preceding capture advanced;
+empty, mismatched or unproved continuity stays `unknown`.
 
 ## Actions and receipts
 

@@ -70,7 +70,9 @@ class OutputCorrectionTests(unittest.TestCase):
             def generate(self, prompt, **kwargs):
                 response = super().generate(prompt, **kwargs)
                 raw = json.loads(response.text)
-                context = json.loads(prompt.rsplit('\n', 1)[-1])[1]
+                sources = json.loads(prompt.rsplit('\n', 1)[-1])
+                context = next(source for source in sources if not source['core'] and
+                    ''.join(span['excerpt'] for span in source['spans']) == 'Previous context')
                 raw['observations'].append(model_observation([context], title='Context alone',
                     units=[{'kind': 'scene', 'text': 'Previous context', 'span_indices': [0]}]))
                 return TextResult(json.dumps(raw), self.route)

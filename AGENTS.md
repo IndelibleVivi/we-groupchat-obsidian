@@ -178,6 +178,13 @@
   witnesses and Episodes; time proximity or a shared URL alone is not identity.
   New extraction pages carry the preceding bounded page as ordered non-core
   context; resumed page jobs retain their exact frozen context and outcome.
+  Fresh first pages may also bind a bounded raw tail from an earlier capture in
+  the same generation, source namespace and chat. The parent freezes exact
+  capture/source/span order before page dispatch; old missing bindings stay
+  missing. Earlier capture order supplies available context, not event chronology
+  or Item identity. Cursor continuity remains exact or unknown as observed.
+  Store commits and independent verification admit only that frozen context;
+  current capture membership, core coverage and ACK authority remain unchanged.
   Fresh extraction pages and coverage jobs bind
   `unit_policy="retained-knowledge-v5"`; None/v1/v2/v3/v4 retain their frozen
   prompts, inputs and accepted artifacts. New page jobs also freeze

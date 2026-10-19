@@ -160,6 +160,37 @@ inventing text spans. This does not classify an ordinary empty message or a
 readable system message, and does not bypass unknown child jobs. Existing page
 artifacts remain unchanged when their parent applies this metadata disposition.
 
+For a fresh parent with an earlier raw capture in the same generation,
+source namespace and chat, the first page can also see that capture's bounded
+tail as ordered non-core context. The parent freezes
+`capture_context="preceding-capture-tail-v1"` with the earlier batch/receipt,
+selected source versions, exact spans and their order before dispatch. Child
+pages bind their source order and this context version. The earlier capture
+need not have been extracted. Capture insertion order selects available
+context; it does not establish event chronology, conversation continuity or
+Item identity. Source times remain authoritative. Nonempty matching cursor
+vectors from an advancing preceding capture record `cursor_continuity="exact"`;
+empty or unproved vectors record `unknown`.
+
+The tail contains at most 24 packets and 22,000 encoded bytes including its
+attribution views. A long source contributes only its exact trailing canonical
+spans; raw text streams through the shared URL redactor in bounded chunks.
+Oversized attribution or an indivisible URL token makes the context explicitly
+unavailable, without exposing a clipped token or substituting new evidence.
+The store contract describes these limits and independent checks in
+[semantic-store-contract.md](semantic-store-contract.md). This context cannot
+reclaim earlier core ownership or dispositions, enter the new capture's
+coverage core, or move capture/applied cursors. An Observation must still cite
+current effective core evidence. Independent scenes remain separate unless
+the supplied evidence and ordinary resolution establish a connection.
+
+An existing parent without this field retains its original behavior, even if
+no child has yet dispatched. Existing parents and pages keep their exact
+frozen context, prompt, identity and outcome after restart, later captures or
+route changes. Accepted artifacts replay; unknown work blocks before context
+selection or provider dispatch. With no preceding raw capture, a fresh parent
+and its first page retain their previous inputs and prompt bytes.
+
 Before an unaccepted parent aggregates, every member still `unclassified` gets
 at most one bounded adjacent-context coverage re-read (`extract_coverage`, phase
 `bounded-adjacent-context-v2`). Fresh jobs bind `planning="pending-fragments-v1"`

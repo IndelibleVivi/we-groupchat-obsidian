@@ -24,6 +24,8 @@ from zoneinfo import ZoneInfo
 
 from core.url_safety import redact_urls_in_text
 from .attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata, source_attribution
+from .store import (CAPTURE_CONTEXT_VERSION, CAPTURE_CONTEXT_MAX_BYTES, CAPTURE_CONTEXT_MAX_PACKETS,
+                    context_source_tail)
 from .legacy import (LegacyError, LegacyInventory, legacy_resources,
                      HISTORY_SCHEMA, HISTORY_PUBLICATION_SCHEMA, SOURCE_FIRST_POLICY, LEGACY_SEMANTIC_POLICY,
                      TABLE_KEYS,
@@ -147,7 +149,7 @@ class RebuildVerifier:
             # A retained verifier can be called again, but must not retain the
             # previous run's rows, decoded payloads, metadata sets or connections.
             for key in ("db", "scratch", "tables", "generation", "history_policy", "reading_policy", "sources", "source_resources", "batches", "members",
-                        "accepted", "extractions", "extraction_inputs", "processing", "transactions", "outboxes",
+                        "accepted", "extractions", "extraction_inputs", "extraction_contexts", "processing", "transactions", "outboxes",
                         "dispositions", "actions", "observations", "items", "spans", "evidence", "observed_versions",
                         "item_observations", "item_content_observations", "projection_id_paths"):
                 self.__dict__.pop(key, None)
@@ -212,6 +214,7 @@ class RebuildVerifier:
         self.accepted = rows("accepted_job_artifacts", "job_id")
         self.extractions = rows("extraction_receipts", "job_id")
         self.extraction_inputs = ScratchMap(self.scratch, "extraction_inputs")
+        self.extraction_contexts = ScratchMap(self.scratch, "extraction_contexts")
         self.processing = rows("processing_receipts", "batch_id")
         self.transactions = rows("canonical_transactions", "transaction_id")
         self.outboxes = RowMap(self.db, "SELECT p.outbox_id,p.owner_id,NULL AS owner_type,p.revision,p.transaction_id,"
@@ -360,6 +363,80 @@ class RebuildVerifier:
                     or attributed and not {"speaker_id", "speaker_name"} <= member.keys()
                     or not attributed and any(member.get(key) is not None for key in ("speaker_id", "speaker_name"))):
                 self.issue("extraction_input_mismatch")
+        self._verify_extraction_context(job, inputs, versions, actual)
+
+    def _verify_extraction_context(self, job, inputs, versions, members):
+        """Independently reconstruct the admitted tail; never trust producer selection."""
+        if "preceding_context" not in inputs and "capture_context" not in versions:
+            return
+        if versions.get("capture_context") != CAPTURE_CONTEXT_VERSION:
+            self.issue("extraction_context_invalid")
+            return
+        # These are independent scope/order and selection checks. The shared
+        # low-level reader only supplies exact raw tail spans and attribution.
+        previous = self.db.execute("SELECT p.batch_id,p.receipt_id,p.source_namespace,p.chat_id,p.input_cursors_json,p.output_cursors_json "
+            "FROM capture_batches c JOIN capture_batches p ON p.source_namespace=c.source_namespace "
+            "AND p.chat_id=c.chat_id AND p.rowid<c.rowid WHERE c.batch_id=? AND EXISTS "
+            "(SELECT 1 FROM capture_batch_members m JOIN source_records r USING(source_version_id) "
+            "WHERE m.batch_id=p.batch_id AND r.kind='message' AND r.provenance_grade='raw_exact') "
+            "ORDER BY p.rowid DESC LIMIT 1", (inputs.get("batch_id"),)).fetchone()
+        if previous is None:
+            self.issue("extraction_context_invalid")
+            return
+        groups, used, count, reason = [], 2, 0, None
+        rows = self.db.execute("SELECT m.source_version_id,r.source_namespace,r.chat_id FROM capture_batch_members m JOIN source_records r "
+            "USING(source_version_id) WHERE m.batch_id=? AND r.kind='message' AND r.provenance_grade='raw_exact' "
+            "ORDER BY m.ordinal DESC", (previous["batch_id"],))
+        try:
+            for row in rows:
+                if (row["source_namespace"], row["chat_id"]) != (previous["source_namespace"], previous["chat_id"]):
+                    self.issue("extraction_context_invalid")
+                    return
+                if row[0] in members:
+                    continue
+                source, spans, stored = context_source_tail(self.db, row[0], self.generation)
+                selected, stop = [], False
+                source_cost = len(_json(source).encode()) + 1
+                for span in reversed(spans or [{"source_id": row[0], "span_id": None}]):
+                    cost = len(_json(span).encode()) + 1
+                    if count == CAPTURE_CONTEXT_MAX_PACKETS or used + source_cost + cost > CAPTURE_CONTEXT_MAX_BYTES:
+                        stop = True
+                        break
+                    selected.append(span)
+                    used += source_cost + cost
+                    source_cost = 0
+                    count += 1
+                if selected:
+                    groups.append((source, list(reversed([s for s in selected if s["span_id"] is not None])), stored))
+                if stop or count == CAPTURE_CONTEXT_MAX_PACKETS:
+                    break
+        except Exception as exc:
+            if getattr(exc, "code", None) not in {"extraction_context_metadata_limit", "extraction_context_token_limit"}:
+                raise
+            groups, reason = [], exc.code
+        finally:
+            rows.close()
+        groups.reverse()
+        current_input = _load(self.batches[inputs["batch_id"]]["input_cursors_json"])
+        before, after = (_load(previous[key]) for key in ("input_cursors_json", "output_cursors_json"))
+        expected = {"generation_id": self.generation, "batch_id": previous["batch_id"],
+            "receipt_id": previous["receipt_id"], "source_ids": [source["source_id"] for source, _, _ in groups],
+            "spans": [span for _, spans, _ in groups for span in spans],
+            "cursor_continuity": "exact" if current_input and after == current_input and before != after else "unknown",
+            "unavailable_reason": reason}
+        if inputs.get("preceding_context") != expected:
+            self.issue("extraction_context_invalid")
+            return
+        for _, spans, stored in groups:
+            for span in spans:
+                row = self.db.execute("SELECT * FROM source_spans WHERE span_id=?", (span["span_id"],)).fetchone()
+                if row is not None and tuple(row) != stored[span["span_id"]]:
+                    self.issue("evidence_context_span_invalid")
+        anchors = self.extraction_inputs[job["job_id"]]
+        anchors.update({source["source_id"]: {key: source.get(key) for key in ("subject_id", "case_id", "speaker_id")}
+                        for source, _, _ in groups})
+        self.extraction_inputs[job["job_id"]] = anchors
+        self.extraction_contexts[job["job_id"]] = [span["span_id"] for span in expected["spans"]]
 
     def _verify_source_versions(self):
         missing_head = self.db.execute("SELECT 1 FROM source_heads h WHERE NOT EXISTS (SELECT 1 FROM source_records s "
@@ -411,6 +488,10 @@ class RebuildVerifier:
                 self.issue("observation_evidence_missing")
                 continue
             core = {m["source_version_id"] for m in self.members[extraction["batch_id"]] if m["core"]}
+            primary = {m["source_version_id"] for m in self.members[extraction["batch_id"]]}
+            context = set(self.extraction_contexts.get(observation["accepted_job_id"], ()))
+            if any(self.spans[s]["source_version_id"] not in primary and s not in context for s in spans):
+                self.issue("observation_context_unbound")
             if not any(self.spans[s]["source_version_id"] in core for s in spans):
                 self.issue("observation_core_evidence_missing")
             if (observation["resolution_status"] == "unresolved" or

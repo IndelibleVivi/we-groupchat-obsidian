@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, closing
+import codecs
 import json
 import os
 from pathlib import Path
@@ -10,13 +11,16 @@ import time
 import uuid
 
 from core.platform import create_platform_services
-from core.url_safety import redact_urls_in_text, redact_urls_with_offsets
+from core.url_safety import redact_urls_in_text, redact_urls_with_offsets, redact_urls_tail
 from .attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata
 from .contracts import (SemanticStoreError, DISPOSITIONS, PROVENANCE, digest, dumps,
                         ids, integer, text, timestamp, validate_action, validate_claim_relation)
 
 
 SCHEMA = "we-groupchat-obsidian.semantic.v1"
+CAPTURE_CONTEXT_VERSION = "preceding-capture-tail-v1"
+CAPTURE_CONTEXT_MAX_BYTES = 22000
+CAPTURE_CONTEXT_MAX_PACKETS = 24
 DDL = """
 CREATE TABLE IF NOT EXISTS generation_manifest(generation_id TEXT PRIMARY KEY,schema TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,metadata_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS source_records(capture_seq INTEGER PRIMARY KEY AUTOINCREMENT,source_version_id TEXT UNIQUE NOT NULL,source_id TEXT NOT NULL,source_namespace TEXT NOT NULL,chat_id TEXT NOT NULL,logical_shard_id TEXT NOT NULL,physical_generation TEXT NOT NULL,source_cursor_token TEXT NOT NULL,source_sent_at REAL NOT NULL,captured_at REAL NOT NULL,revision INTEGER NOT NULL,native_revision TEXT,kind TEXT NOT NULL,provenance_grade TEXT NOT NULL,content_hash TEXT NOT NULL,text TEXT NOT NULL,payload_json TEXT NOT NULL,supersedes_source_version_id TEXT REFERENCES source_records(source_version_id),UNIQUE(source_namespace,chat_id,source_id,revision));
@@ -66,6 +70,7 @@ CREATE TABLE IF NOT EXISTS legacy_mappings(kind TEXT NOT NULL,legacy_id TEXT NOT
 CREATE TABLE IF NOT EXISTS annotation_preservation(path TEXT PRIMARY KEY,sha256 TEXT NOT NULL,backup_path TEXT NOT NULL,status TEXT NOT NULL,metadata_json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS source_occurrence ON source_records(source_namespace,chat_id,source_id,revision);
 CREATE INDEX IF NOT EXISTS source_batch_versions ON capture_batch_members(source_version_id);
+CREATE INDEX IF NOT EXISTS capture_context_order ON capture_batches(source_namespace,chat_id);
 CREATE INDEX IF NOT EXISTS semantic_jobs_batch ON jobs(kind,json_extract(inputs_json,'$.batch_id'));
 CREATE INDEX IF NOT EXISTS semantic_jobs_parent ON jobs(kind,json_extract(inputs_json,'$.parent_job_id'));
 CREATE INDEX IF NOT EXISTS reverse_item_relation ON item_relations(to_item_id);
@@ -84,6 +89,107 @@ def _decode(row):
         if key.endswith("_json"):
             result[key[:-5]] = json.loads(result.pop(key))
     return result
+
+
+def context_source_tail(conn, source_id, generation):
+    """Read one immutable source in bounded chunks; expose only exact tail spans.
+
+    Project attribution inputs in SQLite, before Python sees any payload. This
+    is a bounded raw-data reader, not context admission or an identity decision.
+    """
+    row = conn.execute("""WITH projected AS (
+        SELECT capture_seq,source_version_id,source_namespace,chat_id,source_sent_at,
+          length(CAST(text AS BLOB)) AS byte_length,
+          json_object('raw_sender_id',json_extract(payload_json,'$.raw_sender_id'),
+            'sender_id',json_extract(payload_json,'$.sender_id'),'sender',json_extract(payload_json,'$.sender'),
+            'source_envelope',json_object('db_shard_id',json_extract(payload_json,'$.source_envelope.db_shard_id')),
+            'subject_anchor',json_extract(payload_json,'$.subject_anchor'),
+            'case_anchor',json_extract(payload_json,'$.case_anchor'),'case_id',json_extract(payload_json,'$.case_id'),
+            'material_id',json_extract(payload_json,'$.material_id'),'reply_to',json_extract(payload_json,'$.reply_to')) AS metadata
+        FROM source_records WHERE source_version_id=?)
+        SELECT capture_seq,source_version_id,source_namespace,chat_id,source_sent_at,byte_length,
+          CASE WHEN length(CAST(metadata AS BLOB))<=8192 THEN metadata END AS metadata FROM projected""", (source_id,)).fetchone()
+    if row is None or row["metadata"] is None:
+        raise SemanticStoreError("extraction_context_metadata_limit")
+
+    def chunks():
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        if hasattr(conn, "blobopen"):
+            with conn.blobopen("source_records", "text", row["capture_seq"], readonly=True) as blob:
+                while data := blob.read(8192):
+                    yield decoder.decode(data)
+        else:  # Python 3.10 retains the same bounded byte projection.
+            for offset in range(1, row["byte_length"] + 1, 8192):
+                data = conn.execute("SELECT substr(CAST(text AS BLOB),?,8192) FROM source_records "
+                                    "WHERE source_version_id=?", (offset, source_id)).fetchone()[0]
+                yield decoder.decode(data)
+        yield decoder.decode(b"", final=True)
+    try:
+        size, tail, ranges = redact_urls_tail(chunks(), max_chars=CAPTURE_CONTEXT_MAX_PACKETS * 2000)
+    except ValueError as exc:
+        raise SemanticStoreError("extraction_context_token_limit") from exc
+    base = size - len(tail)
+    spans, stored = [], {}
+    first = max(0, (size - 1) // 2000 - CAPTURE_CONTEXT_MAX_PACKETS + 1) * 2000 if size else 0
+    for start in range(first, size, 2000):
+        end = min(start + 2000, size)
+        sid = str(uuid.uuid5(uuid.NAMESPACE_URL, dumps([generation, source_id, start, end])))
+        excerpt = tail[start - base:end - base]
+        span = {"span_id": sid, "source_id": source_id, "start": start, "end": end, "excerpt": excerpt}
+        mapping = [{"raw_start": a + max(0, start - x) if tag == "equal" else a,
+                    "raw_end": b - max(0, y - end) if tag == "equal" else b,
+                    "visible_start": max(start, x), "visible_end": min(end, y)}
+                   for tag, a, b, x, y in ranges if x < end and y > start]
+        stored[sid] = (sid, source_id, start, end, mapping[0]["raw_start"], mapping[-1]["raw_end"],
+                       excerpt, digest(excerpt), dumps(mapping))
+        spans.append(span)
+    payload = json.loads(row["metadata"])
+    source = {"source_id": source_id, "text": "", "core": False, "occurred_at": row["source_sent_at"],
+              **captured_source_metadata(row["source_namespace"], row["chat_id"], payload)}
+    return source, spans, stored
+
+
+def preceding_capture(conn, batch_id):
+    """Insertion order selects available context, never event order or identity."""
+    return conn.execute("SELECT p.batch_id,p.receipt_id,p.source_namespace,p.chat_id,p.input_cursors_json,p.output_cursors_json "
+        "FROM capture_batches c JOIN capture_batches p "
+        "ON p.source_namespace=c.source_namespace AND p.chat_id=c.chat_id AND p.rowid<c.rowid "
+        "WHERE c.batch_id=? AND EXISTS (SELECT 1 FROM capture_batch_members m JOIN source_records r "
+        "USING(source_version_id) WHERE m.batch_id=p.batch_id AND r.kind='message' "
+        "AND r.provenance_grade='raw_exact') ORDER BY p.rowid DESC LIMIT 1", (batch_id,)).fetchone()
+
+
+def capture_tail(conn, previous, current_ids, generation):
+    """A suffix of at most one bounded raw page; no whole-capture payload list."""
+    groups, used, count = [], 2, 0
+    rows = conn.execute("SELECT m.source_version_id,r.source_namespace,r.chat_id FROM capture_batch_members m JOIN source_records r "
+        "USING(source_version_id) WHERE m.batch_id=? AND r.kind='message' AND r.provenance_grade='raw_exact' "
+        "ORDER BY m.ordinal DESC", (previous["batch_id"],))
+    try:
+        for row in rows:
+            if (row["source_namespace"], row["chat_id"]) != (previous["source_namespace"], previous["chat_id"]):
+                raise SemanticStoreError("extraction_context_invalid")
+            if row[0] in current_ids:
+                continue
+            source, spans, stored = context_source_tail(conn, row[0], generation)
+            selected, stop = [], False
+            source_cost = len(dumps(source).encode("utf-8")) + 1
+            for packet in reversed(spans or [{"source_id": row[0], "span_id": None}]):
+                cost = len(dumps(packet).encode("utf-8")) + 1
+                if count == CAPTURE_CONTEXT_MAX_PACKETS or used + source_cost + cost > CAPTURE_CONTEXT_MAX_BYTES:
+                    stop = True
+                    break
+                selected.append(packet)
+                used += source_cost + cost
+                source_cost = 0
+                count += 1
+            if selected:
+                groups.append((source, list(reversed([p for p in selected if p["span_id"] is not None])), stored))
+            if stop or count == CAPTURE_CONTEXT_MAX_PACKETS:
+                break
+    finally:
+        rows.close()
+    return list(reversed(groups))
 
 
 class SemanticStore:
@@ -261,6 +367,49 @@ class SemanticStore:
         with closing(self.connect()) as conn:
             return [_decode(row) for row in conn.execute("SELECT * FROM capture_batches ORDER BY captured_at,rowid")]
 
+    def _preceding_context(self, conn, batch_id):
+        previous = preceding_capture(conn, batch_id)
+        if previous is None:
+            return None, []
+        current_ids = {row[0] for row in conn.execute("SELECT source_version_id FROM capture_batch_members WHERE batch_id=?", (batch_id,))}
+        current_input = json.loads(conn.execute("SELECT input_cursors_json FROM capture_batches WHERE batch_id=?", (batch_id,)).fetchone()[0])
+        before, after = (json.loads(previous[key]) for key in ("input_cursors_json", "output_cursors_json"))
+        reason = None
+        try:
+            groups = capture_tail(conn, previous, current_ids, self.generation_id)
+        except SemanticStoreError as exc:
+            if exc.code not in {"extraction_context_metadata_limit", "extraction_context_token_limit"}:
+                raise
+            groups, reason = [], exc.code
+        binding = {"generation_id": self.generation_id, "batch_id": previous["batch_id"],
+            "receipt_id": previous["receipt_id"], "source_ids": [source["source_id"] for source, _, _ in groups],
+            "spans": [span for _, spans, _ in groups for span in spans],
+            "cursor_continuity": "exact" if current_input and after == current_input and before != after else "unknown",
+            "unavailable_reason": reason}
+        return binding, groups
+
+    def preceding_context(self, batch_id):
+        """Freeze bounded raw context only while creating a new extract parent."""
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN")
+            return self._preceding_context(conn, batch_id)[0]
+
+    def _extraction_context(self, conn, inputs, versions, batch_id):
+        if "preceding_context" not in inputs and "capture_context" not in versions:
+            return []
+        if versions.get("capture_context") != CAPTURE_CONTEXT_VERSION:
+            raise SemanticStoreError("extraction_context_invalid")
+        expected, groups = self._preceding_context(conn, batch_id)
+        if expected is None or inputs.get("preceding_context") != expected:
+            raise SemanticStoreError("extraction_context_invalid")
+        return groups
+
+    def extraction_context_sources(self, job):
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN")
+            groups = self._extraction_context(conn, job["inputs"], job["versions"], job["inputs"]["batch_id"])
+            return [{**source, "spans": spans} for source, spans, _ in groups]
+
     @staticmethod
     def _resources(value):
         if not isinstance(value, list):
@@ -358,6 +507,12 @@ class SemanticStore:
                 if prior["input_fingerprint"] != signature:
                     raise SemanticStoreError("extraction_replay_conflict")
                 return json.loads(prior["receipt_json"])
+            job = conn.execute("SELECT inputs_json,versions_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            context = self._extraction_context(conn, json.loads(job["inputs_json"]), json.loads(job["versions_json"]), batch_id)
+            context_members = {source["source_id"]: source for source, _, _ in context}
+            context_spans = {span["span_id"]: (span, stored[span["span_id"]])
+                             for _, spans, stored in context for span in spans}
+            input_members = [*input_members, *context_members.values()]
             adopted_jobs = set()
             for vid, member in members.items():
                 if member["core"]:
@@ -381,6 +536,23 @@ class SemanticStore:
                 source_times, span_ids = [], set()
                 for span in spans:
                     source = members.get(span.get("source_id"))
+                    if source is None and span.get("source_id") in context_members:
+                        expected = context_spans.get(span.get("span_id"))
+                        if expected is None or span != expected[0]:
+                            raise SemanticStoreError("observation_invalid_context_span")
+                        values = expected[1]
+                        expected_id = values[0]
+                        if expected_id in span_ids:
+                            raise SemanticStoreError("observation_invalid_span")
+                        span_ids.add(expected_id)
+                        old = conn.execute("SELECT * FROM source_spans WHERE span_id=?", (expected_id,)).fetchone()
+                        if old and tuple(old) != values:
+                            raise SemanticStoreError("source_span_identity_conflict")
+                        if not old:
+                            conn.execute("INSERT INTO source_spans VALUES(?,?,?,?,?,?,?,?,?)", values)
+                        source_times.append(context_members[span["source_id"]]["occurred_at"])
+                        cited.add(span["source_id"])
+                        continue
                     if source is None:
                         raise SemanticStoreError("observation_unknown_source")
                     a, b = integer(span.get("start")), integer(span.get("end"))

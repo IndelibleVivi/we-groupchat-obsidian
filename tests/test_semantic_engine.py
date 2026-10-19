@@ -885,6 +885,194 @@ class IndexedEvidenceTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT count(*) FROM " + table).fetchone()[0], 0, table)
 
 
+class CaptureContextTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = SemanticStore(Path(temporary.name).resolve() / "knowledge.sqlite", "synthetic-generation")
+
+    def capture(self, batch, texts, *, chat="same-chat", namespace="same-namespace"):
+        return self.store.capture_batch(batch, [{"source_id": batch + str(index), "text": text,
+            "logical_shard_id": "synthetic", "physical_generation": "synthetic", "source_cursor_token": str(index),
+            "source_sent_at": 10 + index, "payload": {"raw_sender_id": "synthetic-speaker", "sender": "阿岚"}}
+            for index, text in enumerate(texts)], source_namespace=namespace, chat_id=chat,
+            inventory_digest="synthetic", inventory_revision=1, input_cursors={}, output_cursors={}, source_eof=True)
+
+    def test_split_capture_supplies_prior_raw_context_without_reclaiming_its_core(self):
+        first = self.capture("first", ["[图片]", "终于有空给小灯做贴纸了。"])
+        second = self.capture("second", ["还在和同事 debug，一抬头小灯已经用上了。", "[表情]"])
+        class ContextText(FakeText):
+            def generate(provider, prompt, **kwargs):
+                if not prompt.startswith("The following captured"):
+                    return super().generate(prompt, **kwargs)
+                provider.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[1])
+                text = "".join(span["excerpt"] for source in data for span in source["spans"])
+                self.assertIn("终于有空给小灯做贴纸了。", text)
+                self.assertEqual([source["core"] for source in data], [False, False, True, True])
+                return TextResult(json.dumps({"observations": [model_observation(data,
+                    title="小灯用上贴纸", units=[{"kind": "scene", "text": "阿岚为小灯做了贴纸；还在 debug 时，小灯已经用上了。",
+                                                   "span_indices": [1, 2]}])]}), provider.route)
+        provider = ContextText()
+        result = SemanticEngine(self.store, provider, FakeDecision()).extract_batch("second")
+        self.assertEqual({span["source_id"] for span in result["observations"][0]["spans"]},
+                         set(first["member_version_ids"] + second["member_version_ids"]))
+        with closing(self.store.connect()) as db:
+            owners = {row[0] for row in db.execute("SELECT source_version_id FROM source_core_jobs")}
+            self.assertEqual(owners, set(second["member_version_ids"]))
+            dispositions = {row[0] for row in db.execute("SELECT source_version_id FROM source_dispositions")}
+            self.assertEqual(dispositions, set(second["member_version_ids"]))
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_other_chats_and_namespaces_cannot_supply_context(self):
+        self.capture("other-chat", ["另一群的材料"], chat="other-chat")
+        self.capture("other-namespace", ["另一来源的材料"], namespace="other-namespace")
+        self.capture("first-here", ["这里的完整场景"])
+        provider = FakeText()
+        with patch("core.semantic.engine.extraction_prompt", wraps=extraction_prompt) as prompts:
+            result = SemanticEngine(self.store, provider, FakeDecision()).extract_batch("first-here")
+        self.assertEqual(len(prompts.call_args.args[0]), 1)
+        with closing(self.store.connect()) as db:
+            parent = db.execute("SELECT inputs_json,versions_json FROM jobs WHERE job_id=?", (result["job_id"],)).fetchone()
+        self.assertNotIn("preceding_context", json.loads(parent["inputs_json"]))
+        self.assertNotIn("capture_context", json.loads(parent["versions_json"]))
+
+    def test_nearest_same_scope_context_does_not_merge_independent_scenes(self):
+        self.capture("walk", ["阿岚独自在河边散步。"])
+        self.capture("other-chat", ["另一群的原文"], chat="other-chat")
+        self.capture("other-namespace", ["另一来源的原文"], namespace="other-namespace")
+        self.capture("debug", ["阿岚在办公室调试程序。"])
+        text, decision = FakeText(), FakeDecision(possible=0)
+        engine = SemanticEngine(self.store, text, decision)
+        first, second = engine.extract_batch("walk"), engine.extract_batch("debug")
+        with closing(self.store.connect()) as db:
+            binding = json.loads(db.execute("SELECT inputs_json FROM jobs WHERE job_id=?", (second["job_id"],)).fetchone()[0])
+        self.assertEqual(binding["preceding_context"]["batch_id"], "walk")
+        self.assertEqual(binding["preceding_context"]["cursor_continuity"], "unknown")
+        self.assertEqual(len(second["observations"]), 1)
+        self.assertEqual(engine.resolve_batch("walk", extracted=first)["status"], "complete")
+        self.assertEqual(engine.resolve_batch("debug", extracted=second)["status"], "complete")
+        self.assertEqual(len(self.store.list_items()), 2)
+        self.assertNotEqual(first["observations"][0]["observation_id"], second["observations"][0]["observation_id"])
+
+    def test_frozen_context_retains_order_and_prompt_after_restart_and_new_capture(self):
+        self.capture("before", ["前序的第一条", "前序的第二条"])
+        self.capture("target", ["当前条目"])
+        provider = FakeText()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        seen = []
+        generate = provider.generate
+        def fail_known(prompt, **kwargs):
+            seen.append(prompt)
+            raise ProviderError("synthetic_known_failure")
+        with patch.object(provider, "generate", side_effect=fail_known), self.assertRaisesRegex(ProviderError, "synthetic_known_failure"):
+            engine.extract_batch("target")
+        with closing(self.store.connect()) as db:
+            frozen = [tuple(row) for row in db.execute("SELECT job_id,inputs_json,versions_json FROM jobs ORDER BY job_id")]
+        self.capture("later", ["后来捕获的材料不能重排旧页"])
+        reopened = SemanticStore(self.store.path, self.store.generation_id)
+        def record(prompt, **kwargs):
+            seen.append(prompt)
+            return generate(prompt, **kwargs)
+        with patch.object(provider, "generate", side_effect=record):
+            result = SemanticEngine(reopened, provider, FakeDecision()).extract_batch("target")
+        self.assertEqual(seen[0], seen[1])
+        self.assertEqual([source["core"] for source in json.loads(seen[1].rsplit("\n", 1)[1])], [False, False, True])
+        with closing(reopened.connect()) as db:
+            self.assertEqual([tuple(row) for row in db.execute("SELECT job_id,inputs_json,versions_json FROM jobs ORDER BY job_id")], frozen)
+        with patch.object(reopened, "preceding_context", side_effect=AssertionError("reselected frozen context")), \
+             patch.object(reopened, "extraction_context_sources", side_effect=AssertionError("reopened accepted context")), \
+             patch.object(provider, "generate", side_effect=AssertionError("resent accepted parent")):
+            self.assertEqual(SemanticEngine(reopened, provider, FakeDecision()).extract_batch("target"), result)
+
+    def test_unknown_context_page_blocks_new_route_and_new_capture_without_calls(self):
+        self.capture("before-unknown", ["原先的语境"])
+        self.capture("unknown-target", ["当前的材料"])
+        provider = FakeText()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        with patch.object(provider, "generate", side_effect=ProviderError("synthetic_unknown", outcome_unknown=True)), \
+             self.assertRaisesRegex(ProviderError, "synthetic_unknown"):
+            engine.extract_batch("unknown-target")
+        with closing(self.store.connect()) as db:
+            before = [tuple(row) for row in db.execute("SELECT * FROM jobs ORDER BY job_id")]
+        self.capture("new-after-unknown", ["新捕获不得绕过 unknown"])
+        provider.route = ProviderRoute("changed", "text", "text")
+        reopened = SemanticStore(self.store.path, self.store.generation_id)
+        with patch.object(reopened, "preceding_context", side_effect=AssertionError("reselected unknown context")), \
+             patch.object(reopened, "extraction_context_sources", side_effect=AssertionError("read context before unknown guard")), \
+             patch.object(provider, "generate", side_effect=AssertionError("resent unknown")), \
+             self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            SemanticEngine(reopened, provider, FakeDecision()).extract_batch("unknown-target")
+        with closing(self.store.connect()) as db:
+            self.assertEqual([tuple(row) for row in db.execute("SELECT * FROM jobs ORDER BY job_id")], before)
+
+    def test_accepted_context_child_reuses_exact_artifact_after_parent_interruption_and_route_change(self):
+        self.capture("child-before", ["前文可用的完整经历"])
+        self.capture("child-target", ["独立的当前经历"])
+        provider = FakeText()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        original = engine._accepted
+        def before_parent(job, callback):
+            if job["kind"] == "extract":
+                raise RuntimeError("synthetic accepted child interruption")
+            return original(job, callback)
+        with patch.object(engine, "_accepted", side_effect=before_parent), \
+             self.assertRaisesRegex(RuntimeError, "accepted child interruption"):
+            engine.extract_batch("child-target")
+        with closing(self.store.connect()) as db:
+            frozen = [tuple(row) for row in db.execute("SELECT job_id,inputs_json,versions_json FROM jobs ORDER BY job_id")]
+            artifact = tuple(db.execute("SELECT * FROM accepted_job_artifacts").fetchone())
+        self.capture("child-later", ["后来材料"])
+        provider.route = ProviderRoute("changed", "text", "text")
+        with patch.object(provider, "generate", side_effect=AssertionError("resent accepted context child")):
+            SemanticEngine(SemanticStore(self.store.path, self.store.generation_id), provider, FakeDecision()).extract_batch("child-target")
+        with closing(self.store.connect()) as db:
+            self.assertEqual([tuple(row) for row in db.execute("SELECT job_id,inputs_json,versions_json FROM jobs ORDER BY job_id")], frozen)
+            self.assertEqual(tuple(db.execute("SELECT * FROM accepted_job_artifacts WHERE job_id=?", (artifact[0],)).fetchone()), artifact)
+
+    def test_missing_context_binding_preserves_all_frozen_primary_policies(self):
+        self.capture("historical-context", ["新版本可见但旧冻结页不得擅自加进的前文"])
+        for policy in (None, *("retained-knowledge-v" + str(index) for index in range(1, 6))):
+            batch = "historical-" + str(policy)
+            self.capture(batch, ["旧冻结页自己的原文"])
+            provider = FakeText()
+            engine = SemanticEngine(self.store, provider, FakeDecision())
+            old = freeze_legacy_primary(engine, batch, policy)
+            sources = tuple(CapturedSource(member["source_version_id"], member["text"], member["core"], member["source_sent_at"],
+                **captured_source_metadata("same-namespace", "same-chat", member["payload"]))
+                for member in self.store.get_batch(batch)["members"])
+            expected = extraction_prompt(sources, namespace=self.store.generation_id,
+                span_ids=old["inputs"]["span_ids"], unit_policy=policy)
+            actual = []
+            generate = provider.generate
+            def record(prompt, **kwargs):
+                actual.append(prompt)
+                return generate(prompt, **kwargs)
+            with self.subTest(policy=policy), patch.object(provider, "generate", side_effect=record), \
+                 patch.object(self.store, "preceding_context", side_effect=AssertionError("upgraded frozen parent")):
+                engine.extract_batch(batch)
+            self.assertEqual(actual, [expected])
+            self.assertEqual(provider.calls, [old["job_id"] + ":text"])
+
+    def test_external_context_never_becomes_coverage_core(self):
+        previous = self.capture("previous-pending", ["已有前序语境"])
+        current = self.capture("pending", ["未理解的当前材料"])
+        class PendingText(FakeText):
+            def generate(provider, prompt, **kwargs):
+                provider.calls.append(kwargs["request_id"])
+                sources = json.loads(prompt.rsplit("\n", 1)[1])
+                return TextResult(json.dumps({"observations": [], "dispositions": model_dispositions([
+                    (source, {"status": "unclassified", "reason": "synthetic pending fragment"})
+                    for source in sources if source["core"]])}), provider.route)
+        provider = PendingText()
+        SemanticEngine(self.store, provider, FakeDecision()).extract_batch("pending")
+        with closing(self.store.connect()) as db:
+            coverage = json.loads(db.execute("SELECT inputs_json FROM jobs WHERE kind='extract_coverage'").fetchone()[0])
+            self.assertEqual(set(coverage["core_source_ids"]), set(current["member_version_ids"]))
+            self.assertTrue(set(previous["member_version_ids"]).isdisjoint(coverage["source_ids"]))
+            self.assertEqual(db.execute("SELECT count(*) FROM processing_receipts").fetchone()[0], 0)
+
+
 class ProposalCorrectionTests(unittest.TestCase):
     def setUp(self):
         self.new_fixture()

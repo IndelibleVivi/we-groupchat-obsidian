@@ -265,15 +265,22 @@ class FullPathSchedulingTests(unittest.TestCase):
         capture(self.store, "c", ["not admitted"])
         provider, barrier = FakeText(noise=True), threading.Barrier(2)
         original = provider.generate
+        admitted = []
         def generate(prompt, **kwargs):
+            sources = json.loads(prompt.rsplit("\n", 1)[-1])
+            core = [span["excerpt"] for source in sources if source["core"] for span in source["spans"]]
+            context = [span["excerpt"] for source in sources if not source["core"] for span in source["spans"]]
+            admitted.append((core, context))
             barrier.wait(5)
-            if "failure" in prompt:
+            if "failure" in core:
                 raise ProviderError("provider_timeout", retryable=True, outcome_unknown=True)
             return original(prompt, **kwargs)
         provider.generate = generate
         runtime = self.runtime(text=provider)
         with self.assertRaisesRegex(ProviderError, "provider_timeout"):
             RebuildCoordinator._process_all(None, runtime, run_id="failed-extraction")
+        self.assertEqual({text for core, _ in admitted for text in core}, {"failure", "success"})
+        self.assertIn((["success"], ["failure"]), admitted)
         with closing(self.store.connect()) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM capture_batches").fetchone()[0], 3)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM processing_receipts").fetchone()[0], 0)

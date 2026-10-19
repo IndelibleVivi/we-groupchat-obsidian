@@ -228,3 +228,55 @@ def redact_urls_with_offsets(value) -> tuple[str, list[tuple[str, int, int, int,
         pieces.append(raw[start:])
         ranges.append(("equal", start, len(raw), visible_end, visible_end + len(raw) - start))
     return "".join(pieces), ranges
+
+
+def redact_urls_tail(chunks, *, max_chars, max_token_chars=65536):
+    """Return an exact bounded suffix and canonical global replacement ranges.
+
+    Input chunks contain at most 8192 characters. Complete URL tokens still go
+    through the existing redactor; an indivisible oversized token fails closed,
+    without returning a clipped URL or a partial result. No source-sized text
+    buffer is kept. Ranges retain their original global boundaries so a caller
+    can bind canonical spans exactly as with redact_urls_with_offsets.
+    """
+    if type(max_chars) is not int or max_chars < 1 or type(max_token_chars) is not int or max_token_chars < 8:
+        raise ValueError("redaction_tail_invalid_limit")
+    pending, tail, ranges = "", "", []
+    raw_offset = visible_offset = 0
+    last_plain = False
+
+    def consume(raw):
+        nonlocal tail, ranges, raw_offset, visible_offset, last_plain
+        if not raw:
+            return
+        matches = list(URL_RE.finditer(raw))
+        display, local = redact_urls_with_offsets(raw)
+        adjusted = [(tag, a + raw_offset, b + raw_offset, x + visible_offset, y + visible_offset)
+                    for tag, a, b, x, y in local]
+        first_plain = not matches or matches[0].start() > 0
+        if ranges and adjusted and last_plain and first_plain:
+            before, after = ranges.pop(), adjusted.pop(0)
+            ranges.append(("equal", before[1], after[2], before[3], after[4]))
+        ranges.extend(adjusted)
+        raw_offset += len(raw)
+        visible_offset += len(display)
+        tail = (tail + display)[-max_chars:]
+        ranges = [entry for entry in ranges if entry[4] > visible_offset - len(tail)]
+        last_plain = not matches or matches[-1].end() < len(raw)
+
+    for chunk in chunks:
+        if not isinstance(chunk, str) or len(chunk) > 8192:
+            raise ValueError("redaction_tail_invalid_chunk")
+        pending += chunk
+        matches = list(URL_RE.finditer(pending))
+        if any(match.end() - match.start() > max_token_chars for match in matches):
+            raise ValueError("redaction_tail_token_too_large")
+        # Keep a possible split scheme and any URL crossing that boundary.
+        cut = max(0, len(pending) - 8)
+        for match in matches:
+            if match.start() < cut < match.end():
+                cut = match.start()
+        consume(pending[:cut])
+        pending = pending[cut:]
+    consume(pending)
+    return visible_offset, tail, ranges

@@ -13,7 +13,9 @@ from core.semantic.contracts import SemanticStoreError, digest, dumps
 from core.semantic.jobs import JobStore
 from core.semantic.engine import CapturedSource, prepare_spans, validate_extraction
 from core.semantic.attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata
-from core.semantic.store import SemanticStore
+from core.semantic.store import (SemanticStore, CAPTURE_CONTEXT_VERSION, CAPTURE_CONTEXT_MAX_BYTES,
+                                 CAPTURE_CONTEXT_MAX_PACKETS, context_source_tail)
+from core.url_safety import redact_urls_with_offsets
 
 
 class SemanticStoreTests(unittest.TestCase):
@@ -160,6 +162,216 @@ class SemanticStoreTests(unittest.TestCase):
                    for r in captured["members"]]
         return self.accept({"observations": observations, "dispositions": dispositions or {}}, "extract",
                            {"batch_id": batch["batch_id"], "members": members})
+
+    def context_fixture(self, *, prior_text="前序的完整经历", prefix="context"):
+        previous = self.capture(prior_text, source_id=prefix + "-before", batch_id=prefix + "-before",
+            payload={"raw_sender_id": "synthetic-speaker", "sender": "阿岚", "subject_anchor": "synthetic-subject"},
+            resources=[{"resource_id": prefix + "-resource", "occurrence_id": "synthetic-occurrence", "purpose": "attachment",
+                        "status": "pending", "location": None, "metadata": {"name": "synthetic.png"}}])
+        current = self.capture("当前接续的内容", source_id=prefix + "-now", batch_id=prefix + "-now")
+        binding = self.store.preceding_context(current["batch_id"])
+        current_source = self.store.get_batch(current["batch_id"])["members"][0]
+        source = CapturedSource(current_source["source_version_id"], current_source["text"], True, current_source["source_sent_at"],
+            **captured_source_metadata("namespace", "chat", current_source["payload"]))
+        spans = [copy.deepcopy(binding["spans"][-1]), asdict(prepare_spans([source], namespace=self.store.generation_id)[0])]
+        observation = {"observation_id": prefix + "-observation", "title": "接续的场景", "scene_kind": "life",
+            "spans": spans, "units": [{"unit_id": prefix + "-unit", "kind": "scene", "text": "保留前文和当前的具体内容",
+                                       "span_ids": [span["span_id"] for span in spans]}], "topics": [], "claims": []}
+        inputs = {"batch_id": current["batch_id"], "members": [asdict(source)], "preceding_context": binding}
+        versions = {"prompt": EXTRACTION_PROMPT_VERSION, "capture_context": CAPTURE_CONTEXT_VERSION}
+        return previous, current, observation, inputs, versions
+
+    def test_context_commit_checks_exact_tail_and_retains_resources_without_core_ownership(self):
+        previous, current, observation, inputs, versions = self.context_fixture()
+        job = self.accept({"observations": [observation], "dispositions": {}}, "extract", inputs, versions)
+        self.store.commit_extraction(job, current["batch_id"], [observation])
+        with closing(self.store.connect()) as db:
+            self.assertEqual([row[0] for row in db.execute("SELECT source_version_id FROM source_core_jobs")], current["member_version_ids"])
+            self.assertEqual([row[0] for row in db.execute("SELECT source_version_id FROM source_dispositions")], current["member_version_ids"])
+            self.assertEqual([row[0] for row in db.execute("SELECT resource_id FROM resource_refs")], ["context-resource"])
+            prior_span = observation["spans"][0]
+            stored = db.execute("SELECT * FROM source_spans WHERE span_id=?", (prior_span["span_id"],)).fetchone()
+            expected = context_source_tail(db, previous["member_version_ids"][0], self.store.generation_id)[2][prior_span["span_id"]]
+            self.assertEqual(tuple(stored), expected)
+
+    def test_context_binding_cannot_change_generation_receipt_order_or_selection(self):
+        mutations = {
+            "generation": lambda binding: binding.update(generation_id="foreign-generation"),
+            "batch": lambda binding: binding.update(batch_id="foreign-batch"),
+            "receipt": lambda binding: binding.update(receipt_id="foreign-receipt"),
+            "source": lambda binding: binding["source_ids"].append("unbound-source"),
+            "span": lambda binding: binding["spans"][0].update(excerpt="changed source words"),
+            "continuity": lambda binding: binding.update(cursor_continuity="exact"),
+            "reason": lambda binding: binding.update(unavailable_reason="invented"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                _, current, observation, inputs, versions = self.context_fixture(prefix=name)
+                mutate(inputs["preceding_context"])
+                job = self.accept({"observations": [observation], "dispositions": {}}, "extract", inputs, versions)
+                with self.assertRaisesRegex(SemanticStoreError, "extraction_context_invalid"):
+                    self.store.commit_extraction(job, current["batch_id"], [observation])
+                with closing(self.store.connect()) as db:
+                    self.assertIsNone(db.execute("SELECT 1 FROM source_core_jobs WHERE job_id=?", (job,)).fetchone())
+
+    def test_context_cannot_admit_other_source_or_unselected_span_or_own_disposition(self):
+        for invalid in ("foreign-source", "unselected-span", "changed-excerpt", "context-only", "context-disposition"):
+            with self.subTest(invalid=invalid):
+                previous, current, observation, inputs, versions = self.context_fixture(prior_text="旧材料" * 40000, prefix=invalid)
+                dispositions = {}
+                error = "observation_invalid_context_span"
+                if invalid == "foreign-source":
+                    observation["spans"][0]["source_id"] = "not-in-this-context"
+                    error = "observation_unknown_source"
+                elif invalid == "unselected-span":
+                    observation["spans"][0] = asdict(prepare_spans([CapturedSource(previous["member_version_ids"][0], "旧材料" * 40000)],
+                        namespace=self.store.generation_id)[0])
+                elif invalid == "changed-excerpt":
+                    observation["spans"][0]["excerpt"] = "程序不能代填或者接受改写后的前文"
+                elif invalid == "context-only":
+                    observation["spans"] = observation["spans"][:1]
+                    error = "observation_core_evidence_required"
+                else:
+                    dispositions = {previous["member_version_ids"][0]: {"status": "noise", "reason": "not this capture's work"}}
+                    error = "extraction_disposition_source_mismatch"
+                job = self.accept({"observations": [observation], "dispositions": dispositions}, "extract", inputs, versions)
+                with self.assertRaisesRegex(SemanticStoreError, error):
+                    self.store.commit_extraction(job, current["batch_id"], [observation], dispositions)
+
+    def test_streamed_tail_has_exact_canonical_span_ids_offsets_and_url_mappings(self):
+        # Cross every possible scheme boundary in an 8192-byte raw chunk and
+        # put another credential URL across the retained tail window boundary.
+        for offset in range(9):
+            with self.subTest(offset=offset):
+                text = ("a" * (8192 - offset) + "https://example.test/a?token=synthetic-secret&ok=1 "
+                    + "普通原文" * 30000 + " https://example.test/z#token=second-secret&ok=2 " + "尾" * 2007)
+                captured = self.capture(text, source_id="stream-" + str(offset))
+                version = captured["member_version_ids"][0]
+                full = prepare_spans([CapturedSource(version, text)], namespace=self.store.generation_id)
+                visible, ranges = redact_urls_with_offsets(text)
+                with closing(self.store.connect()) as db:
+                    source, actual, stored = context_source_tail(db, version, self.store.generation_id)
+                    class ByteProjectionOnly:
+                        # Exercise the Python 3.10 fallback, which must project
+                        # only a fixed byte chunk rather than fetch the TEXT.
+                        def execute(_, query, args=()):
+                            if query.startswith("SELECT substr("):
+                                self.assertIn(",8192)", query)
+                            return db.execute(query, args)
+                    fallback = context_source_tail(ByteProjectionOnly(), version, self.store.generation_id)
+                self.assertEqual(source["text"], "")
+                self.assertEqual(actual, [asdict(span) for span in full[-CAPTURE_CONTEXT_MAX_PACKETS:]])
+                self.assertEqual((source, actual, stored), fallback)
+                for span in actual:
+                    a, b = span["start"], span["end"]
+                    mapping = [{"raw_start": i + max(0, a-x) if tag == "equal" else i,
+                                "raw_end": j - max(0, y-b) if tag == "equal" else j,
+                                "visible_start": max(a, x), "visible_end": min(b, y)}
+                               for tag, i, j, x, y in ranges if x < b and y > a]
+                    self.assertEqual(stored[span["span_id"]], (span["span_id"], version, a, b,
+                        mapping[0]["raw_start"], mapping[-1]["raw_end"], visible[a:b], digest(visible[a:b]), dumps(mapping)))
+
+    def test_streamed_tail_keeps_whole_url_mapping_across_tail_window_and_span_boundaries(self):
+        url = "https://example.test/" + "p" * 3000 + "?token=synthetic-secret&ok=1"
+        displayed_url, _ = redact_urls_with_offsets(url)
+        # Visible URL [99980,103000+) crosses both the 48k suffix boundary
+        # at 99999 and the first retained canonical span at 100000.
+        text = "x" * 99980 + url + " " + "y" * (147999 - 99980 - len(displayed_url) - 1)
+        captured = self.capture(text, source_id="window-url")
+        vid = captured["member_version_ids"][0]
+        full = prepare_spans([CapturedSource(vid, text)], namespace=self.store.generation_id)
+        visible, ranges = redact_urls_with_offsets(text)
+        with closing(self.store.connect()) as db:
+            _, spans, stored = context_source_tail(db, vid, self.store.generation_id)
+        self.assertEqual(len(visible), 147999)
+        self.assertEqual(spans, [asdict(span) for span in full[-24:]])
+        first = spans[0]
+        self.assertEqual(first["start"], 100000)
+        mapping = json.loads(stored[first["span_id"]][-1])
+        url_range = next(entry for entry in ranges if entry[0] == "replace")
+        self.assertEqual(mapping[0], {"raw_start": url_range[1], "raw_end": url_range[2],
+            "visible_start": first["start"], "visible_end": first["end"]})
+
+    def test_cursor_continuity_is_exact_only_for_nonempty_matching_advanced_vectors(self):
+        for name, before, after, incoming, expected in (
+                ("exact", {"shard": "1"}, {"shard": "2"}, {"shard": "2"}, "exact"),
+                ("mismatch", {"shard": "1"}, {"shard": "2"}, {"shard": "3"}, "unknown"),
+                ("unchanged", {"shard": "2"}, {"shard": "2"}, {"shard": "2"}, "unknown"),
+                ("empty", {}, {}, {}, "unknown")):
+            records = [{"source_id": "continuity-" + name, "text": "具体前文", "logical_shard_id": "shard",
+                "physical_generation": "physical", "source_cursor_token": "1", "source_sent_at": 1}]
+            for batch, inputs, outputs in (("before", before, after), ("after", incoming, incoming)):
+                self.store.capture_batch("continuity-" + name + batch, records if batch == "before" else [],
+                    source_namespace=name, chat_id="chat", inventory_digest="synthetic", inventory_revision=1,
+                    input_cursors=inputs, output_cursors=outputs, source_eof=True)
+            self.assertEqual(self.store.preceding_context("continuity-" + name + "after")["cursor_continuity"], expected)
+
+    def test_context_window_bounds_packets_and_attribution_before_python_payload_reads(self):
+        records = [{"source_id": "bounded-" + str(index), "logical_shard_id": "shard", "physical_generation": "physical",
+            "source_cursor_token": str(index), "source_sent_at": index, "text": "合成原文" * 300,
+            "payload": {"sender": "展示名" * 200, "unrelated": "large unused payload" * 20000}}
+            for index in range(30)]
+        previous = self.store.capture_batch("bounded-before", records, source_namespace="namespace", chat_id="chat",
+            inventory_digest="synthetic", inventory_revision=1, input_cursors={}, output_cursors={}, source_eof=True)
+        current = self.capture("当前", batch_id="bounded-now", source_id="bounded-now")
+        original, queries = self.store.connect, []
+        def traced():
+            db = original()
+            db.set_trace_callback(queries.append)
+            return db
+        with patch.object(self.store, "connect", side_effect=traced):
+            binding = self.store.preceding_context(current["batch_id"])
+            groups = self.store.extraction_context_sources({"inputs": {"batch_id": current["batch_id"], "preceding_context": binding},
+                "versions": {"capture_context": CAPTURE_CONTEXT_VERSION}})
+        self.assertLess(len(binding["source_ids"]), 30)
+        self.assertEqual(binding["source_ids"], previous["member_version_ids"][-len(groups):])
+        self.assertLessEqual(len(binding["spans"]), CAPTURE_CONTEXT_MAX_PACKETS)
+        wire_cost = 2 + sum(len(dumps({k: v for k, v in source.items() if k != "spans"}).encode()) + 1
+                            + sum(len(dumps(span).encode()) + 1 for span in source["spans"]) for source in groups)
+        self.assertLessEqual(wire_cost, CAPTURE_CONTEXT_MAX_BYTES)
+        self.assertTrue(all(source["text"] == "" and not source["core"] for source in groups))
+        self.assertFalse(any("SELECT r.*" in query or "SELECT * FROM source_records" in query for query in queries))
+        self.assertTrue(any("CASE WHEN length(CAST(metadata AS BLOB))<=8192" in query for query in queries))
+
+    def test_context_metadata_or_indivisible_url_over_budget_is_explicit_and_never_partial(self):
+        for text, payload, reason in (("普通原文", {"sender": "x" * 8193}, "extraction_context_metadata_limit"),
+                                      ("https://example.test/?token=" + "s" * 65537, {}, "extraction_context_token_limit")):
+            previous = self.capture(text, source_id=reason + "-before", payload=payload)
+            current = self.capture("当前原文", source_id=reason + "-now")
+            binding = self.store.preceding_context(current["batch_id"])
+            self.assertEqual(binding["batch_id"], previous["batch_id"])
+            self.assertEqual(binding["unavailable_reason"], reason)
+            self.assertEqual((binding["source_ids"], binding["spans"]), ([], []))
+
+    def test_preceding_capture_lookup_uses_scoped_reverse_rowid_seek(self):
+        previous = self.capture("同域前序", batch_id="index-before")
+        with self.store.transaction() as db:
+            original = dict(db.execute("SELECT * FROM capture_batches WHERE batch_id=?", (previous["batch_id"],)).fetchone())
+            columns = list(original)
+            for index in range(1000):
+                row = dict(original, batch_id="unrelated-" + str(index), receipt_id="unrelated-receipt-" + str(index),
+                           source_namespace="unrelated-" + str(index), receipt_json=dumps({"wide": "synthetic" * 1000}))
+                db.execute("INSERT INTO capture_batches(" + ",".join(columns) + ") VALUES(" + ",".join("?" for _ in columns) + ")",
+                           [row[key] for key in columns])
+        current = self.capture("同域当前", batch_id="index-now", source_id="index-now")
+        original_connect, queries = self.store.connect, []
+        def bounded():
+            db = original_connect()
+            db.set_trace_callback(queries.append)
+            calls = 0
+            def progress():
+                nonlocal calls
+                calls += 1
+                return int(calls > 20)
+            db.set_progress_handler(progress, 100)
+            return db
+        with patch.object(self.store, "connect", side_effect=bounded):
+            self.assertEqual(self.store.preceding_context(current["batch_id"])["batch_id"], previous["batch_id"])
+        query = next(query for query in queries if query.startswith("SELECT p.batch_id"))
+        with closing(original_connect()) as db:
+            plan = " ".join(row[3] for row in db.execute("EXPLAIN QUERY PLAN " + query))
+        self.assertIn("USING INDEX capture_context_order (source_namespace=? AND chat_id=? AND rowid<?)", plan)
+        self.assertNotIn("USE TEMP B-TREE", plan)
 
     def observation(self, body="猫守着箱子", *, source_id="source", core=True, claims=None, **extras):
         capture = self.capture(body, source_id=source_id, core=core, **extras)

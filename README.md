@@ -347,7 +347,12 @@ notes, the old Review Queue and old digest layout apply only before migration.
   restored from config. Turning it off also cancels the in-flight resolver
   before its next attachment-byte operation. Link-only backfill never reads the
   attachment cache.
-- Cloud AI providers receive the text you ask them to summarize. Ollama can keep text generation local; the embedding and index routes follow their separately selected local or remote boundaries.
+- Cloud AI providers receive the text you ask them to summarize. Semantic
+  extraction can include bounded, already captured context from the same chat
+  and source namespace alongside new material; it goes to the selected Text
+  provider as context and does not advance source progress again. Ollama can
+  keep text generation local; the embedding and index routes follow their
+  separately selected local or remote boundaries.
 - Built-in remote link preview is retired from normal runtime and performs zero network requests. A legacy saved `monitor_fetch_links: true` value is accepted only for compatibility and is forced off; there is no menu or CLI path that re-enables it. Exact observed URLs remain in the private local ledger for deterministic identity. Human-readable projections, snapshots/exports, Review Queue, Daily Digest, AI prompts, and error text use one canonical display form that redacts credential-bearing query and fragment fields, including common AWS, GCS, and Azure signed-URL parameters. This repository does not claim to provide a hardened crawler.
 - MCP read tools expose local chat-derived data to the configured MCP client and may pass it to the configured AI provider for summaries. MCP is read-only: it does not advance bookmarks or mutate group metadata.
 - MCP message sending is retired, not merely disabled. The legacy `prepare_send_message`, `confirm_send_message`, and `send_message` tool names return the stable content-free code `mcp_send_retired` and never touch WeChat UI. Legacy send config keys remain loadable but are inert.

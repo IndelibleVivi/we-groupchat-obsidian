@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 from ai.semantic_provider import DecisionQuestion, DecisionRequest, ProviderError, parse_decision_answers, strict_json_loads
 from core.url_safety import redact_urls_in_text
 from .attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata
+from .store import CAPTURE_CONTEXT_VERSION
 
 
 RELATIONS = frozenset({
@@ -109,6 +110,12 @@ class SourceSpan:
 
 
 @dataclass(frozen=True)
+class _ContextSource(CapturedSource):
+    """A program-bound source view containing only the frozen exact tail spans."""
+    source_spans: tuple[SourceSpan, ...] = ()
+
+
+@dataclass(frozen=True)
 class ContentUnit:
     unit_id: str
     kind: str
@@ -136,6 +143,9 @@ def prepare_spans(sources: Sequence[CapturedSource], *, namespace="semantic", ma
         raise SemanticValidationError("semantic_invalid_span_limit")
     result = []
     for source in sources:
+        if isinstance(source, _ContextSource):
+            result.extend(source.source_spans)
+            continue
         display = redact_urls_in_text(source.text)
         for start in range(0, len(display), max_span_chars):
             end = min(len(display), start + max_span_chars)
@@ -369,7 +379,12 @@ class SemanticEngine:
                 "AND json_extract(versions_json,'$.prompt')=?", (batch_id, EXTRACTION_PROMPT_VERSION)))
             if any(row["state"] == "unknown" for row in frozen):
                 raise SemanticValidationError("semantic_job_busy_or_unknown")
-            if frozen and (len(frozen) != 1 or _json(json.loads(frozen[0]["inputs_json"])) != _json(parent_inputs)):
+            frozen_inputs = json.loads(frozen[0]["inputs_json"]) if len(frozen) == 1 else None
+            frozen_versions = json.loads(frozen[0]["versions_json"]) if len(frozen) == 1 else None
+            comparable = frozen_inputs
+            if frozen_inputs is not None and frozen_versions.get("capture_context") == CAPTURE_CONTEXT_VERSION:
+                comparable = {key: value for key, value in frozen_inputs.items() if key != "preceding_context"}
+            if frozen and (len(frozen) != 1 or _json(comparable) != _json(parent_inputs)):
                 for row in frozen:
                     if connection.execute("SELECT 1 FROM jobs WHERE kind IN ('extract_page','extract_coverage') "
                             "AND state='unknown' AND json_extract(inputs_json,'$.parent_job_id')=? LIMIT 1",
@@ -378,10 +393,15 @@ class SemanticEngine:
                 raise SemanticValidationError("semantic_extraction_version_conflict")
         finally:
             connection.close()
-        job = self.jobs.ensure("extract", json.loads(frozen[0]["inputs_json"]) if frozen else parent_inputs,
-                               json.loads(frozen[0]["versions_json"]) if frozen else
-                               {"prompt": EXTRACTION_PROMPT_VERSION, "generation": generation,
-                                "route": asdict(self.text_provider.route)})
+        parent_versions = {"prompt": EXTRACTION_PROMPT_VERSION, "generation": generation,
+                           "route": asdict(self.text_provider.route)}
+        if not frozen:
+            context = self.store.preceding_context(batch_id)
+            if context is not None:
+                parent_inputs["preceding_context"] = context
+                parent_versions["capture_context"] = CAPTURE_CONTEXT_VERSION
+        job = self.jobs.ensure("extract", frozen_inputs if frozen else parent_inputs,
+                               frozen_versions if frozen else parent_versions)
         if job["state"] == "unknown":
             raise SemanticValidationError("semantic_job_busy_or_unknown")
         connection = self.store.connect()
@@ -437,7 +457,12 @@ class SemanticEngine:
             observations, fragment_dispositions, child_ids, routes = {}, {}, [], []
             span_sources = {packet["span_id"]: packet["source_id"] for packet in packets if packet["span_id"]}
             pending_spans = set()
-            previous = []
+            context_sources = tuple(_ContextSource(**{key: value for key, value in source.items() if key != "spans"},
+                source_spans=tuple(SourceSpan(**span) for span in source["spans"]))
+                for source in self.store.extraction_context_sources(job))
+            available_sources = context_sources + input_sources
+            previous = [asdict(span) for span in prepare_spans(context_sources, namespace=namespace)]
+            previous.extend({"source_id": source.source_id, "span_id": None} for source in context_sources if not source.source_spans)
             for page_no, page in enumerate(self._pages(packets, max_bytes=22000, max_count=24)):
                 source_ids = {packet["source_id"] for packet in page}
                 page_sources = tuple(source for source in input_sources if source.source_id in source_ids)
@@ -447,7 +472,7 @@ class SemanticEngine:
                 context = [packet for packet in previous if packet["source_id"] not in source_ids]
                 context_ids = {packet["source_id"] for packet in context}
                 page_sources = tuple(source if source.source_id in source_ids else replace(source, core=False)
-                                     for source in input_sources if source.source_id in source_ids | context_ids)
+                                     for source in available_sources if source.source_id in source_ids | context_ids)
                 span_ids = tuple(packet["span_id"] for packet in [*context, *page] if packet["span_id"])
                 child_inputs = {"parent_job_id": job["job_id"], "page": page_no,
                     "span_ids": span_ids, "source_ids": sorted(source_ids | context_ids),
@@ -456,6 +481,9 @@ class SemanticEngine:
                                   "context": "previous-page-source-order-v1",
                                   "unit_policy": RETAINED_UNIT_POLICY,
                                   "evidence_contract": INDEXED_EVIDENCE_CONTRACT}
+                if context_ids.intersection(source.source_id for source in context_sources):
+                    child_inputs["source_order"] = [source.source_id for source in page_sources]
+                    child_versions["capture_context"] = CAPTURE_CONTEXT_VERSION
                 # A resumed page keeps its frozen context and outcome. Expanding
                 # overlap is only for pages that have never been dispatched.
                 if page_no in frozen_pages:
@@ -463,7 +491,13 @@ class SemanticEngine:
                     selected = set(child_inputs["source_ids"])
                     core_ids = set(child_inputs["core_source_ids"])
                     page_sources = tuple(replace(source, core=source.source_id in core_ids)
-                                         for source in input_sources if source.source_id in selected)
+                                         for source in available_sources if source.source_id in selected)
+                    if "source_order" in child_inputs:
+                        by_id = {source.source_id: source for source in page_sources}
+                        if (len(child_inputs["source_order"]) != len(by_id)
+                                or set(child_inputs["source_order"]) != set(by_id)):
+                            raise SemanticValidationError("semantic_extraction_version_conflict")
+                        page_sources = tuple(by_id[identity] for identity in child_inputs["source_order"])
                     if "context" not in child_versions:
                         # Older pages supplied their core members first, then
                         # the two-message context. Preserve that input order too.
@@ -545,6 +579,12 @@ class SemanticEngine:
             prompt = extraction_prompt(page_sources, namespace=namespace, span_ids=span_ids,
                                        unit_policy=child["versions"].get("unit_policy"),
                                        evidence_contract=child["versions"].get("evidence_contract"))
+            if child["versions"].get("capture_context") == CAPTURE_CONTEXT_VERSION:
+                instructions, payload = prompt.rsplit("\n", 1)
+                prompt = (instructions + "\nPreceding core=false messages are bounded available context from an earlier "
+                    "capture of this same chat and source namespace. Capture order is not event chronology "
+                    "or proof of conversation continuity. Use supplied occurred_at for source times; do not "
+                    "merge independent scenes because they are adjacent or share a speaker or name.\n" + payload)
             if coverage:
                 instructions, payload = prompt.rsplit("\n", 1)
                 prompt = (instructions + "\nBounded adjacent context is supplied as core=false messages with "

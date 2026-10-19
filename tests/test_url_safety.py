@@ -7,10 +7,32 @@ from core.url_safety import (
     redact_url_for_display,
     redact_urls_in_text,
     redact_urls_with_offsets,
+    redact_urls_tail,
 )
 
 
 class URLSafetyTests(unittest.TestCase):
+    def test_streamed_tail_keeps_monolithic_text_and_global_ranges_at_every_boundary(self):
+        raw = ("开头 " + "https://user:secret@example.test/a?token=private&view=1" + " 尾🙂 "
+               "https://example.test/plain?view=1 https://bad／url 结束") * 12
+        visible, ranges = redact_urls_with_offsets(raw)
+        for width in (1, 2, 7, 8, 9, 31, 127, 8192):
+            for keep in (1, 19, 2000, 48000):
+                with self.subTest(width=width, keep=keep):
+                    count, tail, actual = redact_urls_tail((raw[i:i + width] for i in range(0, len(raw), width)), max_chars=keep)
+                    self.assertEqual(count, len(visible))
+                    self.assertEqual(tail, visible[-keep:])
+                    self.assertEqual(actual, [entry for entry in ranges if entry[4] > len(visible) - len(tail)])
+
+    def test_streamed_large_plain_source_and_oversized_indivisible_url_fail_closed(self):
+        raw = "长🙂" * 100000 + " https://example.test/?token=private 结尾"
+        visible, ranges = redact_urls_with_offsets(raw)
+        count, tail, actual = redact_urls_tail((raw[i:i + 8192] for i in range(0, len(raw), 8192)), max_chars=48000)
+        self.assertEqual((count, tail), (len(visible), visible[-48000:]))
+        self.assertEqual(actual, [entry for entry in ranges if entry[4] > len(visible) - 48000])
+        with self.assertRaisesRegex(ValueError, "redaction_tail_token_too_large"):
+            redact_urls_tail(iter(["https://example.test/", "x" * 64, "secret"]), max_chars=10, max_token_chars=64)
+
     def test_offsets_keep_exact_surroundings_and_whole_url_replacements(self):
         raw = "长" * 55000 + " https://example.test/?token=private " + "尾" * 7000
         visible, ranges = redact_urls_with_offsets(raw)

@@ -17,7 +17,7 @@ from unittest.mock import patch
 from ai.semantic_provider import EmbeddingProfile
 from ai.vector_index import LocalCosineIndex, VectorRecord
 from core.semantic.contracts import digest, dumps
-from core.semantic.attribution import EXTRACTION_PROMPT_VERSION
+from core.semantic.attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata
 from core.semantic.engine import CapturedSource, prepare_spans, validate_accepted_artifact
 from core.semantic.jobs import JobStore
 from core.semantic.projections import (
@@ -25,7 +25,7 @@ from core.semantic.projections import (
     bind_reading_policy, CONTENT_READING_POLICY, SOURCE_READING_POLICY, EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY,
 )
 from core.semantic.retrieval import _INDEX_SCHEMA
-from core.semantic.store import SemanticStore
+from core.semantic.store import SemanticStore, CAPTURE_CONTEXT_VERSION
 from core.semantic.verification import RebuildVerifier
 from core.semantic.legacy import (import_legacy, record_legacy_backups, record_legacy_resolution,
                                   derive_topic_item_map, publish_legacy_navigation, SOURCE_FIRST_POLICY,
@@ -55,7 +55,7 @@ def adopt_fixture_batch(store, batch_id):
 class VerificationFixture:
     def __init__(self, root, *, purpose="live", stale_proposal=False, unknown_decision=False,
                  reuse_action_key=False, same_read_set=False, reading_policy=None,
-                 unit_kind="scene", unit_text=None, body_text=None):
+                 unit_kind="scene", unit_text=None, body_text=None, context_text=None):
         self.root = Path(root).resolve()
         self.store = SemanticStore(self.root / "generation.sqlite", "synthetic-generation", now_func=lambda: 10.0)
         if reading_policy is not None:
@@ -67,6 +67,22 @@ class VerificationFixture:
         self.index = LocalCosineIndex()
         self.start = {"shard": {"generation_id": "physical", "cursor_token": "[0,0]"}}
         self.end = {"shard": {"generation_id": "physical", "cursor_token": "[2,0]"}}
+        previous = None
+        if context_text is not None:
+            previous = self.store.capture_batch("earlier-capture", [
+                {"source_id": "earlier-source", "logical_shard_id": "shard", "physical_generation": "physical",
+                 "source_cursor_token": "[0,0]", "source_sent_at": 0, "text": context_text,
+                 "payload": {"raw_sender_id": "synthetic-speaker", "sender": "阿岚"}}],
+                source_namespace="source", chat_id="chat", inventory_digest="inventory", inventory_revision=1,
+                input_cursors=self.start, output_cursors=self.start, source_eof=True, purpose=purpose)
+            vid = previous["member_version_ids"][0]
+            source = CapturedSource(vid, context_text, True, 0,
+                **captured_source_metadata("source", "chat", {"raw_sender_id": "synthetic-speaker", "sender": "阿岚"}))
+            disposition = {vid: {"status": "context_only", "reason": "synthetic earlier capture classified without an Observation"}}
+            job = accept_fixture(self.store, {"observations": [], "dispositions": disposition}, "extract",
+                inputs={"batch_id": "earlier-capture", "members": [asdict(source)]})
+            self.store.commit_extraction(job, "earlier-capture", [], disposition)
+            self.store.complete_batch("earlier-capture")
         self.capture = self.store.capture_batch("batch", [
             {"source_id": "one", "logical_shard_id": "shard", "physical_generation": "physical",
              "source_cursor_token": "[1,0]", "source_sent_at": 1.0,
@@ -91,9 +107,24 @@ class VerificationFixture:
             "topics": ["生活"], "claims": []}
         # len in code points, not visual glyph count.
         self.observation["spans"][0]["end"] = len(self.observation["spans"][0]["excerpt"])
+        inputs = {"batch_id": "batch", "members": [asdict(s) for s in sources]}
+        versions = {"prompt": EXTRACTION_PROMPT_VERSION}
+        if previous is not None:
+            inputs["preceding_context"] = self.store.preceding_context("batch")
+            versions["capture_context"] = CAPTURE_CONTEXT_VERSION
+            span = inputs["preceding_context"]["spans"][-1]
+            self.context_span_id = span["span_id"]
+            self.observation["spans"].append(span)
+            self.observation["units"][0]["span_ids"].append(self.context_span_id)
+            speaker = captured_source_metadata("source", "chat", {"raw_sender_id": "synthetic-speaker"})["speaker_id"]
+            self.observation["claims"] = [{"claim_id": "earlier-claim", "subject_id": speaker, "case_id": None,
+                "condition": None, "channel": None, "version": None, "phase": None, "observed_at": 0,
+                "predicates": {"reported": "a synthetic first-person experience"}, "span_ids": [self.context_span_id],
+                "material_id": None, "valid_from": None, "valid_to": None, "status": "active", "retracts": [],
+                "polarity": "asserted", "modality": "reported", "normalizer_version": "v1"}]
         disposition = {second: {"status": "noise", "reason": "explicit_synthetic_fixture_decision"}}
         self.extract_job = accept_fixture(self.store, {"observations": [self.observation], "dispositions": disposition}, "extract",
-            inputs={"batch_id": "batch", "members": [asdict(s) for s in sources]})
+            inputs=inputs, versions=versions)
         self.store.commit_extraction(self.extract_job, "batch", [self.observation], disposition)
         self.action = {"action_key": "create", "type": "CREATE_ITEM", "item_id": "item",
                        "kind": "life", "title": "周末散步", "identity_scope": {"scene": "weekend"},
@@ -130,7 +161,8 @@ class VerificationFixture:
                                              current_revision=self.adapter.current_revision)
         self.snapshot = self.adapter.snapshot("item")
         self.plan = BodyPlan("item", self.snapshot.content_revision, (
-            BodyBlock("paragraph", "scene", body_text or unit_text or "周末在河边散步。", ("unit",), (self.span_id,),
+            BodyBlock("paragraph", "scene", body_text or unit_text or "周末在河边散步。", ("unit",),
+                      tuple(s["span_id"] for s in self.observation["spans"]),
                       resource_ids=("photo",), primary_home="item"),))
         self.publisher.publish_item(self.snapshot, self.plan)
         if stale_proposal and not same_read_set:
@@ -147,6 +179,8 @@ class VerificationFixture:
 
         if reading_policy is not None:
             self.manifest["reading_policy"] = reading_policy
+        if previous is not None:
+            self.manifest["expected_batches"].insert(0, {"batch_id": "earlier-capture", "member_version_ids": list(previous["member_version_ids"])})
 
     def _index(self):
         docs = [r for r in self.store.documents() if r["owner_type"] == "item"]
@@ -301,6 +335,59 @@ with tempfile.TemporaryDirectory() as directory:
         self.assertTrue(report.complete, report.to_dict())
         self.assertEqual(2, report.counts["captured_versions"])
         self.assertEqual(1, report.counts["items"])
+
+    def test_frozen_capture_context_verifies_independently_with_exact_claim_anchor(self):
+        fixture = VerificationFixture(Path(self.temp.name) / "context-valid", context_text="前次捕获的具体经历。")
+        with patch("core.semantic.store.preceding_capture", side_effect=AssertionError("trusted producer selection")), \
+             patch.object(SemanticStore, "preceding_context", side_effect=AssertionError("called producer context admission")):
+            report = fixture.verify()
+        self.assertTrue(report.complete, report.to_dict())
+        with closing(fixture.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT status FROM source_dispositions WHERE source_version_id=(SELECT source_version_id "
+                "FROM capture_batch_members WHERE batch_id='earlier-capture')").fetchone()[0], "context_only")
+            self.assertEqual(db.execute("SELECT count(*) FROM source_core_jobs WHERE job_id=?", (fixture.extract_job,)).fetchone()[0], 2)
+
+    def test_rehashed_capture_context_cannot_forge_binding_or_hide_external_evidence(self):
+        changes = {
+            "generation": lambda inputs, versions: inputs["preceding_context"].update(generation_id="foreign-generation"),
+            "capture": lambda inputs, versions: inputs["preceding_context"].update(batch_id="foreign-capture"),
+            "receipt": lambda inputs, versions: inputs["preceding_context"].update(receipt_id="foreign-receipt"),
+            "source": lambda inputs, versions: inputs["preceding_context"]["source_ids"].append("foreign-source"),
+            "span": lambda inputs, versions: inputs["preceding_context"]["spans"][0].update(excerpt="invented text"),
+            "version": lambda inputs, versions: versions.update(capture_context="unknown-contract"),
+            "false-continuity": lambda inputs, versions: inputs["preceding_context"].update(cursor_continuity="exact"),
+            "remove-contract": lambda inputs, versions: (inputs.pop("preceding_context"), versions.pop("capture_context")),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                fixture = VerificationFixture(Path(self.temp.name) / ("context-" + name), context_text="只可从原冻结语境引用的经历。")
+                with fixture.store.transaction() as db:
+                    row = db.execute("SELECT * FROM jobs WHERE job_id=?", (fixture.extract_job,)).fetchone()
+                    inputs, versions = json.loads(row["inputs_json"]), json.loads(row["versions_json"])
+                    change(inputs, versions)
+                    db.execute("UPDATE jobs SET inputs_json=?,versions_json=?,job_key=? WHERE job_id=?", (dumps(inputs), dumps(versions),
+                        digest({"generation_id": fixture.store.generation_id, "kind": "extract", "inputs": inputs, "versions": versions}),
+                        fixture.extract_job))
+                report = fixture.verify()
+                self.assertFalse(report.complete)
+                self.assertIn("observation_context_unbound", self.codes(report))
+                if name != "remove-contract":
+                    self.assertIn("extraction_context_invalid", self.codes(report))
+                self.assertNotIn("accepted_job_identity_mismatch", self.codes(report))
+
+    def test_context_raw_mapping_tampering_cannot_pass_generic_span_endpoints(self):
+        fixture = VerificationFixture(Path(self.temp.name) / "context-mapping",
+            context_text="先前参考 https://example.test/a?token=synthetic-secret 然后继续。")
+        self.assertTrue(fixture.verify().complete)
+        with fixture.store.transaction() as db:
+            row = db.execute("SELECT mapping_json FROM source_spans WHERE span_id=?", (fixture.context_span_id,)).fetchone()
+            mapping = json.loads(row[0])
+            self.assertGreater(len(mapping), 1)
+            mapping[1]["raw_start"] += 1
+            db.execute("UPDATE source_spans SET mapping_json=? WHERE span_id=?", (dumps(mapping), fixture.context_span_id))
+        report = fixture.verify()
+        self.assertIn("evidence_context_span_invalid", self.codes(report))
+        self.assertNotIn("evidence_span_invalid", self.codes(report))
 
     def test_rehashed_accepted_extraction_cannot_forge_attribution(self):
         with self.fixture.store.transaction() as db:

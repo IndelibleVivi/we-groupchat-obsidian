@@ -255,7 +255,9 @@ applied 进度不越过待定缺口，普通空轮询不重复调用模型。
   worker 反复消耗这个 process-lifetime consent；附件 bytes 解析是仅存在于内存、本次 app 会话有效的
   显式授权，重启后必定归零，也不会从 config 恢复；关闭后，in-flight resolver 会在下一次读取附件
   bytes 之前取消。Links-only backfill 不读取附件 cache。
-- 聊天内容会发送给你自己配置的 AI provider。Ollama 可让旧文本总结留在本机；语义 embedding 与 Vectorize 的数据流单独配置，不能由文本模型的位置推断。
+- 聊天内容会发送给你自己配置的 AI provider。语义抽取可能把同一会话、同一来源命名空间内的
+  有界已捕获前文作为语境，与新材料一起交给所选 Text provider；前文不会因此再次推进来源进度。
+  Ollama 可让旧文本总结留在本机；语义 embedding 与 Vectorize 的数据流单独配置，不能由文本模型的位置推断。
 - API Key 使用系统受保护凭据服务（当前 Mac app 使用 Keychain）；config 不作为 API key 的 fallback。
 - 本地配置、书签、monitor state、数据库 key、日志、SQLite DB 和 Markdown 导出默认在 `~/.we-groupchat-obsidian/` 或你的 Obsidian vault 中，不应该提交到 git。旧 `~/.wechat-summary/` 只作为本机 migration/compatibility 路径保留。
 - Attachment catalog、本地 archive、source-guard state/receipts 和 backup snapshot manifest/catalog 都是私有 runtime data。
