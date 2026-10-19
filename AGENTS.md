@@ -232,9 +232,9 @@
   evidence; local roles do not fabricate Cloudflare accounts or usage.
 - `projections.py`, `controls.py`, `briefing.py`, `delivery.py` and
   `reader_runtime.py` under `core/semantic/` own the Obsidian reading surface.
-  Current Body artifacts are `body-plan-v10` / `body-paged-v10`; accepted
-  `body-plan-v2` through `body-paged-v9` evidence remains historical and must
-  not be rewritten. The verifier accepts v2-v10 and must remain in lockstep with
+  Current Body artifacts are `body-plan-v11` / `body-paged-v11`; accepted
+  `body-plan-v2` through `body-paged-v10` evidence remains historical and must
+  not be rewritten. The verifier accepts v2-v11 and must remain in lockstep with
   the writer. BodyPlan has a unique home for each retained detail; accepted pages are
   durable before publishing. New units may rewrite their receiving block's
   automatic prose while retaining stable homes, evidence, resources and exact
@@ -246,6 +246,12 @@
   paraphrase can share one content home. Explicit `verbatim`, procedural and
   correction obligations remain enforced. Do not restore transcript copying as
   a substitute for evidence preservation.
+  Fresh composition inputs distinguish derived unit responsibility from source
+  quotation and explicit verbatim. Synthetic technical/life examples demonstrate
+  one content home without duplicate prose; they are never current evidence.
+  Prior-plan and literal-fragment prompts omit these examples so instructional
+  text does not displace their bounded material. Validators and literal obligations
+  remain unchanged; examples alone are not evidence of prose quality.
   Writer evidence chronology uses offset-aware source timestamps only; unit
   order, commit order and semantic revision time never establish event order.
   Undated evidence stays undated, and chronology does not change unit indices,

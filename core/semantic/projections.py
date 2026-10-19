@@ -763,6 +763,46 @@ class BodyPlanWriter:
                     "手改冲突由程序处理。retracted/contested 用 correction/historical/counterevidence role "
                     "明确 changed status，保留原话，不继续当当前结论。\n"
                     + MARKDOWN_CONTRACT,
+            "input_semantics": {
+                "unit.text": "非 quote 单元是派生的内容责任，不是聊天原话或必抄句式。保留实质细节与归属，"
+                             "可把重叠责任合写为围绕事情的段落。",
+                "snapshot.evidence": "证据片段与 provenance label 是引用依据；引号内的原话须来自所引片段，"
+                                     "不能把派生概括或程序说明当原话。",
+                "unit.verbatim": "逐字保全在其 home 中一次；它已经讲清的内容不再先概括、后复制。"
+                                 "逐字保全的派生说明仍是说明，不因此变成来源引文。",
+                "writing_examples": "以下是纯合成的编辑示范，不是本条材料、旧稿或事实来源；"
+                                    "示范的人名与内容不能写进当前正文。",
+            },
+            "writing_examples": [
+                {"kind": "technical", "illustrative_only": True,
+                 "source_excerpts": ["X 格式导出到一半停了。", "把格式改成 Y，再导出一次。",
+                                     "Y 成功了，不过我只试了小文件。"],
+                 "units": [
+                     {"role": "fact", "text": "澄雨报告 X 格式导出中途停止。",
+                      "evidence_indices": [0], "verbatim": []},
+                     {"role": "step", "text": "洛杉给出的处理：把导出格式切为 Y，再运行一次导出。",
+                      "evidence_indices": [1],
+                      "verbatim": ["洛杉给出的处理：把导出格式切为 Y，再运行一次导出。"]},
+                     {"role": "fact", "text": "澄雨报告 Y 导出成功，仅验证过小文件。",
+                      "evidence_indices": [2], "verbatim": []}],
+                 "response": {"blocks": [{"id": "export", "role": "narrative",
+                     "text": "这次 X 格式导出在中途停止。洛杉给出的处理：把导出格式切为 Y，再运行一次导出。"
+                             "改用 Y 后，澄雨报告导出完成；目前只验证了小文件。",
+                     "unit_indices": [0, 1, 2]}]}},
+                {"kind": "life", "illustrative_only": True,
+                 "source_excerpts": ["雨声一大，我家猫就钻纸箱。", "那箱子是搬家剩的。",
+                                     "我家那只听到大雨就躲洗衣篮。"],
+                 "units": [
+                     {"role": "scene", "text": "澄雨家的猫在雨声很大时钻进纸箱。",
+                      "evidence_indices": [0], "verbatim": []},
+                     {"role": "fact", "text": "澄雨的纸箱是搬家留下的。",
+                      "evidence_indices": [1], "verbatim": []},
+                     {"role": "scene", "text": "洛杉家的猫在大雨声中躲进洗衣篮。",
+                      "evidence_indices": [2], "verbatim": []}],
+                 "response": {"blocks": [{"id": "rain", "role": "narrative",
+                     "text": "雨声一大，澄雨家的猫就钻进搬家留下的纸箱；洛杉家的猫则躲进洗衣篮。",
+                     "unit_indices": [0, 1, 2]}]}},
+            ],
             "schema": {"blocks": [{"id": "stable-block-id", "role": "narrative",
                                    "text": "complete Markdown block", "unit_indices": [0]}] if snapshot.units else []},
             "writing_units": [{"index": index, "unit_id": unit.id} for index, unit in enumerate(snapshot.units)],
@@ -774,6 +814,12 @@ class BodyPlanWriter:
             "unchanged_blocks": list(unchanged),
             **context,
         }
+        if previous is not None or context.get("phase") == "body_fragment_v1":
+            # Prior-plan work already has concrete prose to edit, and literal
+            # fragments have an exact continuation. Reserve their bounded
+            # context for that material rather than generic demonstrations.
+            prompt.pop("input_semantics")
+            prompt.pop("writing_examples")
         return redact_urls_in_text(json_text(prompt))
 
     @staticmethod
@@ -827,7 +873,7 @@ class BodyPlanWriter:
         if ledger is not None:
             try:
                 artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
-                    prompt_version="body-plan-v10", validate=validate,
+                    prompt_version="body-plan-v11", validate=validate,
                     validation_failure_codes=_BODY_VALIDATION_FAILURES)
             except ReadingError as exc:
                 if exc.code not in _BODY_VALIDATION_FAILURES | {"text_request_already_failed"}:
@@ -851,7 +897,7 @@ class BodyPlanWriter:
         child, so an interrupted/failed repair cannot create another attempt.
         """
         route = provider_binding(self.provider)
-        job_key = fingerprint(json_text([ledger.generation_id, "body-plan-v10", route, prompt_text]))
+        job_key = fingerprint(json_text([ledger.generation_id, "body-plan-v11", route, prompt_text]))
         failed = ledger.one("SELECT * FROM reader_text_artifacts WHERE generation_id=? AND job_key=?",
                             (ledger.generation_id, job_key))
         if not failed or failed["status"] != "failed":
@@ -865,7 +911,7 @@ class BodyPlanWriter:
             return None
         expected = {"schema": "received-validation-failure-v1", "code": diagnostic["code"],
             "generation_id": ledger.generation_id, "job_key": job_key, "request_id": failed["request_id"],
-            "provider_route": route, "prompt_version": "body-plan-v10"}
+            "provider_route": route, "prompt_version": "body-plan-v11"}
         if diagnostic != expected:
             return None
         prompt = json.loads(prompt_text)
@@ -884,7 +930,7 @@ class BodyPlanWriter:
             raise ReadingError("body_context_budget_exceeded")
         child = failed["request_id"] + ":repair:" + fingerprint(json_text([job_key, failed["request_id"]]))
         return accepted_text_artifact(ledger, self.provider, prompt=repair_prompt, request_id=child,
-            prompt_version="body-plan-v10", validate=validate,
+            prompt_version="body-plan-v11", validate=validate,
             validation_failure_codes=_BODY_VALIDATION_FAILURES)
 
     @staticmethod
@@ -898,7 +944,7 @@ class BodyPlanWriter:
         binding = fingerprint(json_text(asdict(snapshot)))
         route = provider_binding(self.provider)
         aggregate_key = fingerprint(json_text([binding, asdict(previous) if previous else None,
-                                               route, self.max_input_bytes, "body-paged-v10"]))
+                                               route, self.max_input_bytes, "body-paged-v11"]))
         if ledger:
             reused = ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request_id,))
             if reused and (reused["generation_id"] != self.generation_id or reused["job_key"] != aggregate_key):
@@ -972,7 +1018,7 @@ class BodyPlanWriter:
         if ledger:
             with ledger.transaction() as conn:
                 conn.execute("INSERT OR IGNORE INTO reader_text_artifacts VALUES(?,?,?,?,?,'accepted',?)",
-                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v10", result.to_json()))
+                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v11", result.to_json()))
         return result
 
     @staticmethod

@@ -173,7 +173,7 @@ after dispatch remains unresolved and blocks subsequent calls, including across
 Body versions and page/fragment repartitioning. Calling the pure `plan` helper
 without a ledger is intended for isolated rendering tests, not runtime
 publication and does not perform this durable repair.
-Current Body artifacts are `body-plan-v10` and `body-paged-v10`. They ask for one
+Current Body artifacts are `body-plan-v11` and `body-paged-v11`. They ask for one
 coherent reader-first note with grounded attribution, preserve each retained
 unit's unique home, and carry the program-owned metadata and exact explicit
 verbatim, step and counterevidence obligations from the canonical snapshot.
@@ -181,6 +181,14 @@ The prompt enumerates every required unit index: overlapping units may share
 one prose block, but each still needs exactly one content home. Missing or
 duplicated indices fail validation; the program never assigns a missing home
 by guessing from similar text.
+Fresh composition inputs explicitly distinguish derived unit responsibility,
+source excerpts with provenance labels, and literal `verbatim` obligations.
+Synthetic technical and life examples show several units sharing one prose
+home and a required step appearing once. The examples are not current evidence
+and cannot supply names or facts for the real note. They are omitted when a
+prior plan or literal fragment controls the work, preserving bounded context
+for the actual material. This guidance does not change validation, authorize
+rewriting accepted artifacts, or establish editorial quality.
 Exact message times normally stay on source pages. If the body needs a time of
 day to explain a change, writer guidance requires the supplied UTC offset;
 it must not present a revision time as the event time or silently assume the

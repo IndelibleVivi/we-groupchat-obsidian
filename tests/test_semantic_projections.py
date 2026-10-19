@@ -134,6 +134,33 @@ class ReadingHarness(unittest.TestCase):
 
 
 class ProjectionTests(ReadingHarness):
+    def test_editorial_examples_preserve_required_words_in_one_content_home(self):
+        prompt = json.loads(BodyPlanWriter._prompt(self.snapshot(), None, ()))
+        self.assertEqual({e["kind"] for e in prompt["writing_examples"]}, {"technical", "life"})
+        for example in prompt["writing_examples"]:
+            with self.subTest(kind=example["kind"]):
+                self.assertTrue(example["illustrative_only"])
+                evidence = tuple(EvidenceExcerpt(
+                    f"example-e{i}", text, "", "", "")
+                    for i, text in enumerate(example["source_excerpts"]))
+                units = tuple(ReadingUnit(
+                    f"example-u{i}", unit["text"],
+                    tuple(f"example-e{j}" for j in unit["evidence_indices"]),
+                    role=unit["role"], verbatim=tuple(unit["verbatim"]))
+                    for i, unit in enumerate(example["units"]))
+                snapshot = replace(self.snapshot(), units=units, evidence=evidence)
+                plan = BodyPlanWriter._response(snapshot, json.dumps(example["response"], ensure_ascii=False))
+                validate_body_plan(snapshot, plan)
+                self.assertEqual(len(plan.blocks), 1)
+                self.assertEqual(plan.blocks[0].unit_ids, tuple(unit.id for unit in units))
+                for unit in units:
+                    for fragment in unit.verbatim:
+                        self.assertEqual(plan.blocks[0].text.count(fragment), 1)
+                        broken = replace(plan, blocks=(replace(
+                            plan.blocks[0], text=plan.blocks[0].text.replace(fragment, "")),))
+                        with self.assertRaisesRegex(ReadingError, "body_plan_lost_evidence"):
+                            validate_body_plan(snapshot, broken)
+
     def test_body_verbatim_repair_names_the_actual_obligation(self):
         snapshot = self.snapshot()
         def repair(prompt):
@@ -196,7 +223,7 @@ class ProjectionTests(ReadingHarness):
         self.assertIsNone(self.publisher.resolve(snapshot.item_id))
         root = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='large-body'")
         self.assertEqual(root["status"], "accepted")
-        self.assertEqual(root["prompt_version"], "body-paged-v10")
+        self.assertEqual(root["prompt_version"], "body-paged-v11")
         count = len(provider.calls)
         resumed = writer.plan(snapshot, request_id="large-body")
         self.assertEqual(resumed, plan)
@@ -1040,7 +1067,7 @@ class ProjectionTests(ReadingHarness):
                     with self.assertRaisesRegex(ReadingError, "body_plan_unit_coverage"):
                         accepted_text_artifact(self.ledger, provider,
                             prompt=BodyPlanWriter._prompt(snapshot, None, {}), request_id=root,
-                            prompt_version="body-plan-v10", validate=lambda raw: validate_body_plan(
+                            prompt_version="body-plan-v11", validate=lambda raw: validate_body_plan(
                                 snapshot, BodyPlanWriter._response(snapshot, raw)).to_json())
                     expected = "text_request_already_failed"
                 else:
