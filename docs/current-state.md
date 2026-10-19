@@ -127,14 +127,22 @@ guidance; the program does not trim or rewrite the model's title.
 Frozen proposal and choice jobs retain their original routes across active
 configuration changes. Accepted work replays without calls, unknown work
 blocks, and unfinished work with a mismatched route stops before dispatch.
-The existing jobs table gains a derived kind/batch index so cross-route
-recovery reads one batch without scanning every stored JSON input. Index
-creation leaves canonical rows, attempts and artifacts unchanged.
+The existing jobs table gains derived kind/batch and kind/parent indexes so
+cross-route and child recovery read only the relevant work without scanning
+every stored JSON input. Index creation leaves canonical rows, attempts and
+artifacts unchanged.
 This is candidate recovery support, not evidence of real note quality or a
 completed migration. See [semantic-engine.md](semantic-engine.md) for limits.
 New extraction pages include the preceding bounded page as ordered non-core
 context instead of only its last two messages. Existing page jobs keep their
 frozen inputs and outcomes; this change does not silently re-extract old work.
+Fresh primary and coverage pages also freeze
+`evidence_contract="indexed-evidence-v1"`. Their model interface uses explicit
+source/evidence indices; program-owned binding restores exact source/span IDs
+before the original canonical validators. Units and claims must select a subset
+of their Observation's explicit evidence. Missing-field and existing frozen
+pages retain their original interface and artifacts. This changes no canonical
+schema or source/ACK authority and does not establish real extraction quality.
 
 `status` reports content-free job states and error codes, the current blocker,
 and the latest append-only restore observation. Separate `reader_job_states`

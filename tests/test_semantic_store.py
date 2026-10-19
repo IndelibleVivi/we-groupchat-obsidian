@@ -96,6 +96,43 @@ class SemanticStoreTests(unittest.TestCase):
                 db.set_progress_handler(None, 0)
             self.assertEqual([tuple(row) for row in rows], [(unknown["job_id"], "unknown")])
 
+    def test_existing_child_ledger_gets_bounded_parent_lookup_without_changing_evidence(self):
+        versions = {"prompt": "synthetic-frozen-page"}
+        target = self.jobs.ensure("extract_page", {"parent_job_id": "wanted-parent", "page": 0}, versions)
+        self.jobs.claim(target["job_id"], "original-worker")
+        self.jobs.fail(target["job_id"], "original-worker", "synthetic_unknown", unknown=True)
+        with self.store.transaction() as db:
+            db.execute("DROP INDEX IF EXISTS semantic_jobs_parent")
+            fillers = []
+            for index in range(1000):
+                inputs = {"parent_job_id": "unrelated-" + str(index), "detail": "合成背景" * 500}
+                key = self.jobs._key("extract_page", inputs, versions)
+                fillers.append(("job_" + key, key, "extract_page", dumps(inputs), dumps(versions), self.now, self.now))
+            db.executemany("INSERT INTO jobs(job_id,job_key,kind,inputs_json,versions_json,state,created_at,updated_at) "
+                           "VALUES(?,?,?,?,?,'pending',?,?)", fillers)
+            tables = ("generation_manifest", "jobs", "job_attempts", "accepted_job_artifacts")
+            before = {table: [tuple(row) for row in db.execute("SELECT * FROM " + table + " ORDER BY rowid")]
+                      for table in tables}
+        reopened = SemanticStore(self.store.path, self.store.generation_id, now_func=lambda: self.now)
+        with closing(reopened.connect()) as db:
+            after = {table: [tuple(row) for row in db.execute("SELECT * FROM " + table + " ORDER BY rowid")]
+                     for table in tables}
+            self.assertEqual(after, before)
+            steps = 0
+            def bounded():
+                nonlocal steps
+                steps += 1
+                return int(steps > 20)
+            db.set_progress_handler(bounded, 100)
+            try:
+                rows = db.execute("SELECT j.job_id,j.state,a.job_id AS accepted FROM jobs j "
+                    "LEFT JOIN accepted_job_artifacts a USING(job_id) "
+                    "WHERE j.kind IN ('extract_page','extract_coverage') "
+                    "AND json_extract(j.inputs_json,'$.parent_job_id')=?", ("wanted-parent",)).fetchall()
+            finally:
+                db.set_progress_handler(None, 0)
+            self.assertEqual([tuple(row) for row in rows], [(target["job_id"], "unknown", None)])
+
     def accept(self, artifact, kind="test", inputs=None, versions=None):
         self.number += 1
         versions = versions or ({"prompt": EXTRACTION_PROMPT_VERSION, "test": self.number} if kind == "extract" else {"v": 1, "test": self.number})

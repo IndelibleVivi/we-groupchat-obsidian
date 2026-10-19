@@ -180,7 +180,16 @@
   context; resumed page jobs retain their exact frozen context and outcome.
   Fresh extraction pages and coverage jobs bind
   `unit_policy="retained-knowledge-v5"`; None/v1/v2/v3/v4 retain their frozen
-  prompts, inputs and accepted artifacts. Fresh coverage binds
+  prompts, inputs and accepted artifacts. New page jobs also freeze
+  `evidence_contract="indexed-evidence-v1"`: the model explicitly selects
+  supplied source/evidence indices, and the program binds them to exact
+  canonical source/span IDs before the original validators. Unit/claim evidence
+  must be a subset of that Observation's explicit selection; never guess,
+  trim, union or fill references. Quote units omit text; the program copies
+  exact source wording. Missing-field and previously frozen page versions keep
+  their original UUID-based interface, inputs and outcomes. The canonical
+  artifact/schema and source/cursor/resource authorities remain unchanged.
+  Fresh coverage binds
   `planning="pending-fragments-v1"` and exact `pending_span_ids`: terminal or
   already-cited primary fragments cannot reenter core. Every fresh coverage
   content unit must cite a pending core span; joint core/context units and

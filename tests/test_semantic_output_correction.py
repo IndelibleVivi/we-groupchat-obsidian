@@ -9,7 +9,7 @@ from unittest.mock import patch
 from ai.semantic_provider import ProviderError, TextResult
 from core.semantic.engine import SemanticEngine, SemanticValidationError
 from core.semantic.store import SemanticStore
-from tests.test_semantic_engine import FakeDecision, FakeText, capture
+from tests.test_semantic_engine import FakeDecision, FakeText, capture, freeze_legacy_primary, model_observation
 
 
 class OutputCorrectionTests(unittest.TestCase):
@@ -71,11 +71,8 @@ class OutputCorrectionTests(unittest.TestCase):
                 response = super().generate(prompt, **kwargs)
                 raw = json.loads(response.text)
                 context = json.loads(prompt.rsplit('\n', 1)[-1])[1]
-                raw['observations'].append({
-                    'title': 'Context alone', 'scene_kind': 'life',
-                    'spans': [{'source_id': context['source_id'], 'span_id': context['spans'][0]['span_id']}],
-                    'units': [{'kind': 'scene', 'text': 'Previous context', 'span_indices': [0]}],
-                    'topics': [], 'claims': []})
+                raw['observations'].append(model_observation([context], title='Context alone',
+                    units=[{'kind': 'scene', 'text': 'Previous context', 'span_indices': [0]}]))
                 return TextResult(json.dumps(raw), self.route)
 
         text = ContextOnly()
@@ -138,7 +135,11 @@ class OutputCorrectionTests(unittest.TestCase):
                 return TextResult(json.dumps({"observations": values}, ensure_ascii=False), self.route)
 
         text = WrappedQuote()
-        result = SemanticEngine(self.store, text, FakeDecision()).extract_batch('quoted')
+        engine = SemanticEngine(self.store, text, FakeDecision())
+        # This retained contract tests explicit older quote text, including its
+        # strict rejection. Fresh indexed quotes omit text entirely.
+        freeze_legacy_primary(engine, 'quoted')
+        result = engine.extract_batch('quoted')
         self.assertEqual(len(result['observations']), 1)
         self.assertEqual(result['observations'][0]['units'][0]['text'], passage)
         self.assertEqual(len(text.calls), 2)

@@ -9,7 +9,7 @@ from unittest.mock import patch
 from core.semantic.engine import SemanticEngine
 from core.semantic.store import SemanticStore
 from ai.semantic_provider import TextResult
-from tests.test_semantic_engine import FakeDecision, FakeText, capture
+from tests.test_semantic_engine import FakeDecision, FakeText, capture, model_dispositions
 
 
 class ExtractionOwnerLookupTests(unittest.TestCase):
@@ -17,10 +17,9 @@ class ExtractionOwnerLookupTests(unittest.TestCase):
         class ContextText(FakeText):
             def generate(self, prompt, **kwargs):
                 sources = json.loads(prompt.rsplit('\n', 1)[-1])
-                return TextResult(json.dumps({'observations': [], 'dispositions': {
-                    source['source_id']: {'status': 'context_only',
-                        'reason': 'Unclear reference retained without an independent assertion'}
-                    for source in sources if source['core']}}), self.route)
+                return TextResult(json.dumps({'observations': [], 'dispositions': model_dispositions([
+                    (source, {'status': 'context_only', 'reason': 'Unclear reference retained without an independent assertion'})
+                    for source in sources if source['core']])}), self.route)
         with tempfile.TemporaryDirectory() as folder:
             store = SemanticStore(Path(folder).resolve() / 'knowledge.sqlite', 'generation')
             receipt = capture(store, 'fragment', ['An unresolved conversational reference'])

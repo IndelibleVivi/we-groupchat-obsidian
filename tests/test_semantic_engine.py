@@ -12,7 +12,8 @@ from core.semantic.engine import SemanticEngine
 from core.semantic.store import SemanticStore
 from core.url_safety import redact_urls_in_text
 
-from core.semantic.engine import CapturedSource, SemanticValidationError, extraction_prompt, prepare_spans, validate_extraction
+from core.semantic.engine import (CapturedSource, SemanticValidationError, bind_indexed_extraction,
+                                  extraction_prompt, prepare_spans, validate_dispositions, validate_extraction)
 from core.semantic.attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata, source_attribution
 
 
@@ -72,6 +73,48 @@ def indexed_observation(refs, first_text, last_text, last_time):
             "predicates": {"reported": True}, "span_indices": [len(refs) - 1]}]}
 
 
+def model_observation(sources, *, title, scene_kind="life", units, claims=(), topics=()):
+    """Synthetic model output for the wire actually supplied by this prompt.
+
+    Fixtures describe unit/claim selections relative to their explicit sources;
+    indexed prompts emit those same choices as flat page evidence indices.
+    """
+    indexed = "source_index" in sources[0]
+    spans = [span for source in sources for span in source["spans"]]
+    value = {"title": title, "scene_kind": scene_kind, "units": units, "topics": list(topics), "claims": list(claims)}
+    if not indexed:
+        return {**value, "spans": [{"source_id": source["source_id"], "span_id": span["span_id"]}
+                                  for source in sources for span in source["spans"]]}
+    value["evidence_indices"] = [span["evidence_index"] for span in spans]
+    for collection in ("units", "claims"):
+        value[collection] = [{**{key: item for key, item in entry.items() if key != "span_indices"},
+            "evidence_indices": [spans[index]["evidence_index"] if type(index) is int and 0 <= index < len(spans) else index
+                                 for index in entry["span_indices"]]} for entry in value[collection]]
+    return value
+
+
+def model_dispositions(entries):
+    if entries and "source_index" in entries[0][0]:
+        return [{"source_index": source["source_index"], **value} for source, value in entries]
+    return {source["source_id"]: value for source, value in entries}
+
+
+def freeze_legacy_primary(engine, batch_id, policy="retained-knowledge-v5"):
+    """Freeze one synthetic historical page before the new-wire selector runs."""
+    batch = engine.store.get_batch(batch_id)
+    sources = tuple(CapturedSource(member["source_version_id"], member["text"], member["core"], member["source_sent_at"],
+        **captured_source_metadata(batch["source_namespace"], batch["chat_id"], member["payload"])) for member in batch["members"])
+    parent = engine.jobs.ensure("extract", {"batch_id": batch_id, "members": [asdict(source) for source in sources]},
+        {"prompt": EXTRACTION_PROMPT_VERSION, "generation": engine.store.generation_id, "route": asdict(engine.text_provider.route)})
+    versions = {"prompt": "semantic-extraction-pages-v2-attribution", "context": "previous-page-source-order-v1"}
+    if policy is not None:
+        versions["unit_policy"] = policy
+    return engine.jobs.ensure("extract_page", {"parent_job_id": parent["job_id"], "page": 0,
+        "span_ids": [span.span_id for span in prepare_spans(sources, namespace=engine.store.generation_id)],
+        "source_ids": sorted(source.source_id for source in sources),
+        "core_source_ids": [source.source_id for source in sources if source.core]}, versions)
+
+
 class ExtractionTests(unittest.TestCase):
     def test_frozen_unit_policies_keep_their_original_prompt_bytes(self):
         sources = [CapturedSource("core", "终端错误值 A 应改成 B。", True, 1),
@@ -84,6 +127,7 @@ class ExtractionTests(unittest.TestCase):
             "retained-knowledge-v2": "45a0b69f2b031bdcb1596f619042e9e56802f820c8f4c324c787d4cf12f58c7b",
             "retained-knowledge-v3": "92213b21e56b74c96b8c164c6cf6972ff9ab05ba428c6fcc362dccd495079d92",
             "retained-knowledge-v4": "5d81a555112ba469ad7f627e0c54ff4832dddd34f92cf35bbc241031e4ed9470",
+            "retained-knowledge-v5": "84b8896030f783e53b300c19e47f8e196cf6cf9273a22960d0d7cfde1bfbf0cc",
         }
         for policy, identity in expected.items():
             with self.subTest(policy=policy):
@@ -296,13 +340,18 @@ class FakeText:
                                "condition": "overseas", "channel": "app", "version": "v1", "phase": "test",
                                "observed_at": source["occurred_at"], "predicates": {"success": "failure" not in text},
                                "span_indices": [0]}]
-                values.append({"title": text[:60], "scene_kind": "life" if "花" in text else "technical",
-                               "spans": [{"source_id": source["source_id"], "span_id": "bad" if self.malformed else span["span_id"]} for span in source["spans"]],
-                               "units": [{"kind": "scene", "text": text, "span_indices": list(range(len(source["spans"])))}], "topics": [], "claims": claims})
+                value = model_observation([source], title=text[:60], scene_kind="life" if "花" in text else "technical",
+                    units=[{"kind": "scene", "text": text, "span_indices": list(range(len(source["spans"])))}], claims=claims)
+                if self.malformed:
+                    if "evidence_indices" in value:
+                        value["evidence_indices"] = [-1]
+                    else:
+                        value["spans"][0]["span_id"] = "bad"
+                values.append(value)
             result = {"observations": values}
             if self.noise:
-                result["dispositions"] = {source["source_id"]: {"status": "noise", "reason": "synthetic_empty_acknowledgment"}
-                                          for source in data if source["core"]}
+                result["dispositions"] = model_dispositions([(source, {"status": "noise", "reason": "synthetic_empty_acknowledgment"})
+                                                            for source in data if source["core"]])
         elif prompt.startswith("Summarize ONLY"):
             result = {"summary": "Bounded synthetic identity context.", "uncertain": False}
         elif prompt.startswith("Induce useful navigation"):
@@ -408,6 +457,7 @@ class ExtractionSpanFeedbackTests(unittest.TestCase):
                 capture(self.store, batch, ["合成技术说明 " + str(index) for index in range(21)])
                 provider = self.provider(collection)
                 engine = SemanticEngine(self.store, provider, FakeDecision())
+                freeze_legacy_primary(engine, batch)
                 with patch("core.semantic.engine.validate_extraction", wraps=validate_extraction) as validator:
                     result = engine.extract_batch(batch)
                 self.assertEqual(validator.call_count, 2)
@@ -440,6 +490,7 @@ class ExtractionSpanFeedbackTests(unittest.TestCase):
     def test_invalid_span_references_exhaust_without_trimming_or_acceptance(self):
         capture(self.store, "invalid-forever", ["合成技术说明 " + str(index) for index in range(21)])
         provider = self.provider("units", never_repair=True)
+        freeze_legacy_primary(SemanticEngine(self.store, provider, FakeDecision()), "invalid-forever")
         with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_span_reference"):
             SemanticEngine(self.store, provider, FakeDecision()).extract_batch("invalid-forever")
         self.assertEqual(len(provider.calls), 3)
@@ -456,6 +507,7 @@ class ExtractionSpanFeedbackTests(unittest.TestCase):
         capture(self.store, "unknown-feedback", ["合成技术说明 " + str(index) for index in range(21)])
         provider = self.provider("claims", correction_error=ProviderError("synthetic_correction_unknown", outcome_unknown=True))
         engine = SemanticEngine(self.store, provider, FakeDecision())
+        freeze_legacy_primary(engine, "unknown-feedback")
         with self.assertRaisesRegex(ProviderError, "synthetic_correction_unknown"):
             engine.extract_batch("unknown-feedback")
         self.assertEqual(len(provider.calls), 2)
@@ -468,6 +520,369 @@ class ExtractionSpanFeedbackTests(unittest.TestCase):
             jobs = list(db.execute("SELECT state,attempt FROM jobs WHERE kind='extract_page'"))
             self.assertEqual([tuple(row) for row in jobs], [("unknown", 2)])
             self.assertEqual(db.execute("SELECT count(*) FROM extraction_receipts").fetchone()[0], 0)
+
+
+class IndexedEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = SemanticStore(Path(temporary.name).resolve() / "knowledge.sqlite", "synthetic-generation")
+
+    def wire_fixture(self):
+        sources = [CapturedSource("first", "甲" * 4100, occurred_at=10),
+                   CapturedSource("second", "乙原话", occurred_at=11), CapturedSource("empty", "", occurred_at=12)]
+        value = {"title": "合成经历", "scene_kind": "life", "evidence_indices": [3, 0],
+            "units": [{"kind": "fact", "text": "甲的经历", "evidence_indices": [0]}], "topics": [],
+            "claims": [{"subject_id": None, "case_id": None, "condition": None, "channel": None,
+                "version": None, "phase": None, "observed_at": 11, "predicates": {"reported": True}, "evidence_indices": [3]}]}
+        return sources, {"observations": [value]}
+
+    def test_new_wire_is_not_accepted_by_the_historical_validator(self):
+        sources, raw = self.wire_fixture()
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_shape"):
+            validate_extraction(raw, sources)
+
+    def test_flat_selection_binds_only_the_actually_selected_page_spans(self):
+        sources, raw = self.wire_fixture()
+        all_spans = prepare_spans(sources)
+        selected = [all_spans[2].span_id, all_spans[0].span_id, all_spans[3].span_id]
+        prompt = extraction_prompt(sources, span_ids=selected, unit_policy="retained-knowledge-v5",
+                                   evidence_contract="indexed-evidence-v1")
+        data = json.loads(prompt.rsplit("\n", 1)[1])
+        self.assertEqual([[s["start"] for s in source["spans"]] for source in data], [[0, 4000], [0], []])
+        self.assertEqual([[s["evidence_index"] for s in source["spans"]] for source in data], [[0, 1], [2], []])
+        raw["observations"][0]["evidence_indices"] = [2, 1]
+        raw["observations"][0]["units"][0]["evidence_indices"] = [1]
+        raw["observations"][0]["claims"][0]["evidence_indices"] = [2]
+        converted = bind_indexed_extraction(raw, sources, span_ids=selected)
+        result = validate_extraction(converted, sources, span_ids=selected)[0]
+        self.assertEqual([span.span_id for span in result.spans], [all_spans[3].span_id, all_spans[2].span_id])
+        self.assertEqual(result.units[0].span_ids, (all_spans[2].span_id,))
+        self.assertEqual(result.claims[0]["span_ids"], (all_spans[3].span_id,))
+        raw["observations"][0]["evidence_indices"] = [3]
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_evidence_reference"):
+            bind_indexed_extraction(raw, sources, span_ids=selected)
+
+    def test_missing_extra_and_invalid_reference_shapes_are_rejected_on_the_wire(self):
+        for target in ("observation", "unit", "claim"):
+            for invalid in (None, "0", 0, [], [True], [0.0], [-1], [4], [0, 0], [{}]):
+                with self.subTest(target=target, invalid=invalid):
+                    sources, raw = self.wire_fixture()
+                    value = raw["observations"][0]
+                    path = ["observations", 0]
+                    if target != "observation":
+                        collection = "units" if target == "unit" else "claims"
+                        value = value[collection][0]
+                        path += [collection, 0]
+                    value["evidence_indices"] = invalid
+                    with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_evidence_reference") as caught:
+                        bind_indexed_extraction(raw, sources)
+                    diagnostic = caught.exception.diagnostic
+                    self.assertEqual(diagnostic["path"][:len(path) + 1], path + ["evidence_indices"])
+                    self.assertEqual(diagnostic["valid_range"], [0, 3])
+            for action in ("missing", "extra"):
+                sources, raw = self.wire_fixture()
+                value = raw["observations"][0]
+                if target != "observation":
+                    value = value["units" if target == "unit" else "claims"][0]
+                if action == "missing":
+                    del value["evidence_indices"]
+                else:
+                    value["span_indices"] = [0]
+                with self.subTest(target=target, action=action), self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_shape"):
+                    bind_indexed_extraction(raw, sources)
+
+    def test_unit_and_claim_choices_must_be_observation_subsets_without_union(self):
+        for collection in ("units", "claims"):
+            sources, raw = self.wire_fixture()
+            raw["observations"][0][collection][0]["evidence_indices"] = [1]
+            before = json.dumps(raw)
+            with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_evidence_reference") as caught:
+                bind_indexed_extraction(raw, sources)
+            self.assertEqual(caught.exception.diagnostic["reason"], "not_selected_by_observation")
+            self.assertEqual(caught.exception.diagnostic["allowed_indices"], [3, 0])
+            self.assertEqual(json.dumps(raw), before)
+
+    def test_quote_omits_text_and_original_contiguity_and_text_checks_stay_strict(self):
+        for refs, valid in (([0, 1], True), ([0, 2], False), ([0, 3], False)):
+            sources, raw = self.wire_fixture()
+            value = raw["observations"][0]
+            value.update(evidence_indices=refs, units=[{"kind": "quote", "evidence_indices": refs}], claims=[])
+            converted = bind_indexed_extraction(raw, sources)
+            if valid:
+                result = validate_extraction(converted, sources)[0]
+                self.assertEqual(result.units[0].text, "甲" * 4000)
+            else:
+                with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_quote_selection"):
+                    validate_extraction(converted, sources)
+        for kind in ("quote", "fact"):
+            for text in ("", " ", None):
+                sources, raw = self.wire_fixture()
+                raw["observations"][0]["units"][0].update(kind=kind, text=text)
+                with self.subTest(kind=kind, text=text), self.assertRaisesRegex(SemanticValidationError,
+                        "semantic_invalid_shape" if kind == "quote" else "semantic_invalid_text"):
+                    bind_indexed_extraction(raw, sources)
+
+    def test_source_dispositions_bind_empty_sources_and_reject_bad_indices(self):
+        sources, raw = self.wire_fixture()
+        raw["observations"] = []
+        raw["dispositions"] = [{"source_index": 2, "status": "context_only", "reason": "empty source"}]
+        converted = bind_indexed_extraction(raw, sources)
+        dispositions = validate_dispositions(converted, sources, ())
+        self.assertEqual(dispositions["empty"]["status"], "context_only")
+        self.assertEqual(dispositions["first"]["status"], "unclassified")
+        for invalid in (None, "2", -1, 3, True, 2.0):
+            raw["dispositions"][0]["source_index"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_source_index"):
+                bind_indexed_extraction(raw, sources)
+        for entries in ({}, [{}], [{"source_index": 2, "status": "context_only", "reason": "empty"}] * 2):
+            raw["dispositions"] = entries
+            with self.assertRaises(SemanticValidationError):
+                bind_indexed_extraction(raw, sources)
+        sources, raw = self.wire_fixture()
+        raw["dispositions"] = [{"source_index": 0, "status": "context_only", "reason": "already cited"}]
+        converted = bind_indexed_extraction(raw, sources)
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_disposition"):
+            validate_dispositions(converted, sources, validate_extraction(converted, sources))
+
+    def test_fresh_primary_binds_explicit_flat_indices_to_canonical(self):
+        texts = ["甲" * 2200, "一句值得记住的原话。", ""]
+        captured = capture(self.store, "indexed", texts)
+        seen = []
+        class IndexedText(FakeText):
+            def generate(provider, prompt, **kwargs):
+                provider.calls.append(kwargs["request_id"])
+                seen.append(prompt)
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                self.assertEqual([source["source_index"] for source in data], [0, 1, 2])
+                self.assertEqual([[span["evidence_index"] for span in source["spans"]] for source in data], [[0, 1], [2], []])
+                self.assertFalse(any("source_id" in source or any("span_id" in span for span in source["spans"]) for source in data))
+                return TextResult(json.dumps({"observations": [{"title": "合成经历", "scene_kind": "life",
+                    "evidence_indices": [2, 1], "units": [
+                        {"kind": "fact", "text": "甲" * 200, "evidence_indices": [1]},
+                        {"kind": "quote", "evidence_indices": [2]}], "topics": [], "claims": [{
+                            "subject_id": None, "case_id": None, "condition": None, "channel": None,
+                            "version": None, "phase": None, "observed_at": data[0]["occurred_at"],
+                            "predicates": {"reported": True}, "evidence_indices": [1]}]}],
+                    "dispositions": [{"source_index": 2, "status": "context_only", "reason": "empty captured source"}]}), provider.route)
+        provider = IndexedText()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        result = engine.extract_batch("indexed")
+        value = result["observations"][0]
+        expected = prepare_spans([CapturedSource(identity, text) for identity, text in zip(captured["member_version_ids"], texts)],
+                                 namespace=self.store.generation_id)
+        self.assertEqual([span["span_id"] for span in value["spans"]], [expected[2].span_id, expected[1].span_id])
+        self.assertEqual(value["units"][0]["span_ids"], [expected[1].span_id])
+        self.assertEqual(value["units"][1]["text"], texts[1])
+        self.assertEqual(value["claims"][0]["span_ids"], [expected[1].span_id])
+        with closing(self.store.connect()) as db:
+            child = db.execute("SELECT versions_json,artifact_json FROM jobs JOIN accepted_job_artifacts USING(job_id) WHERE kind='extract_page'").fetchone()
+            self.assertEqual(json.loads(child["versions_json"])["evidence_contract"], "indexed-evidence-v1")
+            self.assertNotIn("evidence_indices", child["artifact_json"])
+            self.assertEqual(db.execute("SELECT text FROM content_units WHERE kind='quote'").fetchone()[0], texts[1])
+            self.assertEqual(db.execute("SELECT status FROM source_dispositions WHERE source_version_id=?", (captured["member_version_ids"][2],)).fetchone()[0], "context_only")
+        with patch.object(provider, "generate", side_effect=AssertionError("accepted indexed page was resent")), \
+             patch("core.semantic.engine.bind_indexed_extraction", side_effect=AssertionError("rebound accepted page")):
+            self.assertEqual(engine.extract_batch("indexed")["receipt"], result["receipt"])
+
+    def test_wire_correction_uses_flat_indices_and_original_paths(self):
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                batch = "wire-correction-" + str(unknown)
+                capture(self.store, batch, ["第一段合成经历。", "无关的第二段。", "第三段合成原话。"])
+                prompts = []
+                class Correctable(FakeText):
+                    def generate(provider, prompt, **kwargs):
+                        provider.calls.append(kwargs["request_id"])
+                        prompts.append(prompt)
+                        data = json.loads(prompt.rsplit("\n", 1)[-1])
+                        selected = [1]
+                        if "Correct the prior JSON" in prompt:
+                            diagnostic = json.loads(prompt.rsplit("\n", 2)[1])["diagnostic"]
+                            self.assertEqual(diagnostic["path"], ["observations", 0, "units", 0, "evidence_indices", 0])
+                            self.assertEqual(diagnostic["value"], 1)
+                            self.assertEqual(diagnostic["allowed_indices"], [2, 0])
+                            self.assertNotIn("span_index_map", diagnostic)
+                            if unknown:
+                                raise ProviderError("synthetic_wire_unknown", outcome_unknown=True)
+                            selected = [2]
+                        return TextResult(json.dumps({"observations": [{"title": "两段经历", "scene_kind": "life",
+                            "evidence_indices": [2, 0], "units": [{"kind": "quote", "evidence_indices": selected}],
+                            "topics": [], "claims": []}], "dispositions": [{"source_index": 1, "status": "context_only",
+                                                                                  "reason": "unrelated fragment"}]}), provider.route)
+                provider = Correctable()
+                engine = SemanticEngine(self.store, provider, FakeDecision())
+                if unknown:
+                    with self.assertRaisesRegex(ProviderError, "synthetic_wire_unknown"):
+                        engine.extract_batch(batch)
+                    sent = list(provider.calls)
+                    with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+                        SemanticEngine(self.store, provider, FakeDecision()).extract_batch(batch)
+                    self.assertEqual(provider.calls, sent)
+                else:
+                    result = engine.extract_batch(batch)
+                    self.assertEqual(result["observations"][0]["units"][0]["text"], "第三段合成原话。")
+                self.assertEqual(len(provider.calls), 2)
+                self.assertEqual(provider.calls[1], provider.calls[0] + ":attempt-2")
+                self.assertNotIn('"span_indices"', prompts[1])
+                self.assertNotIn('"source_id"', prompts[1])
+                self.assertEqual(prompts[0].rsplit("\n", 1)[1], prompts[1].rsplit("\n", 1)[1])
+
+    def test_all_frozen_primary_policies_keep_old_wire_and_unknown_binding(self):
+        for policy in (None, *("retained-knowledge-v" + str(index) for index in range(1, 6))):
+            for unknown in (False, True):
+                with self.subTest(policy=policy, unknown=unknown):
+                    batch = "frozen-wire-" + str(policy) + str(unknown)
+                    capture(self.store, batch, ["一段完整的合成经历。"])
+                    provider = FakeText()
+                    engine = SemanticEngine(self.store, provider, FakeDecision())
+                    old = freeze_legacy_primary(engine, batch, policy)
+                    if unknown:
+                        engine.jobs.claim(old["job_id"], engine.worker_id)
+                        engine.jobs.fail(old["job_id"], engine.worker_id, "synthetic_unknown", unknown=True)
+                        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+                            engine.extract_batch(batch)
+                        self.assertEqual(provider.calls, [])
+                    else:
+                        with patch("core.semantic.engine.extraction_prompt", wraps=extraction_prompt) as prompts:
+                            engine.extract_batch(batch)
+                        self.assertEqual(prompts.call_args.kwargs["unit_policy"], policy)
+                        self.assertIsNone(prompts.call_args.kwargs["evidence_contract"])
+                        sent = list(provider.calls)
+                        with patch.object(provider, "generate", side_effect=AssertionError("accepted old page was resent")):
+                            engine.extract_batch(batch)
+                        self.assertEqual(provider.calls, sent)
+                    with closing(self.store.connect()) as db:
+                        child = db.execute("SELECT job_id,versions_json FROM jobs WHERE kind='extract_page' AND "
+                            "json_extract(inputs_json,'$.parent_job_id')=?", (old["inputs"]["parent_job_id"],)).fetchall()
+                        self.assertEqual([row["job_id"] for row in child], [old["job_id"]])
+                        self.assertNotIn("evidence_contract", json.loads(child[0]["versions_json"]))
+
+    def test_changed_route_cannot_fork_an_unknown_v2_parent_or_child(self):
+        for old_wire in (False, True):
+            for unknown_parent in (False, True):
+                batch = "route-unknown-" + str(old_wire) + str(unknown_parent)
+                capture(self.store, batch, ["合成的完整经历。"])
+                old_provider = FakeText()
+                engine = SemanticEngine(self.store, old_provider, FakeDecision())
+                old = freeze_legacy_primary(engine, batch)
+                if not old_wire:
+                    # New-wire identity is frozen before any dispatch too.
+                    with closing(self.store.connect()) as db:
+                        db.execute("DELETE FROM jobs WHERE job_id=?", (old["job_id"],))
+                        db.commit()
+                    old = engine.jobs.ensure(old["kind"], old["inputs"], dict(old["versions"], evidence_contract="indexed-evidence-v1"))
+                target = old["inputs"]["parent_job_id"] if unknown_parent else old["job_id"]
+                engine.jobs.claim(target, engine.worker_id)
+                engine.jobs.fail(target, engine.worker_id, "synthetic_unknown", unknown=True)
+                changed = FakeText()
+                changed.route = ProviderRoute("changed", "text", "text")
+                with self.subTest(old_wire=old_wire, unknown_parent=unknown_parent), \
+                     self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+                    SemanticEngine(self.store, changed, FakeDecision()).extract_batch(batch)
+                self.assertEqual(changed.calls, [])
+                with closing(self.store.connect()) as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM jobs WHERE kind='extract' AND "
+                        "json_extract(inputs_json,'$.batch_id')=?", (batch,)).fetchone()[0], 1)
+
+    def test_changed_route_reuses_accepted_v2_parent_and_child_without_dispatch(self):
+        for child_only in (False, True):
+            batch = "route-accepted-" + str(child_only)
+            capture(self.store, batch, ["完整的合成经历。"])
+            engine = SemanticEngine(self.store, FakeText(), FakeDecision())
+            if child_only:
+                original = engine._accepted
+                def stop_parent(job, callback):
+                    if job["kind"] == "extract":
+                        raise RuntimeError("synthetic accepted child")
+                    return original(job, callback)
+                with patch.object(engine, "_accepted", side_effect=stop_parent), self.assertRaisesRegex(RuntimeError, "accepted child"):
+                    engine.extract_batch(batch)
+            else:
+                engine.extract_batch(batch)
+            with closing(self.store.connect()) as db:
+                before = [tuple(row) for row in db.execute("SELECT job_id,inputs_json,versions_json FROM jobs WHERE "
+                    "kind IN ('extract','extract_page') AND (json_extract(inputs_json,'$.batch_id')=? OR "
+                    "json_extract(inputs_json,'$.parent_job_id') IN (SELECT job_id FROM jobs WHERE kind='extract' AND "
+                    "json_extract(inputs_json,'$.batch_id')=?)) ORDER BY job_id", (batch, batch))]
+            changed = FakeText()
+            changed.route = ProviderRoute("changed", "text", "text")
+            with patch.object(changed, "generate", side_effect=AssertionError("resent accepted extraction under changed route")):
+                result = SemanticEngine(self.store, changed, FakeDecision()).extract_batch(batch)
+            self.assertIn(result["job_id"], [row[0] for row in before])
+            with closing(self.store.connect()) as db:
+                after = [tuple(row) for row in db.execute("SELECT job_id,inputs_json,versions_json FROM jobs WHERE "
+                    "kind IN ('extract','extract_page') AND (json_extract(inputs_json,'$.batch_id')=? OR "
+                    "json_extract(inputs_json,'$.parent_job_id')=?) ORDER BY job_id", (batch, result["job_id"]))]
+            self.assertEqual(before, after)
+
+    def test_changed_route_cannot_dispatch_a_pending_frozen_page(self):
+        capture(self.store, "route-pending", ["完整的合成经历。"])
+        engine = SemanticEngine(self.store, FakeText(), FakeDecision())
+        old = freeze_legacy_primary(engine, "route-pending")
+        changed = FakeText()
+        changed.route = ProviderRoute("changed", "text", "text")
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_extraction_route_mismatch"):
+            SemanticEngine(self.store, changed, FakeDecision()).extract_batch("route-pending")
+        self.assertEqual(changed.calls, [])
+        with closing(self.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM jobs WHERE kind='extract'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT job_id FROM jobs WHERE kind='extract_page'").fetchone()[0], old["job_id"])
+
+    def test_frozen_parent_lookup_uses_the_existing_batch_index(self):
+        capture(self.store, "parent-index", ["合成经历。"])
+        engine = SemanticEngine(self.store, FakeText(), FakeDecision())
+        freeze_legacy_primary(engine, "parent-index")
+        original = self.store.connect
+        queries = []
+        def traced():
+            connection = original()
+            connection.set_trace_callback(lambda query: queries.append(query) if query.startswith(
+                "SELECT inputs_json,versions_json,state,job_id FROM jobs ") else None)
+            return connection
+        with patch.object(self.store, "connect", side_effect=traced):
+            engine.extract_batch("parent-index")
+        self.assertEqual(len(queries), 1)
+        with closing(original()) as db:
+            plan = " ".join(row[3] for row in db.execute("EXPLAIN QUERY PLAN " + queries[0]))
+        self.assertIn("USING INDEX semantic_jobs_batch", plan)
+
+    def test_conflicting_v2_parents_fail_closed_with_unknown_child_priority(self):
+        for unknown in (False, True):
+            batch = "conflicting-parent-" + str(unknown)
+            capture(self.store, batch, ["完整的合成经历。"])
+            provider = FakeText()
+            engine = SemanticEngine(self.store, provider, FakeDecision())
+            child = freeze_legacy_primary(engine, batch)
+            with closing(self.store.connect()) as db:
+                parent = db.execute("SELECT inputs_json,versions_json FROM jobs WHERE job_id=?", (child["inputs"]["parent_job_id"],)).fetchone()
+            versions = json.loads(parent["versions_json"])
+            versions["route"] = asdict(ProviderRoute("changed", "text", "text"))
+            engine.jobs.ensure("extract", json.loads(parent["inputs_json"]), versions)
+            if unknown:
+                engine.jobs.claim(child["job_id"], engine.worker_id)
+                engine.jobs.fail(child["job_id"], engine.worker_id, "synthetic_unknown", unknown=True)
+            with self.assertRaisesRegex(SemanticValidationError,
+                    "semantic_job_busy_or_unknown" if unknown else "semantic_extraction_version_conflict"):
+                engine.extract_batch(batch)
+            self.assertEqual(provider.calls, [])
+
+    def test_repeated_new_wire_errors_exhaust_without_artifact_or_canonical_write(self):
+        capture(self.store, "wire-exhausted", ["一段合成原话。"])
+        class InvalidQuote(FakeText):
+            def generate(provider, prompt, **kwargs):
+                provider.calls.append(kwargs["request_id"])
+                return TextResult(json.dumps({"observations": [{"title": "原话", "scene_kind": "quote",
+                    "evidence_indices": [0], "units": [{"kind": "quote", "text": "", "evidence_indices": [0]}],
+                    "topics": [], "claims": []}]}), provider.route)
+        provider = InvalidQuote()
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_shape"):
+            SemanticEngine(self.store, provider, FakeDecision()).extract_batch("wire-exhausted")
+        self.assertEqual(len(provider.calls), 3)
+        with closing(self.store.connect()) as db:
+            self.assertEqual(tuple(db.execute("SELECT state,attempt FROM jobs WHERE kind='extract_page'").fetchone()), ("failed", 3))
+            for table in ("accepted_job_artifacts", "observations", "source_spans", "extraction_receipts", "processing_receipts"):
+                self.assertEqual(db.execute("SELECT count(*) FROM " + table).fetchone()[0], 0, table)
 
 
 class ProposalCorrectionTests(unittest.TestCase):
@@ -981,10 +1396,8 @@ class EngineIntegrationTests(unittest.TestCase):
                              "case_id": None, "condition": None, "channel": None, "version": None,
                              "phase": None, "observed_at": source["occurred_at"],
                              "predicates": {"completed": True}, "span_indices": [0]}
-                    result.append({"title": source["speaker_name"] + "的讲述", "scene_kind": "life",
-                        "spans": [{"source_id": source["source_id"], "span_id": source["spans"][0]["span_id"]}],
-                        "units": [{"kind": "quote", "text": source["spans"][0]["excerpt"], "span_indices": [0]}],
-                        "topics": [], "claims": [claim]})
+                    result.append(model_observation([source], title=source["speaker_name"] + "的讲述",
+                        units=[{"kind": "quote", "span_indices": [0]}], claims=[claim]))
                 return TextResult(json.dumps({"observations": result}), provider.route)
 
         provider = AttributedText()
@@ -1173,7 +1586,7 @@ class EngineIntegrationTests(unittest.TestCase):
 
     def test_invalid_refs_leave_canonical_source_unread(self):
         capture(self.store, "batch", ["保留原文"])
-        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_source_span"):
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_evidence_reference"):
             SemanticEngine(self.store, FakeText(malformed=True), FakeDecision()).process_batch("batch")
         self.assertEqual(self.store.coverage()["unread_sources"], 1)
         self.assertEqual(self.store.list_items(), [])

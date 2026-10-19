@@ -14,6 +14,10 @@ missing. This bounds recovery lookups to one batch across provider routes;
 it changes no columns, canonical revisions, job states, attempts or accepted
 artifacts. It is a query index, not a data-format migration or permission to
 reconcile unknown work.
+The derived `semantic_jobs_parent` index similarly selects page/coverage children
+by job kind and frozen parent ID. Repeated recovery checks do not scan unrelated
+children's JSON inputs. Existing rows and unknown outcomes retain the same
+evidence and authority when this index is created.
 
 All public payloads below are dictionaries; IDs are strings. Errors expose only
 `SemanticStoreError.code`. `get_item`, `list_items`, `get_observation`,

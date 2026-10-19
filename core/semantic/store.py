@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS annotation_preservation(path TEXT PRIMARY KEY,sha256 
 CREATE INDEX IF NOT EXISTS source_occurrence ON source_records(source_namespace,chat_id,source_id,revision);
 CREATE INDEX IF NOT EXISTS source_batch_versions ON capture_batch_members(source_version_id);
 CREATE INDEX IF NOT EXISTS semantic_jobs_batch ON jobs(kind,json_extract(inputs_json,'$.batch_id'));
+CREATE INDEX IF NOT EXISTS semantic_jobs_parent ON jobs(kind,json_extract(inputs_json,'$.parent_job_id'));
 CREATE INDEX IF NOT EXISTS reverse_item_relation ON item_relations(to_item_id);
 CREATE INDEX IF NOT EXISTS observation_source ON observation_evidence(span_id);
 CREATE UNIQUE INDEX IF NOT EXISTS observation_resource_identity ON resource_refs(resource_id,occurrence_id,observation_id) WHERE item_id IS NULL;

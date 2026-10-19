@@ -8,9 +8,11 @@ tests are separate from installation and live acceptance.
 The extraction contract treats independent technical discussion, life scenes,
 stories, gossip and quotations equally. Every Observation has a core source
 member; overlapping context alone cannot produce another Observation. Text
-providers select supplied source and span IDs. The program assigns contiguous
-2,000-character spans in the exact redacted input; providers cannot invent IDs,
-offsets, or excerpts. The engine assigns stable unit, claim and Observation IDs.
+providers select explicit page evidence indices on fresh pages; historical
+frozen pages retain their source/span-ID wire. The program assigns contiguous
+2,000-character spans in the exact redacted input and binds selections to exact
+source/span identities; providers cannot invent IDs, offsets, or excerpts.
+The engine assigns stable unit, claim and Observation IDs.
 Facts, steps, quotations, scenes,
 counterevidence and resources retain provenance. Unknown claim qualifiers stay
 unknown; matching names do not establish entity identity.
@@ -22,7 +24,9 @@ required for preservation. Exact source spans remain available independently.
 Resolution can assign several such Observations to one grounded Item; an
 Observation is not an obligation to create another page. A shared broad topic,
 entity or timestamp still cannot merge independent cases.
-For a quote unit, the model selects `span_indices` and omits `text`. The program
+For a fresh quote unit, the model selects flat `evidence_indices` and omits
+`text`, including an empty string. Historical pages use local `span_indices`.
+The program
 copies those complete, contiguous source spans from one message verbatim before
 persisting the accepted artifact; canonical units still always have `text`.
 Noncontiguous selections or joined messages fail closed. Explicit `text` from
@@ -40,7 +44,8 @@ mispaired or malformed references stay in strict validation. Omitting a core
 member still leaves it `unclassified` and blocks processing ACK; scope admission
 does not turn missing work into a negative result.
 
-The engine passes captured **source version IDs**, not message occurrence IDs.
+Canonical evidence binds captured **source version IDs**, not message occurrence
+IDs; the fresh model wire uses page indices to select that evidence.
 `core/semantic/attribution.py::source_attribution(namespace, chat_id, payload)`
 is the shared, source-free attribution owner for extraction and reading. It
 returns `speaker_id` and `speaker_name`, each nullable. Captured `raw_sender_id`
@@ -72,6 +77,44 @@ New extraction jobs bind these fields under
 bind `unit_policy="retained-knowledge-v5"`. Earlier None/v1/v2/v3/v4 unit
 policies are frozen candidate variants: their exact input,
 version and accepted/unknown outcome survive resume without being reinterpreted.
+Only pages with no existing frozen job also bind
+`evidence_contract="indexed-evidence-v1"`. This is a model wire contract; it
+does not change the unit policy, canonical schemas or artifact format. A missing
+contract field retains the historical interface, including frozen v5 pages.
+Primary and coverage jobs reuse their exact frozen inputs, versions and IDs
+before selecting a contract for a new page. Accepted artifacts replay without
+binding or validation calls; unknown work blocks before dispatch.
+
+The fresh payload lists sources in their existing page order, with zero-based
+`source_index`. Only actually selected page spans appear under `spans`; they
+carry zero-based `evidence_index` values flat across the entire page, in the
+same source/span order. The payload omits source/span UUIDs. Each Observation
+returns a nonempty `evidence_indices` list. Each unit and claim selects an
+explicit nonempty subset of that Observation's choices using the **same flat
+indices**, never positions within the Observation. Indices must be exact
+integers, not booleans; missing, duplicate, unselected and out-of-range references
+fail closed. The engine never unions selections or guesses a missing home.
+Optional dispositions are a list of `{source_index, status, reason}` objects,
+with each uncited source selected at most once. An empty source has no citable
+evidence and can receive a reasoned disposition; omission still leaves core
+work unclassified. Quote units have exactly `kind` and `evidence_indices`;
+other units also require nonempty `text`.
+
+`bind_indexed_extraction` deterministically binds these explicit choices to the
+existing source/span pairs and Observation-local `span_indices`. The original
+`scope_page_output`, `validate_extraction` and `validate_dispositions` then
+apply core/context, coverage pending-core, quote continuity, attribution,
+claim and conservation rules before artifact acceptance. Store and independent
+verifier continue to consume only canonical spans/units/claims. Valid indices
+alone do not establish that a narrative or claim is supported by its sources.
+
+Existing v2 parents are selected by batch across TEXT routes through the
+existing derived `semantic_jobs_batch` index. Their member inputs, versions,
+child jobs and outcomes remain binding. Unknown parent/child work blocks;
+conflicting parents fail closed. A changed TEXT route may reuse accepted
+parent/child artifacts, but cannot dispatch an unaccepted page against a
+different frozen parent route or create a replacement parent.
+
 The v5 units describe retained knowledge and complete scenes, not a provenance
 audit or message directory. Source evidence, resources and exact source spans
 remain separately preserved; a display name never supplies gender or identity.
@@ -102,7 +145,7 @@ back. Core page limits remain unchanged; overlap grants no identity proof.
 An existing page job keeps its exact frozen context and accepted/unknown
 outcome on resume, including earlier two-message overlap and its original
 `unit_policy`. A fresh page receives the full preceding bounded page as
-ordered non-core context and binds `retained-knowledge-v4`; the change does not
+ordered non-core context and binds `retained-knowledge-v5`; the change does not
 fork, rewrite or resend an older unknown job. The parent extraction artifact
 aggregates validated pages before
 canonical commit. An unclassified fragment keeps its whole source unread even
@@ -200,7 +243,8 @@ claim and acceptance failures
 do not enter this path. Each correction claims a new durable attempt and uses a
 distinct physical request ID with
 the error and rejected JSON as untrusted feedback for the same source spans.
-For `semantic_invalid_span_reference`, the rejecting validator also supplies a
+For the historical ID/local-index wire's `semantic_invalid_span_reference`, the
+rejecting validator also supplies a
 bounded diagnostic: the original response's Observation/unit or claim path,
 first offending value/type, zero-based indexing, that Observation's validated
 span count and its inclusive valid range. Context-only scope exclusion preserves
@@ -217,6 +261,17 @@ existing untrusted feedback. Diagnostics are not accepted artifact fields and
 do not change content-free error text, initial/frozen first-prompt bytes, request IDs
 or the correction budget. Corrected output still passes the original validator;
 an in-range reference alone does not establish semantic support for its text.
+For indexed wire failures, diagnostics identify the original wire path and bad
+value, the flat page range, and the Observation's explicit allowed indices when
+a unit/claim chooses outside its subset. They do not expose converted local
+positions or a UUID map. Shape errors report the required wire keys. Known-output
+feedback retains the indexed schema and its explicit quote/nonquote forms;
+the complete corrected response must pass binding and the original validators
+again. No rejected text or selection is deleted, rewritten or filled in.
+The first physical request remains `<job_id>:text`; corrections retain the
+existing `:attempt-2` and `:attempt-3` IDs and two-correction budget on the same
+frozen page job. Exhaustion and unknown correction outcomes retain that job's
+existing durable state, without a new wire version or replacement ledger.
 Accepted pages are reused; unknown outcomes, unsent work and provider failures
 cannot enter this correction loop. Exhaustion still stops extraction without
 canonical acceptance or ACK. Waiting for configured

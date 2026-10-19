@@ -3,7 +3,8 @@ import json
 import unittest
 
 from core.semantic.engine import (CapturedSource, SemanticValidationError,
-                                  prepare_spans, scope_page_output, validate_dispositions, validate_extraction)
+                                  bind_indexed_extraction, prepare_spans, scope_page_output,
+                                  validate_dispositions, validate_extraction)
 from tests.test_semantic_engine import observation
 
 
@@ -34,3 +35,19 @@ class PageScopeTests(unittest.TestCase):
                 self.assertEqual(excluded, [])
                 with self.assertRaisesRegex(SemanticValidationError, 'semantic_invalid_source_span'):
                     validate_extraction(scoped, self.sources)
+
+    def test_indexed_choices_bind_before_original_context_scope_and_keep_wire_error_paths(self):
+        values = [{"title": "Context alone", "scene_kind": "life", "evidence_indices": [1],
+                   "units": [{"kind": "quote", "evidence_indices": [1]}], "topics": [], "claims": []},
+                  {"title": "Current scene", "scene_kind": "life", "evidence_indices": [0],
+                   "units": [{"kind": "quote", "evidence_indices": [0]}], "topics": [], "claims": []}]
+        converted = bind_indexed_extraction({"observations": values}, self.sources, span_ids=self.spans)
+        scoped, excluded = scope_page_output(converted, self.sources, namespace="semantic", span_ids=self.spans)
+        self.assertEqual(excluded[0]["spans"], [{"source_id": "context", "span_id": self.spans[1]}])
+        extracted = validate_extraction(scoped, self.sources)
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0].units[0].text, self.core.text)
+        values[1]["units"][0]["evidence_indices"] = [2]
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_evidence_reference") as caught:
+            bind_indexed_extraction({"observations": values}, self.sources, span_ids=self.spans)
+        self.assertEqual(caught.exception.diagnostic["path"], ["observations", 1, "units", 0, "evidence_indices", 0])

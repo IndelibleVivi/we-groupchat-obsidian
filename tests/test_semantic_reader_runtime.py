@@ -22,7 +22,7 @@ from core.semantic.store import SemanticStore
 from core.semantic.watches import WatchSpec
 from tests.test_semantic_delivery import RecordingNotifier
 from tests.test_semantic_briefing import bounded_editor_response
-from tests.test_semantic_engine import FakeDecision, FakeText, capture
+from tests.test_semantic_engine import FakeDecision, FakeText, capture, freeze_legacy_primary
 from tests.test_semantic_projections import ReadingHarness, ScriptedTextProvider
 from tests.test_semantic_retrieval import FakeEmbedding
 from tests.test_semantic_watches import WatchText
@@ -162,6 +162,9 @@ def render_markdown_fixture(base):
             for index, text in enumerate(texts)], source_namespace="synthetic-fixture", chat_id="fixture-room",
             inventory_digest="fixture-only", inventory_revision=1, input_cursors={}, output_cursors={}, source_eof=True)
     captured("initial", provider.SOURCES, provider.PAYLOADS)
+    # Preserve this reader fixture's explicit substring quote under its frozen
+    # historical wire. Fresh indexed quote selection copies complete spans.
+    freeze_legacy_primary(runtime.engine, "initial")
     runtime.process("initial")
     first_publication = runtime.publish_all()
     item_id = store.list_items()[0]["item_id"]
