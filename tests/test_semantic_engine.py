@@ -63,6 +63,15 @@ def observation(source, *, namespace="semantic", kind="life", text=None, unit_ki
             "topics": [], "claims": claims or []}
 
 
+def indexed_observation(refs, first_text, last_text, last_time):
+    return {"title": "合成技术场景", "scene_kind": "technical", "spans": refs,
+        "units": [{"kind": "fact", "text": first_text, "span_indices": [0]},
+                  {"kind": "fact", "text": last_text, "span_indices": [len(refs) - 1]}],
+        "topics": [], "claims": [{"subject_id": None, "case_id": None, "condition": None,
+            "channel": None, "version": None, "phase": None, "observed_at": last_time,
+            "predicates": {"reported": True}, "span_indices": [len(refs) - 1]}]}
+
+
 class ExtractionTests(unittest.TestCase):
     def test_frozen_unit_policies_keep_their_original_prompt_bytes(self):
         sources = [CapturedSource("core", "终端错误值 A 应改成 B。", True, 1),
@@ -169,6 +178,88 @@ class ExtractionTests(unittest.TestCase):
         with self.assertRaisesRegex(SemanticValidationError, "semantic_unprovided_entity_or_case"):
             validate_extraction({"observations": values}, [own, report])
 
+    def index_fixture(self):
+        sources = [CapturedSource("synthetic-" + str(index), "技术说明 " + str(index), occurred_at=10 + index)
+                   for index in range(21)]
+        refs = [{"source_id": span.source_id, "span_id": span.span_id} for span in prepare_spans(sources)]
+        return sources, indexed_observation(refs, sources[0].text, sources[-1].text, sources[-1].occurred_at)
+
+    def test_span_indices_report_exact_unit_and_claim_paths_and_range(self):
+        for collection, entry in (("units", 1), ("claims", 0)):
+            with self.subTest(collection=collection):
+                sources, value = self.index_fixture()
+                value[collection][entry]["span_indices"] = [0, 21]
+                with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_span_reference") as caught:
+                    validate_extraction({"observations": [value]}, sources)
+                self.assertEqual(str(caught.exception), "semantic_invalid_span_reference")
+                self.assertEqual(getattr(caught.exception, "diagnostic", None), {
+                    "path": ["observations", 0, collection, entry, "span_indices", 1],
+                    "reason": "out_of_range", "value": 21, "value_type": "int",
+                    "index_base": 0, "span_count": 21, "valid_range": [0, 20],
+                    "span_index_map": [{"index": index, **ref} for index, ref in enumerate(value["spans"])],
+                    "span_index_map_complete": True})
+
+    def test_index_boundaries_accept_but_empty_noninteger_and_duplicate_refs_stay_strict(self):
+        sources, value = self.index_fixture()
+        accepted = validate_extraction({"observations": [value]}, sources)[0]
+        self.assertEqual(accepted.units[0].span_ids, (value["spans"][0]["span_id"],))
+        self.assertEqual(accepted.units[1].span_ids, (value["spans"][20]["span_id"],))
+        self.assertEqual(accepted.claims[0]["span_ids"], (value["spans"][20]["span_id"],))
+        for collection, entry in (("units", 1), ("claims", 0)):
+            for invalid in ([], None, 21, "21", [True], [20.0], [float("nan")], [float("inf")],
+                            [2 ** 4096], [-1], [21], [{}], [0, 0]):
+                with self.subTest(collection=collection, invalid=invalid):
+                    sources, value = self.index_fixture()
+                    value[collection][entry]["span_indices"] = invalid
+                    code = "semantic_duplicate_span_reference" if invalid == [0, 0] else "semantic_invalid_span_reference"
+                    with self.assertRaisesRegex(SemanticValidationError, code) as caught:
+                        validate_extraction({"observations": [value]}, sources)
+                    if code == "semantic_invalid_span_reference":
+                        json.dumps(caught.exception.diagnostic, allow_nan=False)
+        sources, value = self.index_fixture()
+        value["spans"] = []
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_observation"):
+            validate_extraction({"observations": [value]}, sources)
+
+    def test_span_reference_diagnostic_is_bounded_and_does_not_enter_error_text(self):
+        sources, value = self.index_fixture()
+        invalid = "synthetic-index-" * 1000
+        value["units"][1]["span_indices"] = [invalid]
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_span_reference") as caught:
+            validate_extraction({"observations": [value]}, sources)
+        diagnostic = getattr(caught.exception, "diagnostic", None)
+        self.assertIsInstance(diagnostic, dict)
+        self.assertEqual(diagnostic["value"], invalid[:80])
+        self.assertTrue(diagnostic["value_truncated"])
+        self.assertLess(len(json.dumps(diagnostic)), 9000)
+        self.assertTrue(diagnostic["span_index_map_complete"])
+        self.assertNotIn("技术说明", json.dumps(diagnostic, ensure_ascii=False))
+        self.assertNotIn("synthetic-index", str(caught.exception))
+
+    def test_diagnostic_index_map_is_bounded_and_keeps_exact_validated_ids(self):
+        for count, id_length in ((70, 8), (40, 300)):
+            with self.subTest(count=count, id_length=id_length):
+                sources = [CapturedSource("synthetic-" + str(index) + "x" * id_length, "技术说明 " + str(index),
+                                          occurred_at=index) for index in range(count)]
+                refs = [{"source_id": span.source_id, "span_id": span.span_id} for span in prepare_spans(sources)]
+                value = indexed_observation(refs, sources[0].text, sources[-1].text, sources[-1].occurred_at)
+                value["units"][1]["span_indices"] = [count]
+                with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_span_reference") as caught:
+                    validate_extraction({"observations": [value]}, sources)
+                diagnostic = caught.exception.diagnostic
+                mapping = diagnostic["span_index_map"]
+                self.assertLessEqual(len(mapping), 64)
+                self.assertLessEqual(len(json.dumps(mapping, ensure_ascii=False, separators=(",", ":")).encode()), 8192)
+                self.assertLess(len(mapping), count)
+                self.assertFalse(diagnostic["span_index_map_complete"])
+                self.assertEqual(mapping, [{"index": index, **ref} for index, ref in enumerate(refs[:len(mapping)])])
+        sources, value = self.index_fixture()
+        value["spans"][20]["span_id"] = "unprovided-synthetic-span"
+        value["units"][1]["span_indices"] = [21]
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_source_span") as caught:
+            validate_extraction({"observations": [value]}, sources)
+        self.assertIsNone(caught.exception.diagnostic)
+
 
 def capture(store, batch_id, texts, *, payloads=None):
     return store.capture_batch(batch_id, [
@@ -266,6 +357,117 @@ class FakeDecision:
                 answers[question.id] = DecisionAnswer("score", score=3, confidence=1,
                                                       probabilities={str(i): float(i == 3) for i in range(4)})
         return DecisionResult(answers, self.route)
+
+
+class ExtractionSpanFeedbackTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = SemanticStore(Path(temporary.name).resolve() / "knowledge.sqlite", "synthetic-generation")
+
+    def provider(self, collection, *, with_context=False, never_repair=False, correction_error=None):
+        class DiagnosticText(FakeText):
+            def __init__(provider):
+                super().__init__()
+                provider.feedback = []
+            def generate(provider, prompt, **kwargs):
+                provider.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                core = [source for source in data if source["core"]]
+                refs = [{"source_id": source["source_id"], "span_id": source["spans"][0]["span_id"]} for source in core]
+                value = indexed_observation(refs, core[0]["spans"][0]["excerpt"],
+                    core[-1]["spans"][0]["excerpt"], core[-1]["occurred_at"])
+                entry = 1 if collection == "units" else 0
+                value[collection][entry]["span_indices"] = [21]
+                observations = [value]
+                if with_context:
+                    context = next(source for source in data if not source["core"])
+                    observations.insert(0, {"title": "旧场景", "scene_kind": "life", "spans": [
+                        {"source_id": context["source_id"], "span_id": context["spans"][0]["span_id"]}],
+                        "units": [{"kind": "quote", "span_indices": [0]}], "topics": [], "claims": []})
+                if "Correct the prior JSON" in prompt:
+                    feedback = json.loads(prompt.rsplit("\n", 2)[1])
+                    provider.feedback.append(feedback)
+                    if correction_error is not None:
+                        raise correction_error
+                    diagnostic = feedback.get("diagnostic", {})
+                    path = ["observations", 1 if with_context else 0, collection, entry, "span_indices", 0]
+                    selected = [item["index"] for item in diagnostic.get("span_index_map", [])
+                        if item.get("source_id") == refs[-1]["source_id"] and item.get("span_id") == refs[-1]["span_id"]]
+                    if (not never_repair and diagnostic.get("path") == path and diagnostic.get("value") == 21
+                            and diagnostic.get("index_base") == 0 and diagnostic.get("span_count") == 21
+                            and diagnostic.get("valid_range") == [0, 20] and selected == [20]):
+                        value[collection][entry]["span_indices"] = selected
+                return TextResult(json.dumps({"observations": observations}), provider.route)
+        return DiagnosticText()
+
+    def test_21_span_unit_and_claim_repair_requires_the_actual_diagnostic(self):
+        for collection in ("units", "claims"):
+            with self.subTest(collection=collection):
+                batch = "span-feedback-" + collection
+                capture(self.store, batch, ["合成技术说明 " + str(index) for index in range(21)])
+                provider = self.provider(collection)
+                engine = SemanticEngine(self.store, provider, FakeDecision())
+                with patch("core.semantic.engine.validate_extraction", wraps=validate_extraction) as validator:
+                    result = engine.extract_batch(batch)
+                self.assertEqual(validator.call_count, 2)
+                self.assertEqual(len(provider.calls), 2)
+                self.assertEqual(provider.calls[1], provider.calls[0] + ":attempt-2")
+                self.assertEqual(provider.feedback[0]["validation_error"], "semantic_invalid_span_reference")
+                self.assertIn("zero-based", provider.feedback[0]["constraint"])
+                self.assertEqual(len(result["observations"]), 1)
+                self.assertEqual(len(result["observations"][0]["spans"]), 21)
+                target = result["observations"][0][collection][1 if collection == "units" else 0]
+                self.assertEqual(target["span_ids"], [result["observations"][0]["spans"][20]["span_id"]])
+                self.assertNotIn("diagnostic", engine.jobs.accepted(result["job_id"]))
+                with patch.object(provider, "generate", side_effect=AssertionError("resent accepted extraction")), \
+                     patch("core.semantic.engine.validate_extraction", side_effect=AssertionError("revalidated accepted extraction")):
+                    self.assertEqual(engine.extract_batch(batch)["receipt"], result["receipt"])
+
+    def test_diagnostic_path_keeps_the_original_observation_after_context_exclusion(self):
+        sources = [CapturedSource("context", "旧上下文", core=False)] + [
+            CapturedSource("core-" + str(index), "合成技术说明 " + str(index), occurred_at=10 + index)
+            for index in range(21)]
+        engine = SemanticEngine(self.store, self.provider("units", with_context=True), FakeDecision())
+        child = engine.jobs.ensure("extract_page", {"synthetic": "feedback-path"}, {"unit_policy": "retained-knowledge-v5"})
+        span_ids = [span.span_id for span in prepare_spans(sources, namespace=self.store.generation_id)]
+        artifact = engine._accepted_extract_page(child, sources, span_ids, self.store.generation_id, self.store.generation_id)
+        self.assertEqual(len(engine.text_provider.calls), 2)
+        self.assertEqual(engine.text_provider.feedback[0]["diagnostic"]["path"][1], 1)
+        self.assertEqual(len(artifact["observations"]), 1)
+        self.assertEqual(len(artifact["excluded_context_results"]), 1)
+
+    def test_invalid_span_references_exhaust_without_trimming_or_acceptance(self):
+        capture(self.store, "invalid-forever", ["合成技术说明 " + str(index) for index in range(21)])
+        provider = self.provider("units", never_repair=True)
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_invalid_span_reference"):
+            SemanticEngine(self.store, provider, FakeDecision()).extract_batch("invalid-forever")
+        self.assertEqual(len(provider.calls), 3)
+        self.assertEqual(len(provider.feedback), 2)
+        with closing(self.store.connect()) as db:
+            job = db.execute("SELECT job_id,state,attempt FROM jobs WHERE kind='extract_page'").fetchone()
+            self.assertEqual((job["state"], job["attempt"]), ("failed", 3))
+            self.assertIsNone(db.execute("SELECT 1 FROM accepted_job_artifacts WHERE job_id=?", (job["job_id"],)).fetchone())
+            self.assertEqual(db.execute("SELECT count(*) FROM extraction_receipts").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT count(*) FROM observations").fetchone()[0], 0)
+        self.assertEqual(self.store.coverage()["unread_sources"], 21)
+
+    def test_unknown_span_correction_keeps_the_original_child_unknown_on_resume(self):
+        capture(self.store, "unknown-feedback", ["合成技术说明 " + str(index) for index in range(21)])
+        provider = self.provider("claims", correction_error=ProviderError("synthetic_correction_unknown", outcome_unknown=True))
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        with self.assertRaisesRegex(ProviderError, "synthetic_correction_unknown"):
+            engine.extract_batch("unknown-feedback")
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(len(provider.feedback), 1)
+        sent = list(provider.calls)
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            SemanticEngine(self.store, provider, FakeDecision()).extract_batch("unknown-feedback")
+        self.assertEqual(provider.calls, sent)
+        with closing(self.store.connect()) as db:
+            jobs = list(db.execute("SELECT state,attempt FROM jobs WHERE kind='extract_page'"))
+            self.assertEqual([tuple(row) for row in jobs], [("unknown", 2)])
+            self.assertEqual(db.execute("SELECT count(*) FROM extraction_receipts").fetchone()[0], 0)
 
 
 class ProposalCorrectionTests(unittest.TestCase):

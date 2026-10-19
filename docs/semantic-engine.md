@@ -200,6 +200,23 @@ claim and acceptance failures
 do not enter this path. Each correction claims a new durable attempt and uses a
 distinct physical request ID with
 the error and rejected JSON as untrusted feedback for the same source spans.
+For `semantic_invalid_span_reference`, the rejecting validator also supplies a
+bounded diagnostic: the original response's Observation/unit or claim path,
+first offending value/type, zero-based indexing, that Observation's validated
+span count and its inclusive valid range. Context-only scope exclusion preserves
+the original Observation position for this path. An index map also lists exact
+`source_id`/`span_id` pairs from that validated Observation, without excerpt
+text, so correction need not recount a long ID array. The map is bounded to
+64 entries and 8 KiB and explicitly reports whether it is complete; IDs are
+never shortened or reassigned. Each unit/claim indexes its
+own Observation's `spans`, never the whole page's messages. Empty lists,
+non-integers, duplicate references and out-of-range values remain strict errors;
+the feedback does not clip, renumber, remap or fill references. Large or complex
+bad values have a bounded display, while the complete rejected JSON remains the
+existing untrusted feedback. Diagnostics are not accepted artifact fields and
+do not change content-free error text, initial/frozen first-prompt bytes, request IDs
+or the correction budget. Corrected output still passes the original validator;
+an in-range reference alone does not establish semantic support for its text.
 Accepted pages are reused; unknown outcomes, unsent work and provider failures
 cannot enter this correction loop. Exhaustion still stops extraction without
 canonical acceptance or ACK. Waiting for configured

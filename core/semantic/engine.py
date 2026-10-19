@@ -35,10 +35,11 @@ _COVERAGE_MAX_CONTEXT_CHARS = 8000
 
 
 class SemanticValidationError(ValueError):
-    """Content-free failure; malformed model output is never a negative result."""
+    """Content-free error text with optional bounded model-repair feedback."""
 
-    def __init__(self, code):
+    def __init__(self, code, *, diagnostic=None):
         self.code = code
+        self.diagnostic = diagnostic
         super().__init__(code)
 
 
@@ -537,9 +538,11 @@ class SemanticEngine:
             response = self.text_provider.generate(prompt, request_id=request_id, generation_id=generation)
             last_response[0] = response.text
             try:
+                observation_indices = []
                 scoped, context_results = scope_page_output(response.text, page_sources,
-                                                           namespace=namespace, span_ids=span_ids)
+                    namespace=namespace, span_ids=span_ids, observation_indices=observation_indices)
                 extracted_page = validate_extraction(scoped, page_sources, namespace=namespace, span_ids=span_ids,
+                    observation_indices=observation_indices,
                     pending_core_span_ids=child["inputs"].get("pending_span_ids", ())
                     if coverage and child["versions"].get("unit_policy") == RETAINED_UNIT_POLICY else None)
                 dispositions = validate_dispositions(scoped, page_sources, extracted_page)
@@ -582,6 +585,14 @@ class SemanticEngine:
                         "semantic_invalid_source_span": "Copy only the exact source_id/span_id pairs supplied "
                             "in the final messages payload. Never invent IDs or pair one message's source_id "
                             "with another message's span_id. Every observation also needs a core=true message.",
+                        "semantic_invalid_span_reference": "span_indices must be a nonempty list of zero-based "
+                            "integers into this SAME observation's spans array, not the page/messages array. "
+                            "Use the diagnostic path, bad value and valid_range to correct the evidence selection. "
+                            "span_index_map gives each listed position's exact source_id/span_id, without excerpt "
+                            "text; select only evidence that actually supports the unit or claim. A legal index "
+                            "does not by itself establish semantic support. "
+                            "Keep the supplied source/span pairs; do not invent evidence or mechanically clip, "
+                            "renumber or remap references to satisfy validation.",
                         "semantic_quote_not_grounded": "For quote units, omit text and select span_indices for "
                             "one contiguous passage of one cited message; the program copies its verbatim "
                             "words. Do not compose speaker labels or quotation wrappers. Put attribution in "
@@ -594,6 +605,8 @@ class SemanticEngine:
                             "evidence and independently grounded claims may remain on a valid observation.",
                     }.get(exc.code, "Follow the exact supplied schema, scoped IDs, source wording and timestamps."),
                     "rejected_json": last_response[0]}
+                if exc.diagnostic is not None:
+                    correction[0]["diagnostic"] = exc.diagnostic
         raise SemanticValidationError("semantic_page_attempt_missing")
 
     def _cover_unclassified(self, job, input_sources, unresolved, observations, program_dispositions,
@@ -1655,12 +1668,13 @@ def extraction_prompt(sources: Sequence[CapturedSource], *, namespace="semantic"
     )
 
 
-def scope_page_output(raw, sources, *, namespace, span_ids):
+def scope_page_output(raw, sources, *, namespace, span_ids, observation_indices=None):
     """Separate provably context-only output from the current core task.
 
     Unknown/mispaired/malformed refs remain in the validator path. Excluded
     objects are retained as untrusted job evidence, never canonical content.
     Missing core coverage still becomes unclassified and blocks processing ACK.
+    Optional observation_indices records original positions for diagnostics only.
     """
     value = _model_json(raw, "semantic_invalid_json")
     _keys(value, {"observations"}, {"dispositions"})
@@ -1671,7 +1685,7 @@ def scope_page_output(raw, sources, *, namespace, span_ids):
     spans = {span.span_id: span for span in prepare_spans(sources, namespace=namespace)
              if span.span_id in allowed}
     retained, excluded = [], []
-    for observation in value["observations"]:
+    for observation_index, observation in enumerate(value["observations"]):
         refs = observation.get("spans") if isinstance(observation, dict) else None
         context_only = isinstance(refs, list) and bool(refs) and all(
             isinstance(ref, dict) and set(ref) == {"source_id", "span_id"}
@@ -1679,11 +1693,13 @@ def scope_page_output(raw, sources, *, namespace, span_ids):
             and ref["span_id"] in spans and spans[ref["span_id"]].source_id == ref["source_id"]
             and not by_id[ref["source_id"]].core for ref in refs)
         (excluded if context_only else retained).append(observation)
+        if not context_only and observation_indices is not None:
+            observation_indices.append(observation_index)
     return {**value, "observations": retained}, excluded
 
 
 def validate_extraction(raw: str | Mapping, sources: Sequence[CapturedSource], *, namespace="semantic", span_ids=None,
-                        pending_core_span_ids=None):
+                        pending_core_span_ids=None, observation_indices=None):
     """Assign identities and provenance in code; never trust provider-created IDs."""
     if isinstance(raw, str):
         raw = _model_json(raw, "semantic_invalid_json")
@@ -1701,7 +1717,7 @@ def validate_extraction(raw: str | Mapping, sources: Sequence[CapturedSource], *
             or any(not by_id[available[identity].source_id].core for identity in pending)):
         raise SemanticValidationError("semantic_coverage_pending_scope_invalid")
     result, seen = [], set()
-    for value in raw["observations"]:
+    for observation_index, value in enumerate(raw["observations"]):
         _keys(value, {"title", "scene_kind", "spans", "units", "topics", "claims"})
         title = _text(value["title"])
         if value["scene_kind"] not in SCENE_KINDS or not isinstance(value["spans"], list) or not value["spans"]:
@@ -1720,9 +1736,49 @@ def validate_extraction(raw: str | Mapping, sources: Sequence[CapturedSource], *
         if not any(by_id[span.source_id].core for span in spans):
             raise SemanticValidationError("semantic_context_without_core")
 
-        def referenced(indices):
-            if not isinstance(indices, list) or not indices or any(type(i) is not int or not 0 <= i < len(spans) for i in indices):
-                raise SemanticValidationError("semantic_invalid_span_reference")
+        original_index = observation_index if observation_indices is None else observation_indices[observation_index]
+
+        def invalid_reference(value, path, reason):
+            diagnostic = {"path": ["observations", original_index, *path], "reason": reason,
+                "value_type": type(value).__name__[:32], "index_base": 0,
+                "span_count": len(spans), "valid_range": [0, len(spans) - 1]}
+            mapping, mapping_bytes = [], 2
+            for index, span in enumerate(spans):
+                entry = {"index": index, "source_id": span.source_id, "span_id": span.span_id}
+                entry_bytes = len(_json(entry).encode("utf-8")) + 1
+                if len(mapping) == 64 or mapping_bytes + entry_bytes > 8192:
+                    break
+                mapping.append(entry)
+                mapping_bytes += entry_bytes
+            diagnostic["span_index_map"] = mapping
+            diagnostic["span_index_map_complete"] = len(mapping) == len(spans)
+            # Feedback contains only a bounded display of the offending value;
+            # full rejected JSON remains in the existing untrusted feedback.
+            if value is None or type(value) is bool or (type(value) is int and value.bit_length() <= 128) or (
+                    type(value) is float and math.isfinite(value)):
+                diagnostic["value"] = value
+            elif isinstance(value, str):
+                display = redact_urls_in_text(value)
+                diagnostic["value"] = display[:80]
+                diagnostic["value_truncated"] = len(display) > 80
+            elif isinstance(value, (dict, list)):
+                diagnostic["value_size"] = len(value)
+                if not value:
+                    diagnostic["value"] = value
+            else:
+                diagnostic["value_truncated"] = True
+            raise SemanticValidationError("semantic_invalid_span_reference", diagnostic=diagnostic)
+
+        def referenced(indices, path):
+            if not isinstance(indices, list):
+                invalid_reference(indices, path, "not_list")
+            if not indices:
+                invalid_reference(indices, path, "empty_list")
+            for position, index in enumerate(indices):
+                if type(index) is not int:
+                    invalid_reference(index, [*path, position], "not_integer")
+                if not 0 <= index < len(spans):
+                    invalid_reference(index, [*path, position], "out_of_range")
             if len(set(indices)) != len(indices):
                 raise SemanticValidationError("semantic_duplicate_span_reference")
             return tuple(spans[i].span_id for i in indices)
@@ -1730,13 +1786,13 @@ def validate_extraction(raw: str | Mapping, sources: Sequence[CapturedSource], *
         if not isinstance(value["units"], list) or not value["units"]:
             raise SemanticValidationError("semantic_empty_units")
         units = []
-        for unit in value["units"]:
+        for unit_index, unit in enumerate(value["units"]):
             _keys(unit, {"kind", "span_indices"}, {"text"})
             if unit["kind"] not in UNIT_KINDS:
                 raise SemanticValidationError("semantic_invalid_unit_kind")
             if unit["kind"] != "quote":
                 _keys(unit, {"kind", "text", "span_indices"})
-            refs = referenced(unit["span_indices"])
+            refs = referenced(unit["span_indices"], ["units", unit_index, "span_indices"])
             if pending is not None and not pending.intersection(refs):
                 raise SemanticValidationError("semantic_coverage_unit_without_pending_core")
             if unit["kind"] == "quote":
@@ -1769,9 +1825,9 @@ def validate_extraction(raw: str | Mapping, sources: Sequence[CapturedSource], *
         if not isinstance(value["claims"], list):
             raise SemanticValidationError("semantic_invalid_claims")
         claims = []
-        for claim in value["claims"]:
+        for claim_index, claim in enumerate(value["claims"]):
             _keys(claim, {"subject_id", "case_id", "condition", "channel", "version", "phase", "observed_at", "predicates", "span_indices"})
-            refs = referenced(claim["span_indices"])
+            refs = referenced(claim["span_indices"], ["claims", claim_index, "span_indices"])
             cited_sources = [by_id[span.source_id] for span in spans if span.span_id in refs]
             qualifiers = {}
             for field in ("subject_id", "case_id", "condition", "channel", "version", "phase"):
