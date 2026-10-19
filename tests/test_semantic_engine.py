@@ -1,4 +1,5 @@
 import json
+import hashlib
 import unittest
 import tempfile
 from dataclasses import asdict
@@ -63,6 +64,26 @@ def observation(source, *, namespace="semantic", kind="life", text=None, unit_ki
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_frozen_unit_policies_keep_their_original_prompt_bytes(self):
+        sources = [CapturedSource("core", "终端错误值 A 应改成 B。", True, 1),
+                   CapturedSource("context", "补充背景。", False, 2)]
+        # Recorded before the v5 change, for the exact same public synthetic
+        # sources. These identities protect each historical prompt, not style.
+        expected = {
+            None: "f291c0e255fb877973fe6d194492bdacd2de659e3d8e2d37704d456b66a4830e",
+            "retained-knowledge-v1": "7c39267505836ac17d62082b2de03e568b7513b8f519ac454f6fee0bd57d8fc3",
+            "retained-knowledge-v2": "45a0b69f2b031bdcb1596f619042e9e56802f820c8f4c324c787d4cf12f58c7b",
+            "retained-knowledge-v3": "92213b21e56b74c96b8c164c6cf6972ff9ab05ba428c6fcc362dccd495079d92",
+            "retained-knowledge-v4": "5d81a555112ba469ad7f627e0c54ff4832dddd34f92cf35bbc241031e4ed9470",
+        }
+        for policy, identity in expected.items():
+            with self.subTest(policy=policy):
+                prompt = extraction_prompt(sources, namespace="frozen-policy", unit_policy=policy)
+                self.assertEqual(hashlib.sha256(prompt.encode()).hexdigest(), identity)
+        fresh = extraction_prompt(sources, namespace="frozen-policy", unit_policy="retained-knowledge-v5")
+        self.assertIn("先判断证据是否有值得留下的具体内容或完整场景", fresh)
+        self.assertIn("不是按长度、特定词或消息类型", fresh)
+
     def test_multiple_independent_scenes_preserve_pure_life(self):
         sources = [CapturedSource("s1", "新版本可用，本地需要重启。"),
                    CapturedSource("s2", "今天沿河走了很久，回来买了一束花。")]
@@ -770,7 +791,7 @@ class EngineIntegrationTests(unittest.TestCase):
         with patch("core.semantic.engine.extraction_prompt", wraps=extraction_prompt) as prompts:
             engine.extract_batch("frozen-context")
         self.assertEqual([call.kwargs["unit_policy"] for call in prompts.call_args_list],
-                         ["retained-knowledge-v4", None])
+                         ["retained-knowledge-v5", None])
         self.assertEqual({s["source_id"] for s in seen[1] if not s["core"]}, {s.source_id for s in sources[22:24]})
         self.assertEqual([s["source_id"] for s in seen[1]], [s.source_id for s in sources[24:] + sources[22:24]])
         with closing(self.store.connect()) as db:

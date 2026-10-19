@@ -79,18 +79,27 @@ from the same material. Incomplete scope cannot combine separate trials, and a
 newer overlapping contrary report prevents an unconditional current-state match.
 Incremental BodyPlans may rewrite automatic prose when new details join its
 stable block; unchanged blocks, exact quotations and manual edits remain
-protected. Current writer artifacts use v9, and the verifier accepts v2-v9 so
+protected. Current writer artifacts use v10, and the verifier accepts v2-v10 so
 current output and retained earlier artifacts keep their independent acceptance
 checks. These are candidate source behaviors, not evidence of a private
 generation being repaired, re-rendered or activated.
+The writer receives an explicit evidence sequence ordered by offset-aware
+source timestamps; undated evidence stays undated. Unit order and commit order
+do not establish event order. This presentation input does not change canonical
+units, their indices, evidence identities or stable paragraph homes.
 The canonical reading adapter now separates quote provenance from mandatory
 full-message body wording. Connected exchanges can be composed with selected
 quotations while every source remains reachable; remaining citations use a
 collapsible source callout. Extraction and resolution guidance retains whole
 scenes without treating message or Observation counts as required page counts.
 Structural checks do not establish editorial quality or owner acceptance.
-Fresh extraction pages and coverage jobs bind `retained-knowledge-v4`; older
-v1/v2/v3 page jobs retain their exact frozen inputs, versions and outcomes.
+Fresh extraction pages and coverage jobs bind `retained-knowledge-v5`; older
+None/v1/v2/v3/v4 jobs retain their exact frozen inputs, versions and outcomes.
+Fresh coverage binds a versioned planner and exact pending fragments, excludes
+terminal primary fragments and admits content units only with pending core
+support. Context evidence and legitimate claim lineage remain available. Known
+invalid output uses the bounded correction loop; unknown parent or child work
+blocks before dispatch.
 New extraction pages include the preceding bounded page as ordered non-core
 context instead of only its last two messages. Existing page jobs keep their
 frozen inputs and outcomes; this change does not silently re-extract old work.

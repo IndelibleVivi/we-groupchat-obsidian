@@ -134,6 +134,36 @@ class ReadingHarness(unittest.TestCase):
 
 
 class ProjectionTests(ReadingHarness):
+    def test_body_verbatim_repair_names_the_actual_obligation(self):
+        snapshot = self.snapshot()
+        def repair(prompt):
+            intro = json.loads(prompt)["task"].split("只返回 schema", 1)[0]
+            self.assertIn("body_plan_lost_evidence", intro)
+            self.assertIn("逐字复制 unit.verbatim", intro)
+            return self.paged_response(prompt)
+        provider = ScriptedTextProvider({"blocks": [{"id": "story", "role": "narrative",
+            "text": "猫占了纸箱。", "unit_indices": [0]}]}, repair)
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger).plan(
+            snapshot, request_id="verbatim-repair-explanation")
+        self.assertEqual(plan.blocks[0].text, snapshot.units[0].text)
+        self.assertEqual(len(provider.calls), 2)
+
+    def test_body_source_order_uses_offset_times_without_reordering_unit_homes(self):
+        units = (ReadingUnit("late-unit", "后来收到文件。", ("late",)),
+                 ReadingUnit("early-unit", "先提出问题。", ("early",)),
+                 ReadingUnit("unknown-unit", "时间未知的材料。", ("unknown",)))
+        snapshot = replace(self.snapshot(), units=units, evidence=(
+            EvidenceExcerpt("late", "后来收到文件。", source_time="2026-10-09T10:10:00+08:00"),
+            EvidenceExcerpt("unknown", "时间未知的材料。", source_time="2026-10-09"),
+            EvidenceExcerpt("early", "先提出问题。", source_time="2026-10-09T02:00:00+00:00")))
+        prompt = json.loads(BodyPlanWriter._prompt(snapshot, None, {}))
+        self.assertEqual(prompt["source_sequence"], ["early", "late"])
+        self.assertEqual(prompt["undated_evidence"], ["unknown"])
+        self.assertEqual([u["id"] for u in prompt["snapshot"]["units"]],
+                         [u.id for u in units])
+        self.assertEqual(prompt["required_unit_indices"], [0, 1, 2])
+        self.assertEqual(snapshot.units, units)
+
     @staticmethod
     def paged_response(prompt):
         value = json.loads(prompt)
@@ -166,7 +196,7 @@ class ProjectionTests(ReadingHarness):
         self.assertIsNone(self.publisher.resolve(snapshot.item_id))
         root = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='large-body'")
         self.assertEqual(root["status"], "accepted")
-        self.assertEqual(root["prompt_version"], "body-paged-v9")
+        self.assertEqual(root["prompt_version"], "body-paged-v10")
         count = len(provider.calls)
         resumed = writer.plan(snapshot, request_id="large-body")
         self.assertEqual(resumed, plan)
@@ -607,13 +637,14 @@ class ProjectionTests(ReadingHarness):
         # A longer prompt or smaller budget can now choose different child IDs.
         from core.semantic.projections import accepted_text_artifact
         snapshot = self.snapshot()
-        for suffix in (":page:0", ":group:0:fragment:0", ":repair:old", ""):
-            with self.subTest(suffix=suffix):
-                root = "body_%_" + str(len(suffix))
+        for version, suffix in ((version, suffix) for version in ("body-plan-v4", "body-plan-v9")
+                                for suffix in (":page:0", ":group:0:fragment:0", ":repair:old", "")):
+            with self.subTest(version=version, suffix=suffix):
+                root = "body_%_" + version + str(len(suffix))
                 old = ScriptedTextProvider(RuntimeError("old request outcome unknown"))
                 with self.assertRaisesRegex(RuntimeError, "old request outcome unknown"):
                     accepted_text_artifact(self.ledger, old, prompt="old prompt " + suffix,
-                        request_id=root + suffix, prompt_version="body-plan-v4", validate=lambda raw: raw)
+                        request_id=root + suffix, prompt_version=version, validate=lambda raw: raw)
                 provider = ScriptedTextProvider(self.paged_response)
                 writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
                 with self.assertRaisesRegex(ReadingError, "text_provider_outcome_unknown"):
@@ -1009,7 +1040,7 @@ class ProjectionTests(ReadingHarness):
                     with self.assertRaisesRegex(ReadingError, "body_plan_unit_coverage"):
                         accepted_text_artifact(self.ledger, provider,
                             prompt=BodyPlanWriter._prompt(snapshot, None, {}), request_id=root,
-                            prompt_version="body-plan-v9", validate=lambda raw: validate_body_plan(
+                            prompt_version="body-plan-v10", validate=lambda raw: validate_body_plan(
                                 snapshot, BodyPlanWriter._response(snapshot, raw)).to_json())
                     expected = "text_request_already_failed"
                 else:

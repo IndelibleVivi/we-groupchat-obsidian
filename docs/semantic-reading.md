@@ -35,6 +35,28 @@ words: speaker, story subject and quotation author remain separate. Body and
 Brief prompts preserve readable names when they explain experiences, positions,
 corrections or stories, without requiring every sentence to name someone.
 
+Fresh extraction pages use `unit_policy="retained-knowledge-v5"`. Content units
+retain specific knowledge, meaningful wording and complete scenes. Pure
+communication actions or isolated invitations without identifiable content may
+receive a reasoned `context_only` disposition; raw messages and resource
+references remain preserved. This is a semantic judgment, without length,
+keyword or message-type filters; daily experiences, stories, gossip and reactions
+with retained content remain eligible.
+
+Fresh adjacent-context coverage binds `planning="pending-fragments-v1"` and the
+exact `pending_span_ids` left unclassified by the primary pages. Terminal
+classified fragments and already-cited spans do not reenter coverage core merely
+because another fragment of the same message is pending. Every retained coverage
+content unit must cite one of that page's pending core spans. Joint core/context
+units, richer non-core Observation evidence and separately grounded typed claims
+for withdrawal or restatement lineage remain valid. A core reference attached
+only to the Observation cannot admit units grounded entirely in old context.
+Invalid output uses the existing bounded correction loop before acceptance;
+accepted content is never silently trimmed. None/v1/v2/v3/v4 pages retain their
+exact frozen prompts, inputs and outcomes, including accepted artifacts that
+would not pass the new admission rule. Unknown parent or child outcomes block
+before another provider call; they never become fresh-policy replacements.
+
 The projection input is `ReadingSnapshot`: an explicit immutable presentation
 snapshot containing canonical Item ID/content revision, semantic time, units,
 evidence excerpts, available resource locations and typed relations. The
@@ -139,7 +161,9 @@ diagnostic bound to its exact generation, prompt, request and route; it is not
 an accepted Body artifact. The repair uses a deterministic `:repair:` child
 request, recorded before dispatch. Its bounded prompt replaces only the generic
 introduction with the validation code and keeps the complete snapshot, schema
-and concrete writing/validation instructions. Successful repair artifacts replay
+and concrete writing/validation instructions. A lost-evidence diagnostic also
+points the writer to the exact `unit.verbatim` obligation; it does not relax it.
+Successful repair artifacts replay
 without another call, including after a crash before file publication; the
 original failed row remains unchanged. A failed repair stays exhausted on resume
 or a caller's fresh request ID for the same input. Unknown/running outcomes,
@@ -149,7 +173,7 @@ after dispatch remains unresolved and blocks subsequent calls, including across
 Body versions and page/fragment repartitioning. Calling the pure `plan` helper
 without a ledger is intended for isolated rendering tests, not runtime
 publication and does not perform this durable repair.
-Current Body artifacts are `body-plan-v9` and `body-paged-v9`. They ask for one
+Current Body artifacts are `body-plan-v10` and `body-paged-v10`. They ask for one
 coherent reader-first note with grounded attribution, preserve each retained
 unit's unique home, and carry the program-owned metadata and exact explicit
 verbatim, step and counterevidence obligations from the canonical snapshot.
@@ -161,6 +185,11 @@ Exact message times normally stay on source pages. If the body needs a time of
 day to explain a change, writer guidance requires the supplied UTC offset;
 it must not present a revision time as the event time or silently assume the
 reader's local timezone. Editorial acceptance still checks the actual output.
+The writer receives `source_sequence`, ordered only by offset-aware source
+timestamps, and separate `undated_evidence`. Equal timestamps do not imply
+causality, and unit order or commit order never establishes event order. This
+input preserves the original unit indices, evidence identities and paragraph
+homes; it supplies chronology for composition, not a new canonical clock.
 Bare URL paths do not establish an unseen page's title, author or conclusions;
 filenames do not establish attachment contents. Writer guidance preserves the
 references without inventing a synopsis for unread material.

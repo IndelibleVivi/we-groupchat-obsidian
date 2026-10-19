@@ -73,6 +73,30 @@ class CoverageEngineTests(unittest.TestCase):
             return {row[0]: row[1] for row in connection.execute(
                 "SELECT source_version_id,status FROM source_dispositions")}
 
+    def historical_coverage(self, batch_id, policy, provider, messages=None):
+        """Freeze a never-dispatched historical child through the real job API."""
+        capture(self.store, batch_id, messages or ["待理解的片段 " + batch_id, "明确邻居"])
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        intercepted = {}
+        original = engine._accepted_extract_page
+        def freeze(child, sources, span_ids, namespace, generation, *, coverage=False):
+            if not coverage:
+                return original(child, sources, span_ids, namespace, generation)
+            intercepted.update(child)
+            raise RuntimeError("synthetic before historical dispatch")
+        with patch.object(engine, "_accepted_extract_page", side_effect=freeze):
+            with self.assertRaisesRegex(RuntimeError, "synthetic before historical dispatch"):
+                engine.extract_batch(batch_id)
+        inputs = dict(intercepted["inputs"])
+        inputs.pop("pending_span_ids")
+        versions = {"prompt": "semantic-extraction-coverage-v2"}
+        if policy is not None:
+            versions["unit_policy"] = policy
+        with closing(self.store.connect()) as db:
+            db.execute("DELETE FROM jobs WHERE job_id=?", (intercepted["job_id"],))
+            db.commit()
+        return engine, engine.jobs.ensure("extract_coverage", inputs, versions)
+
     def test_bounded_context_supplement_finishes_an_unclassified_member(self):
         capture(self.store, "bounded", ["晚上老地方见。", "好，就在美术馆门口见。"])
         text = CoverageText(primary=lambda value: "美术馆" in value, coverage=lambda value: True)
@@ -146,6 +170,275 @@ class CoverageEngineTests(unittest.TestCase):
         self.assertTrue(cited & set(inputs['core_source_ids']))
         self.assertTrue(cited & set(inputs['context_source_ids']))
         self.assertTrue(inputs['context_span_ids'])
+
+    def test_joint_unit_can_keep_context_only_typed_claim_evidence(self):
+        capture(self.store, "claim-context", ["这一段是对此前报告的修正。", "此前报告的状态。"])
+        class ContextClaim(CoverageText):
+            def generate(self, prompt, **kwargs):
+                if "Bounded adjacent context" not in prompt:
+                    return super().generate(prompt, **kwargs)
+                self.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                core = next(source for source in data if source["core"])
+                context = next(source for source in data if not source["core"])
+                return TextResult(json.dumps({"observations": [{"title": "修正与此前报告", "scene_kind": "technical",
+                    "spans": [{"source_id": source["source_id"], "span_id": source["spans"][0]["span_id"]}
+                              for source in (core, context)],
+                    "units": [{"kind": "counterevidence", "text": "修正针对此前的报告。", "span_indices": [0, 1]}],
+                    "topics": [], "claims": [{"subject_id": None, "case_id": None, "condition": None,
+                        "channel": None, "version": None, "phase": "prior report",
+                        "observed_at": context["occurred_at"], "predicates": {"status": "prior"}, "span_indices": [1]}]}]}), self.route)
+        result = SemanticEngine(self.store, ContextClaim(primary=lambda text: text == "此前报告的状态。"),
+                                FakeDecision()).extract_batch("claim-context")
+        observation = next(value for value in result["observations"] if value["claims"])
+        self.assertEqual(len(observation["units"][0]["span_ids"]), 2)
+        self.assertEqual(observation["claims"][0]["span_ids"], [observation["spans"][1]["span_id"]])
+
+    def test_noncore_only_units_cannot_borrow_an_observation_core_reference(self):
+        messages = ["普通接话 " + str(index) for index in range(26)]
+        messages[20:25] = ["终端故障的修复办法。", "文件用途的说明。", "这个呢", "午餐的独立经历。", "嗯"]
+        capture(self.store, "borrowed-core", messages)
+        class BorrowedCore(CoverageText):
+            def generate(self, prompt, **kwargs):
+                if "Bounded adjacent context" not in prompt:
+                    return super().generate(prompt, **kwargs)
+                self.coverage_prompts.append(prompt)
+                self.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                core = next(source for source in data if source["core"])
+                if "Correct the prior JSON" in prompt:
+                    return TextResult(json.dumps({"observations": [], "dispositions": {
+                        core["source_id"]: {"status": "context_only", "reason": "isolated unclear reply"}}}), self.route)
+                context = [source for source in data if not source["core"]]
+                refs = [{"source_id": source["source_id"], "span_id": source["spans"][0]["span_id"]}
+                        for source in (core, *context)]
+                return TextResult(json.dumps({"observations": [{"title": "borrowed old content", "scene_kind": "other",
+                    "spans": refs, "units": [{"kind": "quote", "span_indices": [index]}
+                                             for index in range(1, len(refs))], "topics": [], "claims": []}]}), self.route)
+        text = BorrowedCore(primary=lambda value: value in (messages[20], messages[21], messages[23]),
+                            noise=lambda value: value != messages[22])
+        decision = FakeDecision(defer=True)
+        result = SemanticEngine(self.store, text, decision).process_batch("borrowed-core")
+        self.assertEqual(len(text.coverage_prompts), 2, "invalid units must reach the known-output correction loop")
+        self.assertIn("semantic_coverage_unit_without_pending_core", text.coverage_prompts[1])
+        self.assertEqual(result["status"], "deferred")
+        with closing(self.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM observations").fetchone()[0], 3)
+            row = db.execute("SELECT j.attempt,a.artifact_json FROM jobs j JOIN accepted_job_artifacts a USING(job_id) "
+                             "WHERE j.kind='extract_coverage'").fetchone()
+        self.assertEqual(row["attempt"], 2)
+        self.assertEqual(json.loads(row["artifact_json"])["observations"], [])
+        self.assertIsNone(result.get("processing_receipt"))
+
+    def test_terminal_uncited_fragments_do_not_reenter_fresh_coverage_core(self):
+        capture(self.store, "terminal-fragments", ["x" * 60000])
+        class TerminalPrefix(CoverageText):
+            def __init__(self):
+                super().__init__()
+                self.primary_pages, self.coverage_pages = [], []
+            def generate(self, prompt, **kwargs):
+                if not prompt.startswith("The following captured"):
+                    return super().generate(prompt, **kwargs)
+                self.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                if "Bounded adjacent context" in prompt:
+                    self.coverage_pages.append(data)
+                    status = "context_only"
+                else:
+                    self.primary_pages.append(data)
+                    status = "noise" if len(self.primary_pages) == 1 else "unclassified"
+                return TextResult(json.dumps({"observations": [], "dispositions": {
+                    source["source_id"]: {"status": status, "reason": "explicit synthetic fragment status"}
+                    for source in data if source["core"]}}), self.route)
+        text = TerminalPrefix()
+        result = SemanticEngine(self.store, text, FakeDecision()).process_batch("terminal-fragments")
+        self.assertEqual(result["status"], "complete")
+        self.assertGreater(len(text.primary_pages), 1)
+        terminal = {span["span_id"] for source in text.primary_pages[0] if source["core"] for span in source["spans"]}
+        pending = {span["span_id"] for page in text.primary_pages[1:] for source in page if source["core"]
+                   for span in source["spans"]}
+        covered = {span["span_id"] for page in text.coverage_pages for source in page if source["core"]
+                   for span in source["spans"]}
+        self.assertTrue(terminal.isdisjoint(covered), "a terminal page is not pending merely because its source has another pending page")
+        self.assertEqual(covered, pending)
+        with closing(self.store.connect()) as db:
+            jobs = [(json.loads(row[0]), json.loads(row[1])) for row in db.execute(
+                "SELECT inputs_json,versions_json FROM jobs WHERE kind='extract_coverage'")]
+        for inputs, versions in jobs:
+            self.assertEqual(set(inputs["pending_span_ids"]), set(inputs["span_ids"]))
+            self.assertTrue(set(inputs["pending_span_ids"]) <= pending)
+            self.assertEqual(versions["planning"], "pending-fragments-v1")
+            self.assertEqual(versions["unit_policy"], "retained-knowledge-v5")
+
+    def test_terminal_fragments_in_a_frozen_old_page_keep_their_original_scope(self):
+        from dataclasses import asdict
+        from core.semantic.engine import CapturedSource, prepare_spans
+        class Prefix(CoverageText):
+            primary_count = 0
+            def generate(self, prompt, **kwargs):
+                if not prompt.startswith("The following captured") or "Bounded adjacent context" in prompt:
+                    return super().generate(prompt, **kwargs)
+                self.primary_count += 1
+                self.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                return TextResult(json.dumps({"observations": [], "dispositions": {
+                    source["source_id"]: {"status": "noise" if self.primary_count == 1 else "unclassified",
+                                          "reason": "explicit fragment status"}
+                    for source in data if source["core"]}}), self.route)
+        provider = Prefix()
+        engine, intercepted = self.historical_coverage("old-fragments", "retained-knowledge-v4", provider,
+                                                      ["x" * 60000])
+        member = self.store.get_batch("old-fragments")["members"][0]
+        spans = prepare_spans([CapturedSource(member["source_version_id"], member["text"])], namespace=self.store.generation_id)
+        old_page = next(engine._pages([asdict(span) for span in spans], max_bytes=22000, max_count=24))
+        inputs = dict(intercepted["inputs"], span_ids=[span["span_id"] for span in old_page])
+        with closing(self.store.connect()) as db:
+            db.execute("DELETE FROM jobs WHERE job_id=?", (intercepted["job_id"],))
+            db.commit()
+        old = engine.jobs.ensure("extract_coverage", inputs, intercepted["versions"])
+        result = engine.extract_batch("old-fragments")
+        self.assertTrue(result["receipt"])
+        with closing(self.store.connect()) as db:
+            jobs = [dict(row) for row in db.execute("SELECT * FROM jobs WHERE kind='extract_coverage'")]
+        self.assertEqual(next(json.loads(row["inputs_json"]) for row in jobs if row["job_id"] == old["job_id"]), old["inputs"])
+        new = [json.loads(row["inputs_json"]) for row in jobs if row["job_id"] != old["job_id"]]
+        self.assertTrue(new)
+        self.assertTrue(all(set(value["pending_span_ids"]).isdisjoint(inputs["span_ids"]) for value in new))
+
+    def test_every_terminal_long_source_fragment_finishes_without_coverage(self):
+        capture(self.store, "all-terminal", ["x" * 60000])
+        provider = CoverageText(primary=lambda text: False, noise=lambda text: True)
+        result = SemanticEngine(self.store, provider, FakeDecision()).process_batch("all-terminal")
+        self.assertEqual(result["status"], "complete")
+        self.assertGreater(len(provider.calls), 1)
+        self.assertEqual(provider.coverage_prompts, [])
+        self.assertEqual(set(self.dispositions().values()), {"noise"})
+
+    def test_later_primary_evidence_can_finish_pending_spans_without_another_provider_pass(self):
+        messages = ["嗯 " + str(index) for index in range(25)]
+        messages[0], messages[-1] = "前面的不完整问题。", "后面的完整回答。"
+        capture(self.store, "later-primary", messages)
+        class LaterAnswer(CoverageText):
+            def generate(self, prompt, **kwargs):
+                if not prompt.startswith("The following captured"):
+                    return super().generate(prompt, **kwargs)
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                answer = next((source for source in data if source["core"] and
+                               any(span["excerpt"] == messages[-1] for span in source["spans"])), None)
+                if answer is None:
+                    return super().generate(prompt, **kwargs)
+                self.calls.append(kwargs["request_id"])
+                question = next(source for source in data if not source["core"] and
+                                any(span["excerpt"] == messages[0] for span in source["spans"]))
+                return TextResult(json.dumps({"observations": [{"title": "完整问答", "scene_kind": "other",
+                    "spans": [{"source_id": source["source_id"], "span_id": source["spans"][0]["span_id"]}
+                              for source in (answer, question)],
+                    "units": [{"kind": "fact", "text": "后续回答解释了前面的问题。", "span_indices": [0, 1]}],
+                    "topics": [], "claims": []}]}), self.route)
+        provider = LaterAnswer(primary=lambda text: False, noise=lambda text: text != messages[0])
+        result = SemanticEngine(self.store, provider, FakeDecision(possible=0)).extract_batch("later-primary")
+        self.assertTrue(result["receipt"])
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(provider.coverage_prompts, [])
+
+    def test_repeated_invalid_coverage_units_never_become_an_accepted_artifact(self):
+        capture(self.store, "never-admit", ["模糊接话。", "明确邻居"])
+        class InvalidUnits(CoverageText):
+            def generate(self, prompt, **kwargs):
+                if "Bounded adjacent context" not in prompt:
+                    return super().generate(prompt, **kwargs)
+                self.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                core = next(source for source in data if source["core"])
+                context = next(source for source in data if not source["core"])
+                return TextResult(json.dumps({"observations": [{"title": "old context", "scene_kind": "other",
+                    "spans": [{"source_id": source["source_id"], "span_id": source["spans"][0]["span_id"]}
+                              for source in (core, context)],
+                    "units": [{"kind": "quote", "span_indices": [1]}], "topics": [], "claims": []}]}), self.route)
+        provider = InvalidUnits(primary=lambda text: text == "明确邻居")
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_coverage_unit_without_pending_core"):
+            SemanticEngine(self.store, provider, FakeDecision()).extract_batch("never-admit")
+        with closing(self.store.connect()) as db:
+            row = db.execute("SELECT job_id,state,attempt FROM jobs WHERE kind='extract_coverage'").fetchone()
+            accepted = db.execute("SELECT 1 FROM accepted_job_artifacts WHERE job_id=?", (row["job_id"],)).fetchone()
+            self.assertEqual(db.execute("SELECT count(*) FROM extraction_receipts").fetchone()[0], 0)
+        self.assertEqual((row["state"], row["attempt"]), ("failed", 3))
+        self.assertIsNone(accepted)
+
+    def test_frozen_policy_children_reuse_accepted_artifacts_without_new_admission(self):
+        class ContextUnit(CoverageText):
+            def generate(self, prompt, **kwargs):
+                if "Bounded adjacent context" not in prompt:
+                    return super().generate(prompt, **kwargs)
+                self.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                core = next(source for source in data if source["core"])
+                context = next(source for source in data if not source["core"])
+                return TextResult(json.dumps({"observations": [{"title": "historical context unit", "scene_kind": "other",
+                    "spans": [{"source_id": source["source_id"], "span_id": source["spans"][0]["span_id"]}
+                              for source in (core, context)],
+                    "units": [{"kind": "quote", "span_indices": [1]}], "topics": [], "claims": []}]}), self.route)
+        for policy in (None, *("retained-knowledge-v" + str(index) for index in range(1, 5))):
+            with self.subTest(policy=policy):
+                batch_id = "accepted-frozen-" + str(policy)
+                provider = ContextUnit(primary=lambda text: text == "明确邻居")
+                engine, old = self.historical_coverage(batch_id, policy, provider)
+                original = engine._accepted
+                def stop_parent(job, callback):
+                    if job["kind"] == "extract":
+                        raise RuntimeError("synthetic after historical child acceptance")
+                    return original(job, callback)
+                with patch.object(engine, "_accepted", side_effect=stop_parent), \
+                     patch("core.semantic.engine.extraction_prompt", wraps=extraction_prompt) as prompts:
+                    with self.assertRaisesRegex(RuntimeError, "historical child acceptance"):
+                        engine.extract_batch(batch_id)
+                self.assertEqual([call.kwargs["unit_policy"] for call in prompts.call_args_list], [policy])
+                with closing(self.store.connect()) as db:
+                    before = tuple(db.execute("SELECT artifact_hash,artifact_json FROM accepted_job_artifacts WHERE job_id=?",
+                                              (old["job_id"],)).fetchone())
+                sent = list(provider.calls)
+                with patch("core.semantic.engine.validate_extraction", side_effect=AssertionError("revalidated accepted output")):
+                    engine.extract_batch(batch_id)
+                self.assertEqual(provider.calls, sent)
+                with closing(self.store.connect()) as db:
+                    after = tuple(db.execute("SELECT artifact_hash,artifact_json FROM accepted_job_artifacts WHERE job_id=?",
+                                             (old["job_id"],)).fetchone())
+                    count = db.execute("SELECT count(*) FROM jobs WHERE kind='extract_coverage' AND "
+                        "json_extract(inputs_json,'$.parent_job_id')=?", (old["inputs"]["parent_job_id"],)).fetchone()[0]
+                self.assertEqual(after, before)
+                self.assertEqual(count, 1)
+
+    def test_unknown_frozen_unit_policies_block_before_fresh_job_or_provider(self):
+        for policy in (None, *("retained-knowledge-v" + str(index) for index in range(1, 5))):
+            with self.subTest(policy=policy):
+                batch_id = "unknown-frozen-" + str(policy)
+                provider = CoverageText(primary=lambda text: False)
+                engine, old = self.historical_coverage(batch_id, policy, provider)
+                engine.jobs.claim(old["job_id"], engine.worker_id)
+                engine.jobs.fail(old["job_id"], engine.worker_id, "synthetic_unknown", unknown=True)
+                sent = list(provider.calls)
+                with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+                    engine.extract_batch(batch_id)
+                self.assertEqual(provider.calls, sent)
+                with closing(self.store.connect()) as db:
+                    rows = list(db.execute("SELECT job_id,state FROM jobs WHERE kind='extract_coverage' AND "
+                        "json_extract(inputs_json,'$.parent_job_id')=?", (old["inputs"]["parent_job_id"],)))
+                self.assertEqual([tuple(row) for row in rows], [(old["job_id"], "unknown")])
+
+    def test_unknown_parent_blocks_pending_frozen_coverage_before_dispatch(self):
+        provider = CoverageText(primary=lambda text: False)
+        engine, old = self.historical_coverage("unknown-parent", "retained-knowledge-v4", provider)
+        parent_id = old["inputs"]["parent_job_id"]
+        engine.jobs.claim(parent_id, engine.worker_id)
+        engine.jobs.fail(parent_id, engine.worker_id, "synthetic_parent_unknown", unknown=True)
+        sent = list(provider.calls)
+        with self.assertRaisesRegex(SemanticValidationError, "semantic_job_busy_or_unknown"):
+            engine.extract_batch("unknown-parent")
+        self.assertEqual(provider.calls, sent)
+        with closing(self.store.connect()) as db:
+            rows = list(db.execute("SELECT job_id,state FROM jobs WHERE kind='extract_coverage' AND "
+                "json_extract(inputs_json,'$.parent_job_id')=?", (parent_id,)))
+        self.assertEqual([tuple(row) for row in rows], [(old["job_id"], "pending")])
 
     def test_coverage_prompt_upgrade_cannot_bypass_an_old_unknown_job(self):
         capture(self.store, 'upgrade', ['An unclear scene', 'An explanatory neighbour'])

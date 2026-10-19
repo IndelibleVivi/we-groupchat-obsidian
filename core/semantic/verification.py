@@ -1182,7 +1182,8 @@ class RebuildVerifier:
                         "body-plan-v2", "body-paged-v2", "body-plan-v3", "body-paged-v3",
                         "body-plan-v4", "body-paged-v4", "body-plan-v5", "body-paged-v5",
                         "body-plan-v6", "body-paged-v6", "body-plan-v7", "body-paged-v7",
-                        "body-plan-v8", "body-paged-v8", "body-plan-v9", "body-paged-v9"} for a in matches):
+                        "body-plan-v8", "body-paged-v8", "body-plan-v9", "body-paged-v9",
+                        "body-plan-v10", "body-paged-v10"} for a in matches):
                     self.issue("body_provider_version_conflict", "semantic_pending")
             required_spans = set().union(*(self.evidence[oid] for oid in self.item_observations[iid]))
             if required_spans and not self._has("reader_source_locations"):

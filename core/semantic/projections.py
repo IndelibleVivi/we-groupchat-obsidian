@@ -723,41 +723,51 @@ class BodyPlanWriter:
 
     @staticmethod
     def _prompt(snapshot, previous, unchanged, **context):
+        # Canonical unit order expresses retained responsibilities, and can
+        # combine observations committed in a different order from the source.
+        # Give the writer an explicit evidence chronology without reordering
+        # units, changing their indices or manufacturing dates for old excerpts.
+        dated, undated = [], []
+        for evidence in snapshot.evidence:
+            try:
+                instant = datetime.fromisoformat(evidence.source_time)
+                if instant.utcoffset() is None:
+                    raise ValueError
+            except (TypeError, ValueError):
+                undated.append(evidence.id)
+            else:
+                dated.append((instant, evidence.id))
+        dated.sort(key=lambda entry: entry[0])
         prompt = {
-            "task": "为会回来阅读这件事的人，写一篇持续更新的 Obsidian 笔记。生活故事与技术讨论同样认真对待。"
-                    "只返回 schema 要求的 JSON 对象 {blocks:[...]}。unit_indices 选给定 snapshot.units 的序号，"
-                    "required_unit_indices 中的每个序号恰好一次，归入稳定 block。即使两个单元讲同一件事，"
-                    "也要把两个序号都放入讲这件事的 block，正文合写一次即可。程序绑定身份、revision、证据、资源与状态；"
-                    "不要输出内部 ID、处理说明、frontmatter 或 H1，标题由 publisher 提供。\n"
-                    "直接写有内容的正文：技术页围绕问题、办法、结果和适用条件，生活页围绕发生的事情、"
-                    "有意味的接话、反应和后文。不要逐条转述消息、按发言者列清单，或套摘要/事实/状态模板。"
-                    "短小的事情可以一段讲完；有层次的内容可用自然段、列表或比较表。合并相互重叠的"
-                    "单元与引用时，连续场景保持连续叙述，只为独立主题或阶段分节，不给每句接话单列小标题。"
-                    "一件事只讲一次。单元是内容责任，不是一句必须复制的话。单纯感谢、"
-                    "接话、发图次序和取证说明的证据仍有归属，正文仅在理解事情需要时提及；实质性细节、"
-                    "步骤、反证、条件、不同人的经历和有意味的原话不可丢。\n"
-                    "只用所供材料写事实，不补背景、因果、动机、感受、结果或结尾启示。问题、猜测和"
-                    "转述仍保持其性质；不确定性在影响理解时自然说明，不追加‘未说明/只能确认’审计旁白。"
-                    "保留所供称呼、归属、代码与技术词；性别未明确时用名字，不从名字或口吻推断他/她。"
-                    "不要把分享者、经历中的人和引文作者混为一人，也不编造图像或文件正文。\n"
-                    "裸链接只证明有人分享了这个地址，不得从 URL path/slug 推断网页的真实标题、作者或结论。"
-                    "文件名只证明文件引用，不证明附件内部内容；保留链接和文件引用，不替未读取的材料写简介。\n"
-                    "精确消息在来源页。quote-role 单元可忠实转述，选用能承载细节、语气或转折的准确措辞；"
-                    "不要先总结再全文重复引用，也不要照搬 [回复] 等聊天包装。短引文放句内，长引文用带归属的"
-                    "blockquote。特别注意：unit.verbatim 的每一段必须逐字原样出现在该单元所在 block，"
-                    "包括虚词、标点和术语，不得同义改写或缩写；这适用于步骤、反证和更正义务。"
-                    "将这些原样片段自然接入正文，避免另外重复解释同一内容。\n"
-                    "精确时间留在来源页，仅在解释事件或变化时写日期时间，不把 semantic_at 修订时间当事件时间；"
-                    "正文一旦写出具体时分，必须同时标出 source_time 所给的 UTC offset，不裸写时分，"
-                    "也不换成未声明的本机时区。增量写作保留已有 block ID、全部 retained unit/evidence/resource 的"
-                    "原 home。新细节回答或限定原来的点时，改写收到新单元的自动段落；只给独立部分或真实新场景"
-                    "建新 block。没有收到新增或变化单元的 block 保持精确原字节，不顺手润色。手改冲突由程序处理。"
-                    "retracted/contested 单元须以 correction/historical/counterevidence role 明确 changed status，"
-                    "保留其原话，不能继续写成当前结论。\n"
+            "task": "把材料编辑成值得再读的 Obsidian 笔记：让读者读事情本身，技术与生活内容同样认真对待。"
+                    "只返回 schema 要求的 JSON 对象 {blocks:[...]}。required_unit_indices 每个序号在 unit_indices "
+                    "中恰好一次，归入稳定 block；重叠单元同属一个 block，正文合写一次。程序绑定身份、revision、"
+                    "证据、资源与状态；不输出内部 ID、处理说明、frontmatter 或 H1。\n"
+                    "按事情的内在关系组织正文：技术页直接解释问题、办法、结果和条件；生活页从具体经历或场景"
+                    "进入，连起有意味的反应和后文。把同一层意思整合在一处，保留不同人的经历与判断。短事一段"
+                    "即可，只为独立主题分节；不用逐条发言、人物清单或摘要模板。一事只讲一次。单元是内容责任，"
+                    "不是必抄的话：感谢、接话、发图动作仅在理解需要时提及，实质细节、条件、步骤和反证不可丢。\n"
+                    "只用所供材料，不补背景、因果、动机、感受、结果或结尾启示。疑问、猜测、转述保持其性质，"
+                    "只在影响理解时说明不确定性，不写取证审计旁白。保留称呼、归属、代码与术语；speaker_name "
+                    "即使为‘您’也是来源称呼，不是在叫读者。性别不明时用名字。发言者、经历主体和引文作者分清。"
+                    "保留资源引用；URL slug 不证明网页标题、作者或内容，文件名也不证明未读图文内容。\n"
+                    "精确消息在来源页，quote-role 可忠实转述或选用准确措辞，不照搬聊天包装。短引文句内呈现，"
+                    "长引文用带归属的 blockquote，不先概括再重复全文。unit.verbatim 每段必须逐字出现在其 home，"
+                    "含虚词、标点和术语，适用于显式原话、步骤、反证与更正；自然接入正文，不另外重复解释。\n"
+                    "source_sequence 按已知 source_time 排列证据，同刻不代表因果；undated_evidence 先后未知。"
+                    "units 序号和入库次序不是事件先后；可按主题组织，但‘接着/此前/最后’须符合来源时间。"
+                    "日期时间仅在理解需要时写；semantic_at 不是事件时间，具体时分须带 source_time 的 UTC offset，"
+                    "不换成未声明的本机时区。\n"
+                    "增量保留已有 block ID 与 retained unit/evidence/resource 的原 home；新细节回答或限定原点时，"
+                    "改写接收它的自动段落，独立部分可新建 block。未收到新增或变化单元的 block 保持原字节。"
+                    "手改冲突由程序处理。retracted/contested 用 correction/historical/counterevidence role "
+                    "明确 changed status，保留原话，不继续当当前结论。\n"
                     + MARKDOWN_CONTRACT,
             "schema": {"blocks": [{"id": "stable-block-id", "role": "narrative",
                                    "text": "complete Markdown block", "unit_indices": [0]}] if snapshot.units else []},
             "writing_units": [{"index": index, "unit_id": unit.id} for index, unit in enumerate(snapshot.units)],
+            "source_sequence": [id_ for _instant, id_ in dated],
+            "undated_evidence": undated,
             "required_unit_indices": list(range(len(snapshot.units))),
             "snapshot": asdict(snapshot),
             "previous": asdict(previous) if previous else None,
@@ -817,7 +827,7 @@ class BodyPlanWriter:
         if ledger is not None:
             try:
                 artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
-                    prompt_version="body-plan-v9", validate=validate,
+                    prompt_version="body-plan-v10", validate=validate,
                     validation_failure_codes=_BODY_VALIDATION_FAILURES)
             except ReadingError as exc:
                 if exc.code not in _BODY_VALIDATION_FAILURES | {"text_request_already_failed"}:
@@ -841,7 +851,7 @@ class BodyPlanWriter:
         child, so an interrupted/failed repair cannot create another attempt.
         """
         route = provider_binding(self.provider)
-        job_key = fingerprint(json_text([ledger.generation_id, "body-plan-v9", route, prompt_text]))
+        job_key = fingerprint(json_text([ledger.generation_id, "body-plan-v10", route, prompt_text]))
         failed = ledger.one("SELECT * FROM reader_text_artifacts WHERE generation_id=? AND job_key=?",
                             (ledger.generation_id, job_key))
         if not failed or failed["status"] != "failed":
@@ -855,7 +865,7 @@ class BodyPlanWriter:
             return None
         expected = {"schema": "received-validation-failure-v1", "code": diagnostic["code"],
             "generation_id": ledger.generation_id, "job_key": job_key, "request_id": failed["request_id"],
-            "provider_route": route, "prompt_version": "body-plan-v9"}
+            "provider_route": route, "prompt_version": "body-plan-v10"}
         if diagnostic != expected:
             return None
         prompt = json.loads(prompt_text)
@@ -864,6 +874,8 @@ class BodyPlanWriter:
         # prefix keeps even a full bounded page within its original input limit.
         intro, task = prompt["task"].split("只返回 schema", 1)
         repair_intro = "修复 " + diagnostic["code"] + "；完整重写。\n"
+        if diagnostic["code"] == "body_plan_lost_evidence":
+            repair_intro = "修复 body_plan_lost_evidence；原 home 中逐字复制 unit.verbatim。\n"
         if len(repair_intro.encode("utf-8")) > len(intro.encode("utf-8")):
             raise ReadingError("body_context_budget_exceeded")
         prompt["task"] = repair_intro + "只返回 schema" + task
@@ -872,7 +884,7 @@ class BodyPlanWriter:
             raise ReadingError("body_context_budget_exceeded")
         child = failed["request_id"] + ":repair:" + fingerprint(json_text([job_key, failed["request_id"]]))
         return accepted_text_artifact(ledger, self.provider, prompt=repair_prompt, request_id=child,
-            prompt_version="body-plan-v9", validate=validate,
+            prompt_version="body-plan-v10", validate=validate,
             validation_failure_codes=_BODY_VALIDATION_FAILURES)
 
     @staticmethod
@@ -886,7 +898,7 @@ class BodyPlanWriter:
         binding = fingerprint(json_text(asdict(snapshot)))
         route = provider_binding(self.provider)
         aggregate_key = fingerprint(json_text([binding, asdict(previous) if previous else None,
-                                               route, self.max_input_bytes, "body-paged-v9"]))
+                                               route, self.max_input_bytes, "body-paged-v10"]))
         if ledger:
             reused = ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request_id,))
             if reused and (reused["generation_id"] != self.generation_id or reused["job_key"] != aggregate_key):
@@ -960,7 +972,7 @@ class BodyPlanWriter:
         if ledger:
             with ledger.transaction() as conn:
                 conn.execute("INSERT OR IGNORE INTO reader_text_artifacts VALUES(?,?,?,?,?,'accepted',?)",
-                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v9", result.to_json()))
+                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v10", result.to_json()))
         return result
 
     @staticmethod

@@ -179,10 +179,18 @@
   New extraction pages carry the preceding bounded page as ordered non-core
   context; resumed page jobs retain their exact frozen context and outcome.
   Fresh extraction pages and coverage jobs bind
-  `unit_policy="retained-knowledge-v4"`; v1/v2/v3 are frozen intermediate candidate
-  policies. Units represent retained knowledge and scenes, not a provenance
-  audit or message directory. Source evidence and resources remain exact, and
-  display names never imply gender or identity.
+  `unit_policy="retained-knowledge-v5"`; None/v1/v2/v3/v4 retain their frozen
+  prompts, inputs and accepted artifacts. Fresh coverage binds
+  `planning="pending-fragments-v1"` and exact `pending_span_ids`: terminal or
+  already-cited primary fragments cannot reenter core. Every fresh coverage
+  content unit must cite a pending core span; joint core/context units and
+  context evidence or typed claim lineage remain valid. Invalid units reach
+  the known-output correction loop before artifact acceptance, without silent
+  trimming. Unknown parent or child outcomes block before provider dispatch.
+  Units preserve concrete knowledge and scenes; pure communication actions
+  without identifiable content may receive reasoned `context_only`, never a
+  mechanical length, keyword or message-type filter. Source evidence and
+  resources remain exact, and display names never imply gender or identity.
   Material withdrawal is proposition- and scope-specific; explicit claim
   restatement/replay lineage carries it across Items without revoking unrelated
   facts in a report. Evidence-only claims may bridge that lineage but cannot
@@ -224,9 +232,9 @@
   evidence; local roles do not fabricate Cloudflare accounts or usage.
 - `projections.py`, `controls.py`, `briefing.py`, `delivery.py` and
   `reader_runtime.py` under `core/semantic/` own the Obsidian reading surface.
-  Current Body artifacts are `body-plan-v9` / `body-paged-v9`; accepted
-  `body-plan-v2` through `body-paged-v8` evidence remains historical and must
-  not be rewritten. The verifier accepts v2-v9 and must remain in lockstep with
+  Current Body artifacts are `body-plan-v10` / `body-paged-v10`; accepted
+  `body-plan-v2` through `body-paged-v9` evidence remains historical and must
+  not be rewritten. The verifier accepts v2-v10 and must remain in lockstep with
   the writer. BodyPlan has a unique home for each retained detail; accepted pages are
   durable before publishing. New units may rewrite their receiving block's
   automatic prose while retaining stable homes, evidence, resources and exact
@@ -238,6 +246,10 @@
   paraphrase can share one content home. Explicit `verbatim`, procedural and
   correction obligations remain enforced. Do not restore transcript copying as
   a substitute for evidence preservation.
+  Writer evidence chronology uses offset-aware source timestamps only; unit
+  order, commit order and semantic revision time never establish event order.
+  Undated evidence stays undated, and chronology does not change unit indices,
+  canonical identities or stable homes.
   A complete, bound-route Body response with a recorded validation diagnostic
   may receive one deterministic repair child. Preserve the original failed
   row and all accepted artifacts. Unknown/running work, provider or route
