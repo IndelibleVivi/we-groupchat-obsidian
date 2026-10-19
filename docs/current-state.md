@@ -79,14 +79,22 @@ from the same material. Incomplete scope cannot combine separate trials, and a
 newer overlapping contrary report prevents an unconditional current-state match.
 Incremental BodyPlans may rewrite automatic prose when new details join its
 stable block; unchanged blocks, exact quotations and manual edits remain
-protected. Current writer artifacts use v11, and the verifier accepts v2-v11 so
-current output and retained earlier artifacts keep their independent acceptance
-checks. These are candidate source behaviors, not evidence of a private
-generation being repaired, re-rendered or activated.
-Fresh composition prompts distinguish derived unit text from source wording
+protected. Fresh rebuild plans freeze `reading_policy="content-responsibility-v1"`
+and use Body v12: derived descriptions remain editable while their content,
+evidence, resources, claim status and stable homes remain responsibilities.
+Explicit verbatim obligations and source quotations retain their exact-word
+checks. Plans and generations without this field keep `derived-verbatim-v1`,
+Body v11 and their frozen inputs; the field can first bind only an empty
+generation. Verification checks the manifest/generation policy binding and
+accepts v12 only for the fresh policy, retaining v2-v11 for legacy artifacts.
+These are candidate source behaviors, not evidence of a private generation
+being repaired, re-rendered or activated.
+Composition prompts distinguish derived unit text from source wording
 and include synthetic technical/life examples of one content home without
 repeated prose. Prior-plan and literal-fragment work omit those examples;
-required words, validation and unknown-outcome boundaries remain unchanged.
+explicit required words, validation and unknown-outcome boundaries remain
+protected. Oversized fresh descriptions can be edited within their existing
+fragment owner; only true literal fragments require exact continuation.
 These examples are guidance, not evidence that a real note passed editing.
 The writer receives an explicit evidence sequence ordered by offset-aware
 source timestamps; undated evidence stays undated. Unit order and commit order

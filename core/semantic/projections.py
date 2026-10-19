@@ -420,6 +420,47 @@ class ReadingRelation:
     other_title: str = ""
 
 
+LEGACY_READING_POLICY = "derived-verbatim-v1"
+CONTENT_READING_POLICY = "content-responsibility-v1"
+
+
+def reading_policy(binding) -> str:
+    """Missing metadata is the frozen derived-wording contract, never an upgrade."""
+    value = binding.get("reading_policy", LEGACY_READING_POLICY)
+    if value not in (LEGACY_READING_POLICY, CONTENT_READING_POLICY):
+        raise ReadingError("reading_policy_invalid")
+    return value
+
+
+def bind_reading_policy(conn, binding):
+    """Freeze a plan's reading contract in the caller-owned generation transaction.
+
+    Only a pristine generation can acquire a field it did not already bind.
+    Omission preserves historical metadata exactly; this is not a migration.
+    """
+    policy = reading_policy(binding)
+    rows = conn.execute("SELECT generation_id,metadata_json FROM generation_manifest").fetchall()
+    if len(rows) != 1:
+        raise ReadingError("reading_generation_mismatch")
+    generation_id, raw = rows[0]
+    metadata = json.loads(raw)
+    if reading_policy(metadata) != policy and "reading_policy" in metadata:
+        raise ReadingError("reading_policy_mismatch")
+    if "reading_policy" not in binding:
+        if reading_policy(metadata) != policy:
+            raise ReadingError("reading_policy_mismatch")
+        return metadata
+    if "reading_policy" not in metadata:
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                                           "AND name NOT LIKE 'sqlite_%' AND name<>'generation_manifest'")]
+        if any(conn.execute('SELECT 1 FROM "' + name.replace('"', '""') + '" LIMIT 1').fetchone() for name in tables):
+            raise ReadingError("reading_policy_mismatch")
+        metadata["reading_policy"] = policy
+        conn.execute("UPDATE generation_manifest SET metadata_json=? WHERE generation_id=?",
+                     (json_text(metadata), generation_id))
+    return metadata
+
+
 @dataclass(frozen=True)
 class ReadingSnapshot:
     item_id: str
@@ -431,6 +472,25 @@ class ReadingSnapshot:
     resources: tuple[ReadingResource, ...] = ()
     relations: tuple[ReadingRelation, ...] = ()
     kind: str = "item"
+    reading_policy: str | None = None
+
+
+def reading_snapshot_payload(snapshot):
+    value = asdict(snapshot)
+    # Frozen legacy prompts and paged job keys predate this field. Explicitly
+    # omit it rather than rewriting accepted/unknown request identities.
+    if snapshot.reading_policy is None:
+        value.pop("reading_policy")
+    return value
+
+
+def _snapshot_reading_policy(snapshot):
+    return reading_policy({} if snapshot.reading_policy is None else {"reading_policy": snapshot.reading_policy})
+
+
+def _body_prompt_version(snapshot, *, paged=False):
+    version = "v12" if _snapshot_reading_policy(snapshot) == CONTENT_READING_POLICY else "v11"
+    return ("body-paged-" if paged else "body-plan-") + version
 
 
 class CanonicalReadingAdapter:
@@ -488,6 +548,9 @@ class CanonicalReadingAdapter:
         if item is None or item["lifecycle"] != "active":
             raise ReadingError("canonical_reading_item_unavailable")
         with closing(self.store.connect()) as conn:
+            generation_metadata = json.loads(conn.execute("SELECT metadata_json FROM generation_manifest WHERE generation_id=?",
+                                                          (self.store.generation_id,)).fetchone()[0])
+            policy = reading_policy(generation_metadata)
             resources = [dict(row) for row in conn.execute(
                 "SELECT DISTINCT r.* FROM resource_refs r WHERE r.item_id=? OR r.observation_id IN "
                 "(SELECT observation_id FROM item_observations WHERE item_id=?) ORDER BY r.resource_id,r.occurrence_id",
@@ -555,12 +618,12 @@ class CanonicalReadingAdapter:
                 status = ("retracted" if any(c["status"] == "retracted" for c in affected_claims)
                           else "contested" if affected_claims else "current")
                 reason = "；".join(dict.fromkeys(claim_reasons.get(c["claim_id"], "") for c in affected_claims)).strip("；")
-                # A quote unit identifies source wording, not an obligation to
-                # copy an entire chat message into the reading body. Its exact
-                # excerpt is already retained in the source projection. Keep
-                # literal procedural/correction requirements separate from the
-                # writer's choice of a meaningful quotation or paraphrase.
-                retained = (unit["text"],) if unit["kind"] in {"step", "counterevidence"} or affected_claims else ()
+                # Canonical unit.text is derived content responsibility, not
+                # source wording. Fresh generations have no canonical explicit
+                # literal field to import; injected ReadingUnit.verbatim remains
+                # strict. Old generations retain their derived-wording promise.
+                retained = ((unit["text"],) if policy == LEGACY_READING_POLICY
+                            and (unit["kind"] in {"step", "counterevidence"} or affected_claims) else ())
                 units.append(ReadingUnit(unit["unit_id"], unit["text"], tuple(unit["span_ids"]),
                                          observation_resources if index == 0 else (),
                                          "counterevidence" if affected_claims else unit["kind"], retained, status, reason))
@@ -576,7 +639,7 @@ class CanonicalReadingAdapter:
             raise ReadingError("stale_projection_snapshot")
         return ReadingSnapshot(item_id, item["content_revision"], item["title"], self._time(item["semantic_updated_at"]),
                                tuple(units), tuple(excerpts.values()), tuple(resource_by_id.values()),
-                               tuple(relations), item["kind"])
+                               tuple(relations), item["kind"], generation_metadata.get("reading_policy"))
 
 
 @dataclass(frozen=True)
@@ -690,6 +753,11 @@ class BodyPlanWriter:
         ledger = ledger or self.ledger
         if ledger is not None and ledger.generation_id != self.generation_id:
             raise ReadingError("reading_generation_mismatch")
+        policy = _snapshot_reading_policy(snapshot)
+        if ledger is not None and ledger.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='generation_manifest'"):
+            binding = ledger.one("SELECT metadata_json FROM generation_manifest WHERE generation_id=?", (self.generation_id,))
+            if binding is None or reading_policy(json.loads(binding[0])) != policy:
+                raise ReadingError("reading_policy_mismatch")
         current_fingerprints = {u.id: fingerprint(json_text(asdict(u))) for u in snapshot.units}
         unchanged: dict[str, BodyBlock] = {}
         if previous is not None:
@@ -809,11 +877,24 @@ class BodyPlanWriter:
             "source_sequence": [id_ for _instant, id_ in dated],
             "undated_evidence": undated,
             "required_unit_indices": list(range(len(snapshot.units))),
-            "snapshot": asdict(snapshot),
+            "snapshot": reading_snapshot_payload(snapshot),
             "previous": asdict(previous) if previous else None,
             "unchanged_blocks": list(unchanged),
             **context,
         }
+        if _snapshot_reading_policy(snapshot) == CONTENT_READING_POLICY:
+            prompt["task"] = prompt["task"].replace(
+                "适用于显式原话、步骤、反证与更正", "仅适用于显式逐字义务，不能从单元 kind 或 claim status 推定")
+            prompt["task"] += ("\n步骤必须完整保留操作、先后顺序、前提与限定；反证、更正须保留具体内容、适用范围和来源归属。"
+                               "这些是完整内容责任，可忠实重组派生说明；unit.text 的报告包装和措辞不是原话。"
+                               "只有实际提供的 unit.verbatim 是逐字义务，不能据此编造来源引文。")
+            prompt["input_semantics"]["unit.text"] = ("所有单元均为派生内容责任，包括 step、counterevidence 和已撤回/有争议的内容。"
+                "完整保留实质细节、顺序、前提、条件、限制、反证与归属，可忠实重组其措辞；kind/status 不生成逐字义务。")
+            prompt["input_semantics"]["unit.verbatim"] = "只含实际显式给定的逐字义务；每段原样保全在其 home 一次，不从派生说明推造。"
+            step = prompt["writing_examples"][0]
+            step["units"][1]["verbatim"] = []
+            step["response"]["blocks"][0]["text"] = ("这次 X 格式导出在中途停止。洛杉建议改用 Y 格式重新导出；"
+                "澄雨随后报告导出完成，目前只验证了小文件。")
         if previous is not None or context.get("phase") == "body_fragment_v1":
             # Prior-plan work already has concrete prose to edit, and literal
             # fragments have an exact continuation. Reserve their bounded
@@ -871,14 +952,15 @@ class BodyPlanWriter:
                 raise ReadingError("body_fragment_changed_verbatim")
             return result.to_json()
         if ledger is not None:
+            prompt_version = _body_prompt_version(snapshot)
             try:
                 artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
-                    prompt_version="body-plan-v11", validate=validate,
+                    prompt_version=prompt_version, validate=validate,
                     validation_failure_codes=_BODY_VALIDATION_FAILURES)
             except ReadingError as exc:
                 if exc.code not in _BODY_VALIDATION_FAILURES | {"text_request_already_failed"}:
                     raise
-                artifact = self._repair_received_validation(ledger, prompt_text, validate)
+                artifact = self._repair_received_validation(ledger, prompt_text, validate, prompt_version)
                 if artifact is None:
                     raise
             return BodyPlan.from_json(artifact)
@@ -888,7 +970,7 @@ class BodyPlanWriter:
             raise ReadingError("text_provider_route_changed")
         return BodyPlan.from_json(validate(result.text))
 
-    def _repair_received_validation(self, ledger, prompt_text, validate):
+    def _repair_received_validation(self, ledger, prompt_text, validate, prompt_version):
         """One durable child of the exact failed invocation, never a fresh retry.
 
         The failed row is immutable and only our received-validation diagnostic
@@ -897,7 +979,7 @@ class BodyPlanWriter:
         child, so an interrupted/failed repair cannot create another attempt.
         """
         route = provider_binding(self.provider)
-        job_key = fingerprint(json_text([ledger.generation_id, "body-plan-v11", route, prompt_text]))
+        job_key = fingerprint(json_text([ledger.generation_id, prompt_version, route, prompt_text]))
         failed = ledger.one("SELECT * FROM reader_text_artifacts WHERE generation_id=? AND job_key=?",
                             (ledger.generation_id, job_key))
         if not failed or failed["status"] != "failed":
@@ -911,7 +993,7 @@ class BodyPlanWriter:
             return None
         expected = {"schema": "received-validation-failure-v1", "code": diagnostic["code"],
             "generation_id": ledger.generation_id, "job_key": job_key, "request_id": failed["request_id"],
-            "provider_route": route, "prompt_version": "body-plan-v11"}
+            "provider_route": route, "prompt_version": prompt_version}
         if diagnostic != expected:
             return None
         prompt = json.loads(prompt_text)
@@ -930,7 +1012,7 @@ class BodyPlanWriter:
             raise ReadingError("body_context_budget_exceeded")
         child = failed["request_id"] + ":repair:" + fingerprint(json_text([job_key, failed["request_id"]]))
         return accepted_text_artifact(ledger, self.provider, prompt=repair_prompt, request_id=child,
-            prompt_version="body-plan-v11", validate=validate,
+            prompt_version=prompt_version, validate=validate,
             validation_failure_codes=_BODY_VALIDATION_FAILURES)
 
     @staticmethod
@@ -941,10 +1023,11 @@ class BodyPlanWriter:
                        resources=tuple(r for r in snapshot.resources if r.id in resources), relations=())
 
     def _paged(self, snapshot, previous, fingerprints, unchanged, request_id, ledger):
-        binding = fingerprint(json_text(asdict(snapshot)))
+        binding = fingerprint(json_text(reading_snapshot_payload(snapshot)))
         route = provider_binding(self.provider)
+        prompt_version = _body_prompt_version(snapshot, paged=True)
         aggregate_key = fingerprint(json_text([binding, asdict(previous) if previous else None,
-                                               route, self.max_input_bytes, "body-paged-v11"]))
+                                               route, self.max_input_bytes, prompt_version]))
         if ledger:
             reused = ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (request_id,))
             if reused and (reused["generation_id"] != self.generation_id or reused["job_key"] != aggregate_key):
@@ -1018,7 +1101,7 @@ class BodyPlanWriter:
         if ledger:
             with ledger.transaction() as conn:
                 conn.execute("INSERT OR IGNORE INTO reader_text_artifacts VALUES(?,?,?,?,?,'accepted',?)",
-                    (self.generation_id, aggregate_key, request_id, route, "body-paged-v11", result.to_json()))
+                    (self.generation_id, aggregate_key, request_id, route, prompt_version, result.to_json()))
         return result
 
     @staticmethod
@@ -1036,13 +1119,16 @@ class BodyPlanWriter:
         return parts
 
     def _fragment_group(self, snapshot, units, previous, preserve_previous, binding, request_id, ledger):
-        """An oversized paragraph is an explicit lossless continuation task.
+        """Bounded continuations keep the original unit/evidence/resource home.
 
-        The program joins exact local text segments under one stable home. Each
-        evidence/context segment is supplied on a bounded page, including pages
-        with no narrative output. No bytes or evidence associations are elided.
+        Legacy continuations retain exact derived wording. Fresh continuations
+        may edit each complete supplied content segment; only actual explicit
+        literal obligations use exact continuation. Every evidence/context
+        segment is still supplied, including pages with no narrative output.
         """
-        limit = max(256, (self.max_input_bytes - 5000) // 5)
+        legacy = _snapshot_reading_policy(snapshot) == LEGACY_READING_POLICY
+        limit = (max(256, (self.max_input_bytes - 5000) // 5) if legacy
+                 else max(128, (self.max_input_bytes - 6500) // 6))
         excerpts = {e.id: e for e in snapshot.evidence}
         text_parts, counter = [], 0
         if preserve_previous:
@@ -1066,29 +1152,56 @@ class BodyPlanWriter:
                 resource = (resources[index],) if index < len(resources) else ()
                 local_id = unit.id + ":fragment:" + str(index)
                 local_units = (replace(unit, id=local_id, text=piece, evidence_ids=tuple(e.id for e in evidence),
-                    resource_ids=tuple(r.id for r in resource), verbatim=(piece,)),) if piece is not None else ()
+                    resource_ids=tuple(r.id for r in resource), verbatim=(piece,) if legacy else ()),) if piece is not None else ()
                 partial = replace(snapshot, units=local_units, evidence=evidence, resources=resource, relations=())
                 prompt = self._prompt(partial, None, {}, snapshot_binding=binding, phase="body_fragment_v1",
                     continuation={"original_unit_id": unit.id, "index": index,
                         "unit_segments": len(local_text), "evidence_segments": len(fragments),
-                        "instruction": "Return exactly this supplied text segment as one block, with no prefix, suffix or paraphrase. "
-                        "This is one local continuation of an oversized paragraph, not a separate summary. "
-                        "If there is no unit, inspect the supplied evidence/resource context and return blocks: []. "
-                        "The program retains all original evidence and joins every segment at its original stable home."})
+                        "instruction": ("Return exactly this supplied text segment as one block, with no prefix, suffix or paraphrase. "
+                            "This is one local continuation of an oversized paragraph, not a separate summary. "
+                            "If there is no unit, inspect the supplied evidence/resource context and return blocks: []. "
+                            "The program retains all original evidence and joins every segment at its original stable home." if legacy else
+                            "Edit this supplied derived content segment faithfully. Preserve every concrete step, order, condition, "
+                            "qualification, counterevidence and attribution; its reporting wrapper is not literal source wording. "
+                            "This is an ordered continuation of one oversized home, not a new summary or introduction. "
+                            "If there is no unit, inspect all supplied evidence/resource context and return blocks: []. "
+                            "The program retains every exact source excerpt and all original associations at the one unit home.")})
                 part = self._invoke(partial, None, {}, {}, prompt, request_id + ":fragment:" + str(counter),
-                                    ledger, exact_fragment=piece)
+                                    ledger, exact_fragment=piece if legacy else None)
                 counter += 1
                 if piece is not None:
                     output.append(part.blocks[0].text)
-            assembled = "".join(output)
-            if assembled != redact_urls_in_text(unit.text):
+            assembled = ("" if legacy else "\n\n").join(output)
+            if legacy and assembled != redact_urls_in_text(unit.text):
                 raise ReadingError("body_fragment_coverage")
-            # Additional supplied verbatim fragments may be independent of the
-            # unit text. Retain them once, without inventing a summary section.
             for fragment in unit.verbatim:
                 visible = redact_urls_in_text(fragment)
-                if visible not in assembled:
-                    assembled += "\n\n" + visible
+                if legacy:
+                    # Frozen historical continuation behavior.
+                    if visible not in assembled:
+                        assembled += "\n\n" + visible
+                elif not _contains_verbatim(assembled, visible):
+                    # Explicit literals can be independent of derived prose or
+                    # larger than a page. Obtain exact accepted continuations;
+                    # never silently append unaccepted literal output ourselves.
+                    literal_parts = []
+                    for piece in self._pieces(visible, limit):
+                        local = replace(unit, id=unit.id + ":verbatim:" + str(counter), text=piece,
+                                        evidence_ids=(), resource_ids=(), verbatim=(piece,))
+                        partial = replace(snapshot, units=(local,), evidence=(), resources=(), relations=())
+                        prompt = self._prompt(partial, None, {}, snapshot_binding=binding, phase="body_fragment_v1",
+                            continuation={"original_unit_id": unit.id, "index": counter,
+                                "instruction": "Return exactly this explicitly required literal segment as one block. "
+                                               "Do not paraphrase, add a prefix or suffix, or omit any byte. "
+                                               "It remains at the original unit home; full source evidence is retained there."})
+                        part = self._invoke(partial, None, {}, {}, prompt,
+                            request_id + ":verbatim:" + str(counter), ledger, exact_fragment=piece)
+                        counter += 1
+                        literal_parts.append(part.blocks[0].text)
+                    literal = "".join(literal_parts)
+                    if literal != visible:
+                        raise ReadingError("body_fragment_changed_verbatim")
+                    assembled += "\n\n" + literal
             text_parts.append(assembled)
         statuses = {u.id: u.status for u in units if u.status != "current"}
         return BodyBlock(previous.id if previous else "paragraph-" + fingerprint(units[0].id)[:24],

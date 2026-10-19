@@ -22,6 +22,7 @@ from core.semantic.engine import CapturedSource, prepare_spans, validate_accepte
 from core.semantic.jobs import JobStore
 from core.semantic.projections import (
     BodyBlock, BodyPlan, BodyPlanWriter, CanonicalReadingAdapter, ProjectionPublisher, ReadingLedger, provider_binding,
+    bind_reading_policy, CONTENT_READING_POLICY,
 )
 from core.semantic.retrieval import _INDEX_SCHEMA
 from core.semantic.store import SemanticStore
@@ -53,9 +54,13 @@ def adopt_fixture_batch(store, batch_id):
 
 class VerificationFixture:
     def __init__(self, root, *, purpose="live", stale_proposal=False, unknown_decision=False,
-                 reuse_action_key=False, same_read_set=False):
+                 reuse_action_key=False, same_read_set=False, reading_policy=None,
+                 unit_kind="scene", unit_text=None, body_text=None):
         self.root = Path(root).resolve()
         self.store = SemanticStore(self.root / "generation.sqlite", "synthetic-generation", now_func=lambda: 10.0)
+        if reading_policy is not None:
+            with self.store.transaction() as conn:
+                bind_reading_policy(conn, {"reading_policy": reading_policy})
         self.projections = self.root / "WGO"
         self.projections.mkdir()
         self.profile = EmbeddingProfile("synthetic", "unit-vectors", 2)
@@ -82,7 +87,7 @@ class VerificationFixture:
         self.span_id = source_span.span_id
         self.observation = {"observation_id": "observation", "title": "周末散步", "scene_kind": "life",
             "spans": [asdict(source_span)],
-            "units": [{"unit_id": "unit", "kind": "scene", "text": "周末在河边散步。", "span_ids": [self.span_id]}],
+            "units": [{"unit_id": "unit", "kind": unit_kind, "text": unit_text or "周末在河边散步。", "span_ids": [self.span_id]}],
             "topics": ["生活"], "claims": []}
         # len in code points, not visual glyph count.
         self.observation["spans"][0]["end"] = len(self.observation["spans"][0]["excerpt"])
@@ -125,7 +130,7 @@ class VerificationFixture:
                                              current_revision=self.adapter.current_revision)
         self.snapshot = self.adapter.snapshot("item")
         self.plan = BodyPlan("item", self.snapshot.content_revision, (
-            BodyBlock("paragraph", "scene", "周末在河边散步。", ("unit",), (self.span_id,),
+            BodyBlock("paragraph", "scene", body_text or unit_text or "周末在河边散步。", ("unit",), (self.span_id,),
                       resource_ids=("photo",), primary_home="item"),))
         self.publisher.publish_item(self.snapshot, self.plan)
         if stale_proposal and not same_read_set:
@@ -139,6 +144,9 @@ class VerificationFixture:
                     "inventory_revision": 1, "cursors": self.end}],
             "embedding_profile_id": self.profile.profile_id, "index_generation_id": self.index.index_identity,
         }
+
+        if reading_policy is not None:
+            self.manifest["reading_policy"] = reading_policy
 
     def _index(self):
         docs = [r for r in self.store.documents() if r["owner_type"] == "item"]
@@ -334,6 +342,41 @@ with tempfile.TemporaryDirectory() as directory:
             "timezone": "UTC", "as_of": now.isoformat(), "content_revision": receipt.revision,
             "max_input_bytes": service.max_input_bytes, "provider_route": provider_binding(provider)}
         return service, provider
+
+    def test_fresh_reading_policy_verifies_v12_without_derived_literal_and_rejects_legacy_downgrade(self):
+        self.fixture = VerificationFixture(self.fixture.root / "fresh", reading_policy=CONTENT_READING_POLICY,
+            unit_kind="step", unit_text="派生操作说明：周末前往河边，进行散步活动。", body_text="周末去河边散步。")
+        self.brief_fixture(require_body=True)
+        f = self.fixture
+        self.assertTrue(f.verify().complete, f.verify().to_dict())
+        with closing(f.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT prompt_version FROM reader_text_artifacts WHERE request_id='synthetic-body'").fetchone()[0],
+                             "body-plan-v12")
+        f.manifest.pop("reading_policy")
+        self.assertIn("reading_policy_binding_mismatch", self.codes(f.verify()))
+        # Even relabeling both metadata and artifact version as legacy cannot
+        # make its historical derived-literal guarantee disappear.
+        with f.store.transaction() as db:
+            db.execute("UPDATE generation_manifest SET metadata_json='{}'")
+            db.execute("UPDATE reader_text_artifacts SET prompt_version='body-plan-v11' WHERE request_id='synthetic-body'")
+        self.assertIn("body_plan_literal_obligation_missing", self.codes(f.verify()))
+
+    def test_fresh_reading_verifier_keeps_unit_home_evidence_and_resource_obligations(self):
+        self.fixture = VerificationFixture(self.fixture.root / "fresh-obligations", reading_policy=CONTENT_READING_POLICY)
+        self.brief_fixture(require_body=True)
+        f = self.fixture
+        original = json.loads(f.plan.to_json())
+        for field, value, code in (("unit_ids", [], "body_plan_unit_coverage"),
+                                   ("evidence_ids", [], "body_plan_evidence_missing"),
+                                   ("resource_ids", [], "body_plan_resource_missing"),
+                                   ("primary_home", "wrong", "body_plan_binding_mismatch")):
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(original))
+                changed["blocks"][0][field] = value
+                with f.store.transaction() as db:
+                    db.execute("UPDATE reader_body_plans SET plan_json=?", (json.dumps(changed),))
+                    db.execute("UPDATE reader_text_artifacts SET artifact_json=? WHERE request_id='synthetic-body'", (json.dumps(changed),))
+                self.assertIn(code, self.codes(f.verify()))
 
     def test_attributed_brief_and_body_versions_have_independent_current_proof(self):
         self.brief_fixture(require_body=True)

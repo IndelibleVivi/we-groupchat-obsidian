@@ -95,7 +95,7 @@ class RebuildCommandTests(unittest.TestCase):
         admission = {"text": {"max_inflight": 2, "requests_per_minute": None,
                               "tokens_per_minute": None, "unset": ["requests_per_minute", "tokens_per_minute"]}}
         value = public_result({"state": "incomplete", "private_chat": "SECRET", "database": "/private/path",
-                               "configured_admission": admission,
+                               "configured_admission": admission, "reading_policy": "content-responsibility-v1",
                                "restore_code": "runtime_restore_failed",
                                "restore_attempt_count": 2,
                                "job_states": {"failed": 1},
@@ -107,11 +107,26 @@ class RebuildCommandTests(unittest.TestCase):
         self.assertNotIn("private", rendered)
         self.assertNotIn("SECRET", rendered)
         self.assertEqual(value["configured_admission"], admission)
+        self.assertEqual(value["reading_policy"], "content-responsibility-v1")
         self.assertEqual(value["restore_code"], "runtime_restore_failed")
         self.assertEqual(value["restore_attempt_count"], 2)
         self.assertEqual(value["job_states"], {"failed": 1})
         self.assertEqual(value["job_error_codes"], ["provider_timeout"])
         self.assertIsNone(value["job_blocker"])
+
+    def test_plan_and_status_expose_the_frozen_reading_mode(self):
+        coordinator = Mock()
+        coordinator.plan.return_value = {"run_id": "run", "generation_id": "generation",
+            "history_policy": "source-first-v1", "reading_policy": "content-responsibility-v1",
+            "scope": {}, "provider_budget": {}, "configured_admission": {}, "storage": {}}
+        with patch("core.semantic.rebuild.read_json", return_value={}):
+            code, result = self.invoke(["plan", "--provider-profile", "synthetic-profile.json", "--run-id", "run"],
+                                       Mock(return_value=coordinator))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["reading_policy"], "content-responsibility-v1")
+        coordinator.status.return_value = {"state": "incomplete", "reading_policy": "derived-verbatim-v1"}
+        code, result = self.invoke(["status", "run"], Mock(return_value=coordinator))
+        self.assertEqual(result["reading_policy"], "derived-verbatim-v1")
 
     def test_errors_are_content_free(self):
         code, value = self.invoke(["status", "run"], Mock(side_effect=ValueError("private URL and chat body")))

@@ -206,6 +206,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
         journal = RebuildJournal(self.runtime_root, "test-run")
         def historical(row):
             row["plan"].pop("history_policy")
+            row["plan"].pop("reading_policy")
             row["plan_fingerprint"] = fingerprint(row["plan"])
         journal.update(historical)
         return journal.read()
@@ -288,6 +289,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
     def test_full_rebuild_real_store_history_migration_and_live_completion(self):
         plan = self.coordinator.plan(PROFILE, run_id="test-run")
         self.assertEqual(plan["history_policy"], "source-first-v1")
+        self.assertEqual(plan["reading_policy"], "content-responsibility-v1")
         self.managed.on_restore = self.live_increment
         result = self.execute()
         self.assertEqual(result["state"], "run_complete", result)
@@ -305,7 +307,54 @@ class RebuildCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT count(*) FROM legacy_mappings WHERE target_type='history_record'").fetchone()[0],
                              len(run["plan"]["legacy_inventory"]["records"]))
         self.assertEqual(metadata["history_policy"], "source-first-v1")
+        self.assertEqual(metadata["reading_policy"], plan["reading_policy"])
+        self.assertEqual(run["verification"]["reading_policy"], plan["reading_policy"])
         self.assertEqual(metadata["activation"]["delivery_floor_change_id"], 0)
+
+    def test_missing_reading_policy_resume_keeps_original_plan_and_populated_generation_contract(self):
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        def historical(row):
+            row["plan"].pop("reading_policy")
+            row["plan_fingerprint"] = fingerprint(row["plan"])
+        journal.update(historical)
+        before = journal.read()["plan_fingerprint"]
+        def interrupt(phase):
+            if phase == "after_freeze-1-processed-C0":
+                raise KeyboardInterrupt()
+        self.coordinator.fault_hook = interrupt
+        first = self.execute()
+        self.assertEqual(first["code"], "rebuild_interrupted", first)
+        from core.semantic.store import SemanticStore
+        store = SemanticStore(journal.read()["plan"]["database"], journal.read()["plan"]["generation_id"])
+        with closing(store.connect()) as db:
+            self.assertGreater(db.execute("SELECT count(*) FROM capture_batches").fetchone()[0], 0)
+            self.assertNotIn("reading_policy", json.loads(db.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]))
+        self.coordinator.fault_hook = lambda _phase: None
+        self.managed.on_restore = self.live_increment
+        result = self.execute()
+        self.assertEqual(result["state"], "run_complete", result)
+        self.assertEqual(journal.read()["plan_fingerprint"], before)
+        self.assertNotIn("reading_policy", journal.read()["plan"])
+        with closing(store.connect()) as db:
+            self.assertNotIn("reading_policy", json.loads(db.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]))
+        self.assertEqual(self.coordinator.status("test-run")["reading_policy"], "derived-verbatim-v1")
+        self.assertNotIn("reading_policy", journal.verification())
+
+    def test_new_reading_policy_does_not_adopt_reader_only_populated_generation(self):
+        from core.semantic.store import SemanticStore
+        from core.semantic.projections import ReadingLedger
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        store = SemanticStore(plan["database"], plan["generation_id"])
+        ReadingLedger(store.connect, store.generation_id)
+        with store.transaction() as db:
+            db.execute("INSERT INTO reader_text_artifacts VALUES(?,?,?,?,?,?,?)",
+                       (store.generation_id, "job", "failed-body", "route", "body-plan-v11", "failed", ""))
+        with self.assertRaisesRegex(RebuildError, "rebuild_reading_policy_mismatch"):
+            self.execute()
+        self.assertEqual(self.source_calls, 0)
+        with closing(store.connect()) as db:
+            self.assertNotIn("reading_policy", json.loads(db.execute("SELECT metadata_json FROM generation_manifest").fetchone()[0]))
 
     def test_decoded_legacy_inventory_is_released_during_provider_work(self):
         from core.semantic.legacy import LegacyInventory

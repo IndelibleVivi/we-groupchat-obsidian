@@ -55,7 +55,7 @@ def public_result(value):
                "freeze_count", "error_codes", "issues", "counts", "provisional_failure", "configured_admission",
                "relocated", "relocation_receipt", "provider_refreshed", "provider_change_blocked",
                "job_count", "file_count", "total_bytes", "restore_code", "restore_observed_at", "reader_job_states",
-               "restore_attempt_count", "job_states", "job_error_codes", "job_blocker", "history_policy"}
+               "restore_attempt_count", "job_states", "job_error_codes", "job_blocker", "history_policy", "reading_policy"}
     result = {key: val for key, val in value.items() if key in allowed}
     if "live_check" in value:
         result["live_check"] = {key: val for key, val in value["live_check"].items()
@@ -96,7 +96,7 @@ def main(argv=None, *, coordinator_factory=None):
                 raise RebuildError("rebuild_profile_missing")
             plan = coordinator.plan(profile, run_id=args.run_id)
             result = {"run_id": plan["run_id"], "generation_id": plan["generation_id"], "state": "planned",
-                      "history_policy": plan["history_policy"],
+                      "history_policy": plan["history_policy"], "reading_policy": plan["reading_policy"],
                       "counts": plan["scope"], "provider_budget": plan["provider_budget"],
                       "configured_admission": plan["configured_admission"], "storage": plan["storage"]}
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))

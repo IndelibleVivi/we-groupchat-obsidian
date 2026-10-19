@@ -13,7 +13,16 @@
 它们不生成 semantic core capture、Item、model job 或旧知识导入 Obligation。
 Markdown 与 index 是 derived consumers。没有 policy 字段的旧 plan 仍按
 `legacy-semantic-v1` 的原 fingerprint 与模型义务恢复，不会在 resume 时静默改成新
-policy。协议细节分别见 [store](semantic-store-contract.md)、
+policy。新计划另行冻结 `reading_policy="content-responsibility-v1"`，在全新空
+generation 的 `metadata_json` 绑定，并选择 Body v12。派生步骤、反证和更正的
+完整内容仍须保留，但不再把 agent 的 `unit.text` 自动当作逐字原话；真正显式
+`ReadingUnit.verbatim`、精确来源、资源、typed status 与稳定 home 义务保持。
+没有 `reading_policy` 的旧计划仍使用 `derived-verbatim-v1` / Body v11，不补字段、
+不改原 fingerprint 或 frozen prompt。旧 populated/inflight generation 不能切换
+模式；首次绑定要求 canonical 和 reader 表均无记录，既有匹配绑定可正常恢复。
+独立 verifier 核对 plan-derived manifest、generation metadata 和 artifact version，
+不能通过改成 legacy mode 跳过原逐字保证；结构通过不代表自然语言质量验收。
+协议细节分别见 [store](semantic-store-contract.md)、
 [legacy conservation](semantic-legacy.md)、[provider](semantic-providers.md)、
 [reading](semantic-reading.md) 和 [monitor v3](monitor-state-v3.md)。
 
@@ -59,7 +68,8 @@ rebuild，使用全局参数 `--project-dir /ABSOLUTE/PATH/MANAGED-CHECKOUT` 精
 RPM/TPM 配置；`unset` 明确列出未设置的速率。它只读取计划配置，不构造
 provider，也不代表已探明服务商限额或当前运行中的请求数。实际进程的
 admission 观察来自所用 `ProviderRoles.preflight()`；已冻结计划不能靠后来
-修改配置来悄悄改换执行参数。`plan` 与 `status` 还输出 `history_policy`。
+修改配置来悄悄改换执行参数。`plan` 与 `status` 还输出 content-free 的
+`history_policy` 与 `reading_policy`，可区分旧计划保留的模式。
 `status` 只读持久化证据并报告 job state/error-code 汇总与单独的 `reader_job_states`，
 包括 semantic job 的 unknown／未过期 running lease，以及正文/reader text 的
 unknown／running 阻断；同时报告 append-only restore attempts 的最新观察。

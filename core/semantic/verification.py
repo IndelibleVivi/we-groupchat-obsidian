@@ -29,7 +29,8 @@ from .legacy import (LegacyError, LegacyInventory, legacy_resources,
                      TABLE_KEYS,
                      history_policy, build_history_publication_plan, history_document_body, history_root_body,
                      _checked_path, _read_regular, _relative, _under, _opaque)
-from .projections import ReadingError, property_value, region_body
+from .projections import (ReadingError, property_value, region_body, reading_policy,
+                          LEGACY_READING_POLICY, CONTENT_READING_POLICY, _contains_verbatim)
 from .rebuild_payloads import is_ref
 from .verification_storage import GroupMap, RowMap, Rows, ScratchMap, freeze_json, workspace
 
@@ -144,7 +145,7 @@ class RebuildVerifier:
                 source.close()
             # A retained verifier can be called again, but must not retain the
             # previous run's rows, decoded payloads, metadata sets or connections.
-            for key in ("db", "scratch", "tables", "generation", "history_policy", "sources", "source_resources", "batches", "members",
+            for key in ("db", "scratch", "tables", "generation", "history_policy", "reading_policy", "sources", "source_resources", "batches", "members",
                         "accepted", "extractions", "extraction_inputs", "processing", "transactions", "outboxes",
                         "dispositions", "actions", "observations", "items", "spans", "evidence", "observed_versions",
                         "item_observations", "item_content_observations", "projection_id_paths"):
@@ -160,6 +161,13 @@ class RebuildVerifier:
                 or generations[0]["generation_id"] != self.generation
                 or generations[0]["schema"] != "we-groupchat-obsidian.semantic.v1"):
             self.issue("generation_binding_mismatch")
+        try:
+            self.reading_policy = reading_policy(self.manifest)
+            if len(generations) == 1 and reading_policy(_load(generations[0]["metadata_json"])) != self.reading_policy:
+                self.issue("reading_policy_binding_mismatch")
+        except ReadingError:
+            self.issue("reading_policy_invalid")
+            self.reading_policy = LEGACY_READING_POLICY
         try:
             self.history_policy = history_policy(self.manifest)
             if len(generations) == 1 and history_policy(_load(generations[0]["metadata_json"])) != self.history_policy:
@@ -1167,6 +1175,8 @@ class RebuildVerifier:
                 if expected is not None and (expected.get("item_id") != iid or expected.get("content_revision") != revision):
                     self.issue("body_plan_binding_mismatch")
                     expected = None
+                if expected is not None:
+                    self._verify_body_responsibilities(iid, expected)
                 for artifact, body in body_artifacts(iid) if expected is not None else ():
                     old_revision = body.get("content_revision")
                     # An unchanged body can be carried to a later Item revision
@@ -1178,14 +1188,15 @@ class RebuildVerifier:
                         matches.append({key: artifact[key] for key in ("status", "prompt_version")})
                 if not matches or not any(a["status"] == "accepted" for a in matches):
                     self.issue("body_provider_artifact_missing", "semantic_pending")
-                elif not any(a["status"] == "accepted" and a["prompt_version"] in {
+                else:
+                    versions = ({"body-plan-v12", "body-paged-v12"} if self.reading_policy == CONTENT_READING_POLICY else {
                         "body-plan-v2", "body-paged-v2", "body-plan-v3", "body-paged-v3",
                         "body-plan-v4", "body-paged-v4", "body-plan-v5", "body-paged-v5",
                         "body-plan-v6", "body-paged-v6", "body-plan-v7", "body-paged-v7",
                         "body-plan-v8", "body-paged-v8", "body-plan-v9", "body-paged-v9",
-                        "body-plan-v10", "body-paged-v10",
-                        "body-plan-v11", "body-paged-v11"} for a in matches):
-                    self.issue("body_provider_version_conflict", "semantic_pending")
+                        "body-plan-v10", "body-paged-v10", "body-plan-v11", "body-paged-v11"})
+                    if not any(a["status"] == "accepted" and a["prompt_version"] in versions for a in matches):
+                        self.issue("body_provider_version_conflict", "semantic_pending")
             required_spans = set().union(*(self.evidence[oid] for oid in self.item_observations[iid]))
             if required_spans and not self._has("reader_source_locations"):
                 self.issue("item_evidence_projection_missing", "projection_pending")
@@ -1199,6 +1210,56 @@ class RebuildVerifier:
             for view in self._rows("views"):
                 if not self._projection_ready("view:" + view["view_id"], view["definition_revision"] + view["override_revision"]):
                     self.issue("view_current_projection_missing", "projection_pending")
+
+    def _verify_body_responsibilities(self, item_id, plan):
+        """Check canonical obligations independently of the writing adapter.
+
+        Fresh derived wording is editable; this proves unit homes, associations
+        and typed status, not natural-language semantic completeness. Missing
+        policy metadata retains the historical derived-literal guarantee.
+        """
+        blocks = plan["blocks"]
+        units = [dict(row) for row in self.db.execute(
+            "SELECT u.* FROM content_units u JOIN item_observations i USING(observation_id) "
+            "WHERE i.item_id=? AND i.role<>'evidence_only' ORDER BY u.rowid", (item_id,))]
+        homes_by_unit = defaultdict(list)
+        for block in blocks:
+            for unit_id in block["unit_ids"]:
+                homes_by_unit[unit_id].append(block)
+        assigned = Counter({unit_id: len(homes) for unit_id, homes in homes_by_unit.items()})
+        if assigned != Counter(unit["unit_id"] for unit in units):
+            self.issue("body_plan_unit_coverage")
+        if any(block["primary_home"] != item_id for block in blocks):
+            self.issue("body_plan_binding_mismatch")
+        claims = [dict(row) for row in self.db.execute(
+            "SELECT c.* FROM claims c JOIN item_claims i USING(claim_id) "
+            "WHERE i.item_id=? AND c.status IN ('retracted','contested')", (item_id,))]
+        first_by_observation = {}
+        for unit in units:
+            first_by_observation.setdefault(unit["observation_id"], unit["unit_id"])
+            homes = homes_by_unit[unit["unit_id"]]
+            if len(homes) != 1:
+                continue
+            home = homes[0]
+            spans = set(_load(unit["span_ids_json"]))
+            if not spans <= set(home["evidence_ids"]):
+                self.issue("body_plan_evidence_missing")
+            affected = [claim for claim in claims if spans.intersection(_load(claim["span_ids_json"]))]
+            status = "retracted" if any(claim["status"] == "retracted" for claim in affected) else "contested" if affected else "current"
+            statuses = home.get("unit_statuses", {})
+            if ((status != "current" and (statuses.get(unit["unit_id"]) != status
+                    or home["role"] not in {"correction", "historical", "counterevidence"}))
+                    or unit["unit_id"] in statuses and statuses[unit["unit_id"]] != status):
+                self.issue("body_plan_claim_status_missing")
+            if (self.reading_policy == LEGACY_READING_POLICY
+                    and (unit["kind"] in {"step", "counterevidence"} or affected)
+                    and not _contains_verbatim(redact_urls_in_text(home["text"]), redact_urls_in_text(unit["text"]))):
+                self.issue("body_plan_literal_obligation_missing")
+            if first_by_observation[unit["observation_id"]] == unit["unit_id"]:
+                resources = {row[0] for row in self.db.execute(
+                    "SELECT resource_id FROM resource_refs WHERE observation_id=?", (unit["observation_id"],))}
+                if not resources <= set(home.get("resource_ids", ())):
+                    self.issue("body_plan_resource_missing")
 
     def _verify_brief(self):
         required = self.manifest.get("required_brief")

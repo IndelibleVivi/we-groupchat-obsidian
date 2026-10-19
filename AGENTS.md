@@ -242,10 +242,15 @@
   evidence; local roles do not fabricate Cloudflare accounts or usage.
 - `projections.py`, `controls.py`, `briefing.py`, `delivery.py` and
   `reader_runtime.py` under `core/semantic/` own the Obsidian reading surface.
-  Current Body artifacts are `body-plan-v11` / `body-paged-v11`; accepted
-  `body-plan-v2` through `body-paged-v10` evidence remains historical and must
-  not be rewritten. The verifier accepts v2-v11 and must remain in lockstep with
-  the writer. BodyPlan has a unique home for each retained detail; accepted pages are
+  Fresh plans freeze `reading_policy="content-responsibility-v1"` in plan and
+  generation metadata and write `body-plan-v12` / `body-paged-v12`. Missing-field
+  plans/generations retain `derived-verbatim-v1` / v11, their original prompt
+  bytes and fingerprints. `bind_reading_policy` admits first binding only in an
+  empty canonical/reader generation; populated or in-flight state cannot change
+  policy. Accepted v2-v11 artifacts remain historical and must not be rewritten.
+  The verifier checks manifest/generation policy agreement and accepts v12 only
+  for the fresh policy, v2-v11 only for legacy; writer and verifier stay in lockstep.
+  BodyPlan has a unique home for each retained detail; accepted pages are
   durable before publishing. New units may rewrite their receiving block's
   automatic prose while retaining stable homes, evidence, resources and exact
   verbatim obligations; unaffected blocks retain exact bytes. Markdown tables, lists and attributed quotations
@@ -253,9 +258,16 @@
   visible resolution. Properties/actions/query use canonical revisions.
   A canonical `quote` unit does not force its whole message into body prose:
   exact source excerpts remain on source pages; meaningful quotation and faithful
-  paraphrase can share one content home. Explicit `verbatim`, procedural and
-  correction obligations remain enforced. Do not restore transcript copying as
-  a substitute for evidence preservation.
+  paraphrase can share one content home. Explicit `verbatim`, complete procedural
+  content and correction obligations remain enforced. Fresh canonical `unit.text`
+  is derived content responsibility: step/counterevidence kind or
+  retracted/contested status never makes its whole wording literal. The current
+  canonical unit schema has no explicit literal field; do not invent one.
+  Injected `ReadingUnit.verbatim` remains strict. Fresh oversized derived
+  continuations remain editable while supplying all content/evidence/context/
+  resources; true explicit literals require accepted exact continuations.
+  Legacy continuation bytes remain frozen. Do not restore transcript copying
+  as a substitute for evidence preservation.
   Fresh composition inputs distinguish derived unit responsibility from source
   quotation and explicit verbatim. Synthetic technical/life examples demonstrate
   one content home without duplicate prose; they are never current evidence.

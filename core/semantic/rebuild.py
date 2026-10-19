@@ -801,6 +801,7 @@ class RebuildCoordinator:
     def plan(self, provider_profile, *, run_id=None, expires_in=86400):
         from core.semantic.runtime import validate_profile
         from core.semantic.legacy import SOURCE_FIRST_POLICY
+        from core.semantic.projections import CONTENT_READING_POLICY
         from core.config import DATA_DIR
         config = self._config()
         self._admit_private_paths(config)
@@ -832,7 +833,7 @@ class RebuildCoordinator:
         if type(expires_in) not in (int, float) or not 0 < expires_in <= 7 * 86400:
             raise RebuildError("rebuild_plan_expiry_invalid")
         plan = {"schema": SCHEMA, "run_id": run_id, "generation_id": generation,
-                "history_policy": SOURCE_FIRST_POLICY,
+                "history_policy": SOURCE_FIRST_POLICY, "reading_policy": CONTENT_READING_POLICY,
                 "created_at": self.clock(), "expires_at": self.clock() + expires_in,
                 "config": config, "config_fingerprint": fingerprint(config),
                 "config_revision": config["config_revision"], "provider_profile": profile,
@@ -858,6 +859,7 @@ class RebuildCoordinator:
 
     def status(self, run_id):
         from .legacy import history_policy
+        from .projections import reading_policy
         self._admit_private_paths(self._config())
         run = RebuildJournal(self.root, run_id).read()
         state = ("rolled_back" if run["rollback"].get("restored") is True else "incomplete") if run.get("rollback") else run.get("final_receipt", {}).get("state", "incomplete")
@@ -893,7 +895,7 @@ class RebuildCoordinator:
                 restored = None
                 restore_code = "runtime_restore_observation_required"
         return {"run_id": run_id, "generation_id": run["plan"]["generation_id"],
-                "history_policy": history_policy(run["plan"]),
+                "history_policy": history_policy(run["plan"]), "reading_policy": reading_policy(run["plan"]),
                 "phase": phase, "error_codes": [e["code"] for e in run["errors"]],
                 "freeze_count": len(run["freeze_receipts"]),
                 "relocated": bool((run.get("relocation") or {}).get("complete")),
@@ -1462,8 +1464,13 @@ class RebuildCoordinator:
     def _execute_locked(self, journal):
         from core.semantic.store import SemanticStore
         from core.semantic.legacy import history_policy, SOURCE_FIRST_POLICY
+        from core.semantic.projections import reading_policy, bind_reading_policy, ReadingError
         run, config = journal.read(), self._config()
         plan = run["plan"]
+        try:
+            reading_policy(plan)
+        except ReadingError as exc:
+            raise RebuildError("rebuild_reading_policy_invalid") from exc
         relocation = run.get("relocation")
         if relocation is not None and relocation.get("complete") is not True:
             raise RebuildError("rebuild_relocation_recovery_required")
@@ -1523,6 +1530,10 @@ class RebuildCoordinator:
                     for table in ("source_records", "capture_batches", "jobs", "legacy_mappings", "items"))
                 if policy != SOURCE_FIRST_POLICY or "history_policy" in row or not pristine:
                     raise RebuildError("rebuild_history_policy_mismatch")
+            try:
+                row = bind_reading_policy(conn, plan)
+            except ReadingError as exc:
+                raise RebuildError("rebuild_" + exc.code) from exc
             if "history_policy" in plan:
                 row["history_policy"] = policy
             row["provider_profile"] = plan["provider_profile"]
@@ -1863,6 +1874,7 @@ class RebuildCoordinator:
 
     def _verification_manifest(self, journal, store, roles, final, inventory, publication):
         from .legacy import history_policy, SOURCE_FIRST_POLICY
+        from .projections import reading_policy
         with closing(store.connect()) as conn:
             rows = [dict(row) for row in conn.execute("SELECT * FROM capture_batches ORDER BY rowid")]
             batches = [{"batch_id": row["batch_id"], "member_version_ids": json.loads(row["receipt_json"])["member_version_ids"]} for row in rows]
@@ -1888,6 +1900,8 @@ class RebuildCoordinator:
                 "rebuild_reading_required": True, "required_brief": run.get("required_brief")}
         if "history_policy" in run["plan"]:
             manifest["history_policy"] = history_policy(run["plan"])
+        if "reading_policy" in run["plan"]:
+            manifest["reading_policy"] = reading_policy(run["plan"])
         if history_policy(run["plan"]) == SOURCE_FIRST_POLICY:
             declarations = [run["history_preservations"][identity] for identity in run.get("history_preservation_order", ())]
             if not declarations or declarations[-1]["receipt_id"] != inventory.manifest_id:
