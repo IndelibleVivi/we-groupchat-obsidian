@@ -601,13 +601,23 @@ def _job_state_summary(path, now):
     fresh freeze/source path and are reported for the operator.
     """
     path = Path(path)
-    result = {"states": {}, "blocker": None, "error_codes": []}
+    result = {"states": {}, "reader_states": {}, "blocker": None, "error_codes": []}
     if not regular_exists(path):
         return result
     try:
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
             conn.execute("PRAGMA query_only=ON")
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "reader_text_artifacts" in tables:
+                reader_states = {row[0]: int(row[1]) for row in conn.execute(
+                    "SELECT status,COUNT(*) FROM reader_text_artifacts GROUP BY status")}
+                if set(reader_states) - {"pending", "running", "unknown", "failed", "accepted"}:
+                    raise RebuildError("rebuild_job_state_invalid")
+                result["reader_states"] = dict(sorted(reader_states.items()))
+                # Reader calls have no expiring lease: a running record is an
+                # unresolved dispatched invocation, never evidence for replay.
+                if reader_states.get("running") or reader_states.get("unknown"):
+                    result["blocker"] = "semantic_job_busy_or_unknown"
             if "jobs" not in tables:
                 return result
             states = {row[0]: int(row[1]) for row in conn.execute(
@@ -891,7 +901,8 @@ class RebuildCoordinator:
                 "state": state, "restored": restored, "restore_code": restore_code,
                 "restore_observed_at": restore_observed_at,
                 "restore_attempt_count": len(attempts),
-                "job_states": jobs["states"], "job_error_codes": jobs["error_codes"],
+                "job_states": jobs["states"], "reader_job_states": jobs["reader_states"],
+                "job_error_codes": jobs["error_codes"],
                 "job_blocker": jobs["blocker"]}
 
     def _event(self, journal, phase, value):
@@ -1483,7 +1494,8 @@ class RebuildCoordinator:
             return {"run_id": journal.run_id, "generation_id": plan["generation_id"],
                     "state": "incomplete", "code": jobs["blocker"],
                     "restored": restored, "recovery_required": True,
-                    "job_states": jobs["states"], "job_error_codes": jobs["error_codes"],
+                    "job_states": jobs["states"], "reader_job_states": jobs["reader_states"],
+                    "job_error_codes": jobs["error_codes"],
                     "job_blocker": jobs["blocker"]}
         roles = self._roles(config, plan["provider_profile"])
         if roles.preflight().get("ready") is not True:

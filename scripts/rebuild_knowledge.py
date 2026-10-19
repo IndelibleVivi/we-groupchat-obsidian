@@ -54,7 +54,7 @@ def public_result(value):
                "recovery_required", "retained_generation", "requires_runtime_grant", "checkpoint_count",
                "freeze_count", "error_codes", "issues", "counts", "provisional_failure", "configured_admission",
                "relocated", "relocation_receipt", "provider_refreshed", "provider_change_blocked",
-               "job_count", "file_count", "total_bytes", "restore_code", "restore_observed_at",
+               "job_count", "file_count", "total_bytes", "restore_code", "restore_observed_at", "reader_job_states",
                "restore_attempt_count", "job_states", "job_error_codes", "job_blocker", "history_policy"}
     result = {key: val for key, val in value.items() if key in allowed}
     if "live_check" in value:

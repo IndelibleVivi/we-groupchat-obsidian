@@ -61,6 +61,21 @@ class ReadingHarness(unittest.TestCase):
         snapshot = snapshot or self.snapshot()
         return self.publisher.publish_item(snapshot, self.plan(snapshot))
 
+    def test_json_mode_body_and_repair_both_declare_json_instructions(self):
+        snapshot = self.snapshot()
+        good = {"blocks": [{"id": "home", "role": "narrative",
+                           "text": snapshot.units[0].text, "unit_indices": [0]}]}
+        def guarded(value):
+            def response(prompt):
+                self.assertRegex(json.loads(prompt)["task"], r"(?i)\bjson\b")
+                return value
+            return response
+        provider = ScriptedTextProvider(guarded({"blocks": []}), guarded(good))
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger).plan(
+            snapshot, request_id="json-mode-body")
+        self.assertEqual(plan.blocks[0].unit_ids, ("story",))
+        self.assertEqual(len(provider.calls), 2)
+
     def canonical_story(self):
         from core.semantic.store import SemanticStore
         store = SemanticStore(self.base / "actual.sqlite", "canonical-gen", now_func=lambda: 1791849600.0)
@@ -592,7 +607,7 @@ class ProjectionTests(ReadingHarness):
         # A longer prompt or smaller budget can now choose different child IDs.
         from core.semantic.projections import accepted_text_artifact
         snapshot = self.snapshot()
-        for suffix in (":page:0", ":group:0:fragment:0", ""):
+        for suffix in (":page:0", ":group:0:fragment:0", ":repair:old", ""):
             with self.subTest(suffix=suffix):
                 root = "body_%_" + str(len(suffix))
                 old = ScriptedTextProvider(RuntimeError("old request outcome unknown"))
@@ -807,6 +822,217 @@ class ProjectionTests(ReadingHarness):
         self.assertEqual(resumed.status, "published")
         self.assertEqual(len(provider.calls), 1)
         self.assertEqual(store.pending_outbox("projection"), [])
+
+    def test_received_body_validation_repairs_once_and_replays_exact_artifact(self):
+        for code, bad in (("body_plan_unit_coverage", {"blocks": []}),
+                          ("body_plan_lost_evidence", {"blocks": [{"id": "home", "role": "narrative",
+                              "text": "省略了必须逐字保留的原话。", "unit_indices": [0]}]})):
+            with self.subTest(code=code):
+                snapshot = self.snapshot(item_id=code)
+                root = "repair-" + code
+                before = []
+                def repair(prompt):
+                    rows = self.ledger.all("SELECT * FROM reader_text_artifacts WHERE request_id=? OR request_id LIKE ?",
+                                           (root, root + ":repair:%"))
+                    original = next(row for row in rows if row["request_id"] == root)
+                    child = next(row for row in rows if row["request_id"] != root)
+                    self.assertEqual((original["status"], child["status"]), ("failed", "running"))
+                    diagnostic = json.loads(original["artifact_json"])
+                    self.assertEqual(diagnostic["code"], code)
+                    expected_id = root + ":repair:" + fingerprint(json.dumps(
+                        [original["job_key"], root], ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                    self.assertEqual(child["request_id"], expected_id)
+                    self.assertEqual(child["provider_route"], original["provider_route"])
+                    self.assertIn(code, json.loads(prompt)["task"])
+                    self.assertEqual(json.loads(prompt)["snapshot"], json.loads(provider.calls[0][0])["snapshot"])
+                    self.assertLessEqual(len(prompt.encode()), len(provider.calls[0][0].encode()))
+                    before.append(dict(original))
+                    return self.paged_response(prompt)
+                provider = ScriptedTextProvider(bad, repair)
+                plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger).plan(snapshot, request_id=root)
+                self.assertEqual(plan.blocks[0].text, snapshot.units[0].text)
+                self.assertEqual(len(provider.calls), 2)
+                self.assertEqual(dict(self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (root,))), before[0])
+                # New process and even a caller alias adopt the same accepted child.
+                replay = ScriptedTextProvider()
+                resumed = BodyPlanWriter(replay, self.ledger.generation_id, self.ledger).plan(snapshot, request_id=root)
+                self.assertEqual(resumed, plan)
+                self.assertEqual(BodyPlanWriter(replay, self.ledger.generation_id, self.ledger).plan(
+                    snapshot, request_id=root + "-alias"), plan)
+                self.assertEqual(replay.calls, [])
+                self.assertEqual(len(self.ledger.all("SELECT * FROM reader_text_artifacts WHERE request_id=? OR request_id LIKE ?",
+                                                   (root, root + ":repair:%"))), 2)
+
+    def test_bounded_pages_and_lossless_fragments_repair_the_exact_child(self):
+        for phase in ("body_page_v1", "body_fragment_v1"):
+            with self.subTest(phase=phase):
+                snapshot = self.snapshot(item_id=phase)
+                if phase == "body_page_v1":
+                    units = tuple(ReadingUnit("unit-" + str(i), "这是日常片段。" * 40 + str(i), ("e-" + str(i),))
+                                  for i in range(20))
+                    snapshot = replace(snapshot, units=units,
+                        evidence=tuple(EvidenceExcerpt("e-" + str(i), u.text) for i, u in enumerate(units)))
+                else:
+                    text = "连续的中文与步骤不能被截断。" * 1500
+                    snapshot = replace(snapshot, units=(ReadingUnit("large", text, ("large-e",), verbatim=(text,)),),
+                                       evidence=(EvidenceExcerpt("large-e", text),))
+                def first(prompt):
+                    self.assertEqual(json.loads(prompt)["phase"], phase)
+                    if phase == "body_page_v1":
+                        return {"blocks": []}
+                    response = self.paged_response(prompt)
+                    response["blocks"][0]["text"] += "额外文字。"
+                    return response
+                provider = ScriptedTextProvider(first, *([self.paged_response] * 100))
+                writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger, max_input_bytes=9000)
+                plan = writer.plan(snapshot, request_id=phase)
+                self.assertGreater(len(provider.calls), 2)
+                self.assertTrue(all(len(call[0].encode()) <= 9000 for call in provider.calls))
+                self.assertEqual({u for block in plan.blocks for u in block.unit_ids}, {u.id for u in snapshot.units})
+                if phase == "body_fragment_v1":
+                    self.assertEqual(plan.blocks[0].text, snapshot.units[0].text)
+                failed = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE status='failed' AND request_id LIKE ?",
+                                         (phase + ":%",))
+                expected_suffix = ":page:0" if phase == "body_page_v1" else ":group:0:fragment:0"
+                self.assertEqual(failed["request_id"], phase + expected_suffix)
+                child_id = provider.calls[1][1]
+                self.assertTrue(child_id.startswith(failed["request_id"] + ":repair:"))
+                count = len(provider.calls)
+                self.assertEqual(writer.plan(snapshot, request_id=phase), plan)
+                self.assertEqual(len(provider.calls), count)
+
+    def test_body_repair_fits_an_original_prompt_at_the_provider_input_limit(self):
+        snapshot = self.snapshot()
+        size = len(BodyPlanWriter._prompt(snapshot, None, {}).encode())
+        self.assertLess(size, 9000)
+        snapshot = replace(snapshot, title=snapshot.title + "x" * (9000 - size))
+        provider = ScriptedTextProvider({"blocks": []}, self.paged_response)
+        provider.max_input_bytes = 9000
+        plan = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger).plan(snapshot, request_id="full-budget")
+        self.assertEqual(plan.blocks[0].text, snapshot.units[0].text)
+        self.assertEqual(len(provider.calls[0][0].encode()), 9000)
+        self.assertLessEqual(len(provider.calls[1][0].encode()), 9000)
+
+    def test_body_original_interrupted_dispatch_stays_running_without_repair(self):
+        snapshot = self.snapshot()
+        def stop(_prompt):
+            raise KeyboardInterrupt("synthetic original interruption")
+        provider = ScriptedTextProvider(stop)
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+        with self.assertRaises(KeyboardInterrupt):
+            writer.plan(snapshot, request_id="original-running")
+        with self.assertRaisesRegex(ReadingError, "text_provider_outcome_unknown"):
+            writer.plan(snapshot, request_id="original-running")
+        row = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='original-running'")
+        self.assertEqual((row["status"], row["artifact_json"]), ("running", ""))
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_repaired_body_resumes_after_publication_interruption(self):
+        store, _observation, _span = self.canonical_story()
+        publisher = ProjectionPublisher.for_store(store, self.base / "actual-WGO", file_lock=MacOSFileLock())
+        provider = ScriptedTextProvider({"blocks": []}, self.paged_response)
+        writer = BodyPlanWriter(provider, store.generation_id)
+        with patch.object(publisher, "publish_item", side_effect=RuntimeError("synthetic publication crash")):
+            with self.assertRaisesRegex(RuntimeError, "synthetic publication crash"):
+                publisher.publish_canonical_item(store, "stable-cat", writer, request_id="repair-publish")
+        self.assertEqual([row[0] for row in publisher.ledger.all(
+            "SELECT status FROM reader_text_artifacts ORDER BY rowid")], ["failed", "accepted"])
+        replay = ScriptedTextProvider()
+        result = publisher.publish_canonical_item(store, "stable-cat", BodyPlanWriter(replay, store.generation_id),
+                                                  request_id="repair-publish")
+        self.assertEqual(result.status, "published")
+        self.assertEqual(replay.calls, [])
+        self.assertEqual(store.pending_outbox("projection"), [])
+
+    def test_body_known_failure_resumes_after_interruption_before_repair_dispatch(self):
+        snapshot = self.snapshot()
+        provider = ScriptedTextProvider({"blocks": []}, self.paged_response)
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+        with patch.object(writer, "_repair_received_validation", side_effect=KeyboardInterrupt("before repair")):
+            with self.assertRaises(KeyboardInterrupt):
+                writer.plan(snapshot, request_id="before-repair")
+        failed = dict(self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='before-repair'"))
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(len(provider.calls), 1)
+        resumed = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger).plan(snapshot, request_id="before-repair")
+        self.assertEqual(resumed.blocks[0].text, snapshot.units[0].text)
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(dict(self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id='before-repair'")), failed)
+
+    def test_body_repair_unknown_or_interrupted_dispatch_blocks_resume(self):
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted):
+                snapshot = self.snapshot(item_id="unknown-repair-" + str(interrupted))
+                root = snapshot.item_id
+                def stop(_prompt):
+                    if interrupted:
+                        raise KeyboardInterrupt("synthetic repair interruption")
+                    raise RuntimeError("unknown repair result")
+                provider = ScriptedTextProvider({"blocks": []}, stop)
+                error = KeyboardInterrupt if interrupted else RuntimeError
+                with self.assertRaises(error):
+                    BodyPlanWriter(provider, self.ledger.generation_id, self.ledger).plan(snapshot, request_id=root)
+                rows = self.ledger.all("SELECT * FROM reader_text_artifacts WHERE request_id LIKE ?", (root + "%",))
+                self.assertEqual([row["status"] for row in rows], ["failed", "running" if interrupted else "unknown"])
+                for budget in (80000, 9000):
+                    replay = ScriptedTextProvider(self.paged_response)
+                    with self.assertRaisesRegex(ReadingError, "text_provider_outcome_unknown"):
+                        BodyPlanWriter(replay, self.ledger.generation_id, self.ledger, max_input_bytes=budget).plan(
+                            snapshot, request_id=root)
+                    self.assertEqual(replay.calls, [])
+                self.assertEqual(len(provider.calls), 2)
+
+    def test_body_repair_exhaustion_retains_both_failures_and_never_calls_again(self):
+        snapshot = self.snapshot()
+        provider = ScriptedTextProvider({"blocks": []}, {"blocks": []})
+        writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+        with self.assertRaisesRegex(ReadingError, "body_plan_unit_coverage"):
+            writer.plan(snapshot, request_id="exhausted")
+        before = [dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")]
+        self.assertEqual([row["status"] for row in before], ["failed", "failed"])
+        for root in ("exhausted", "exhausted-alias"):
+            with self.assertRaisesRegex(ReadingError, "text_request_already_failed"):
+                writer.plan(snapshot, request_id=root)
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual([dict(row) for row in self.ledger.all("SELECT * FROM reader_text_artifacts ORDER BY rowid")], before)
+
+    def test_body_provider_route_and_historical_failures_have_no_repair_proof(self):
+        from ai.semantic_provider import ProviderError, ProviderRoute
+        for failure in ("route", "provider", "historical", "stale"):
+            with self.subTest(failure=failure):
+                snapshot = self.snapshot(item_id="no-repair-" + failure)
+                root = snapshot.item_id
+                if failure == "historical":
+                    # Historical validation failures did not persist trustworthy diagnostics.
+                    from core.semantic.projections import accepted_text_artifact
+                    provider = ScriptedTextProvider({"blocks": []})
+                    with self.assertRaisesRegex(ReadingError, "body_plan_unit_coverage"):
+                        accepted_text_artifact(self.ledger, provider,
+                            prompt=BodyPlanWriter._prompt(snapshot, None, {}), request_id=root,
+                            prompt_version="body-plan-v9", validate=lambda raw: validate_body_plan(
+                                snapshot, BodyPlanWriter._response(snapshot, raw)).to_json())
+                    expected = "text_request_already_failed"
+                else:
+                    value = ProviderError("synthetic provider error", outcome_unknown=False)
+                    if failure == "stale":
+                        value = {**json.loads(self.plan(snapshot).to_json()), "content_revision": 2}
+                    provider = ScriptedTextProvider(value)
+                    if failure == "route":
+                        def wrong_route(prompt, *, request_id, generation_id):
+                            provider.calls.append((prompt, request_id, generation_id))
+                            return SimpleNamespace(text='{"blocks":[]}', route=ProviderRoute("wrong", "wrong", "text"))
+                        provider.generate = wrong_route
+                    expected = {"route": "text_provider_route_changed", "provider": "provider_failed",
+                                "stale": "stale_body_plan"}[failure]
+                writer = BodyPlanWriter(provider, self.ledger.generation_id, self.ledger)
+                with self.assertRaisesRegex((ReadingError, ProviderError), expected):
+                    writer.plan(snapshot, request_id=root)
+                for resume in (root, root + "-alias"):
+                    with self.assertRaisesRegex(ReadingError, "text_request_already_failed"):
+                        writer.plan(snapshot, request_id=resume)
+                row = self.ledger.one("SELECT * FROM reader_text_artifacts WHERE request_id=?", (root,))
+                self.assertEqual((row["status"], row["artifact_json"]), ("failed", ""))
+                self.assertEqual(len(provider.calls), 1)
 
     def test_body_unknown_outcome_cannot_be_retried_under_new_request(self):
         snapshot = self.snapshot()

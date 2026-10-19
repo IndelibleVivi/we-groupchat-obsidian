@@ -238,6 +238,11 @@
   paraphrase can share one content home. Explicit `verbatim`, procedural and
   correction obligations remain enforced. Do not restore transcript copying as
   a substitute for evidence preservation.
+  A complete, bound-route Body response with a recorded validation diagnostic
+  may receive one deterministic repair child. Preserve the original failed
+  row and all accepted artifacts. Unknown/running work, provider or route
+  failures, stale envelopes and undiagnosed historical failures never become
+  repairs; an exhausted child cannot turn into another attempt on resume.
   Only the optional `integrations/obsidian/` plugin provides a verified visible
   open event; no plugin means manual known/read controls, not assumed reading.
   Historical rebuild does not notify. Brief opening, item reading, knowing and
@@ -271,6 +276,9 @@
   are recorded as observations, not assumed from an older success field.
   Source/model grants, budget/account setup, installation and activation are
   separate from source tests; see `docs/semantic-rebuild.md`.
+  Pre-capture recovery inspects both semantic jobs and reader text artifacts;
+  unknown/running reader work has no expiring lease and blocks fresh source,
+  provider construction and freeze creation until its outcome is resolved.
 - `core/semantic/verification.py` owns independent complete-generation checks;
   `verification_storage.py` supplies disposable private disk snapshots and
   scoped SQL access. Never restore an in-memory whole-database backup or

@@ -60,10 +60,12 @@ RPM/TPM 配置；`unset` 明确列出未设置的速率。它只读取计划配�
 provider，也不代表已探明服务商限额或当前运行中的请求数。实际进程的
 admission 观察来自所用 `ProviderRoles.preflight()`；已冻结计划不能靠后来
 修改配置来悄悄改换执行参数。`plan` 与 `status` 还输出 `history_policy`。
-`status` 只读持久化证据并报告 job state/error-code 汇总、是否有 unknown 或未过期
-running lease 阻断，以及 append-only restore attempts 的最新观察；遇到 unknown
-或跨进程运行中的 lease 时，不打开 source、不构造 provider、不新建 freeze。
+`status` 只读持久化证据并报告 job state/error-code 汇总与单独的 `reader_job_states`，
+包括 semantic job 的 unknown／未过期 running lease，以及正文/reader text 的
+unknown／running 阻断；同时报告 append-only restore attempts 的最新观察。
+遇到这些阻断时，不打开 source、不构造 provider、不新建 freeze。
 已过期的 running lease 可由正常恢复流程重新 claim，不会被误报为永久 unknown。
+reader text 不使用可过期 lease，不能把其 running 当成可自动重发的证据。
 
 ## Provider profile 与预算
 

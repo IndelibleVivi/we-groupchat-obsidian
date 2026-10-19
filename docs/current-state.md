@@ -96,10 +96,18 @@ context instead of only its last two messages. Existing page jobs keep their
 frozen inputs and outcomes; this change does not silently re-extract old work.
 
 `status` reports content-free job states and error codes, the current blocker,
-and the latest append-only restore observation. Unknown outcomes and unexpired
-running leases block source/provider work; expired leases remain reclaimable.
+and the latest append-only restore observation. Separate `reader_job_states`
+include Body/reader text invocations. Unknown/running reader invocations,
+unknown semantic outcomes and unexpired running leases block source/provider
+work; expired semantic leases remain reclaimable.
 An old `restored=true` followed by a restore error is observation-required, not
 fresh health. No command automatically reconciles unknown jobs or resets work.
+Body composition records a received-validation diagnostic before allowing
+one deterministic repair child. The original failed row remains, successful
+children replay without new calls, and failed/unknown children cannot gain
+another attempt by changing a request ID. Historical failures without the
+diagnostic still stop. This is source support; real editorial acceptance is a
+separate check on generated Markdown.
 Custom endpoints now have an explicit `custom_streaming` boolean opt-in.
 The adapter requires a terminal `stop` before returning text and preserves
 unknown-outcome handling on disconnect; absent historical fields retain their

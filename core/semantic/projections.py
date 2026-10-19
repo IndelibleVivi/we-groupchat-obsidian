@@ -51,12 +51,15 @@ def provider_binding(provider) -> str:
 
 
 def accepted_text_artifact(ledger, provider, *, prompt: str, request_id: str,
-                           prompt_version: str, validate: Callable[[str], str]) -> str:
+                           prompt_version: str, validate: Callable[[str], str],
+                           validation_failure_codes: frozenset[str] = frozenset()) -> str:
     """Persist a validated consumer result before allowing dependent writes.
 
     A running/unknown invocation cannot be replaced with a new request ID. A
     validated artifact is reusable only for the identical generation, prompt
-    and provider route; SQLite remains the one generation database.
+    and provider route; SQLite remains the one generation database. Opt-in
+    validation diagnostics preserve failed rows even if a caller changes IDs;
+    they prove a received validation failure, never an accepted artifact.
     """
     route = provider_binding(provider)
     job_key = fingerprint(json_text([ledger.generation_id, prompt_version, route, prompt]))
@@ -69,7 +72,8 @@ def accepted_text_artifact(ledger, provider, *, prompt: str, request_id: str,
                               (ledger.generation_id, job_key)).fetchone()
         if cached and cached["status"] in {"running", "unknown"}:
             raise ReadingError("text_provider_outcome_unknown")
-        if cached and cached["status"] == "failed" and cached["request_id"] == request_id:
+        if cached and cached["status"] == "failed" and (
+                cached["request_id"] == request_id or validation_failure_codes):
             raise ReadingError("text_request_already_failed")
         if not cached or cached["status"] != "accepted":
             conn.execute("INSERT INTO reader_text_artifacts VALUES (?,?,?,?,?,'running','') "
@@ -78,19 +82,27 @@ def accepted_text_artifact(ledger, provider, *, prompt: str, request_id: str,
     if cached and cached["status"] == "accepted":
         return validate(cached["artifact_json"])
     received = False
+    validating = False
     try:
         result = provider.generate(prompt, request_id=request_id, generation_id=ledger.generation_id)
         received = True
         if provider_binding(result) != route:
             raise ReadingError("text_provider_route_changed")
-        artifact = validate(result.text)
+        raw = result.text
+        validating = True
+        artifact = validate(raw)
     except Exception as exc:
         from .scheduling import not_dispatched
         status = ("pending" if not received and not_dispatched(exc, request_id)
                   else "unknown" if not received and getattr(exc, "outcome_unknown", True) else "failed")
+        diagnostic = ""
+        if validating and isinstance(exc, ReadingError) and exc.code in validation_failure_codes:
+            diagnostic = json_text({"schema": "received-validation-failure-v1", "code": exc.code,
+                "generation_id": ledger.generation_id, "job_key": job_key, "request_id": request_id,
+                "provider_route": route, "prompt_version": prompt_version})
         with ledger.transaction() as conn:
-            conn.execute("UPDATE reader_text_artifacts SET status=? WHERE generation_id=? AND job_key=?",
-                         (status, ledger.generation_id, job_key))
+            conn.execute("UPDATE reader_text_artifacts SET status=?,artifact_json=? WHERE generation_id=? AND job_key=?",
+                         (status, diagnostic, ledger.generation_id, job_key))
         raise
     with ledger.transaction() as conn:
         conn.execute("UPDATE reader_text_artifacts SET status='accepted',artifact_json=? WHERE generation_id=? AND job_key=?",
@@ -653,6 +665,17 @@ def validate_body_plan(snapshot: ReadingSnapshot, plan: BodyPlan, *, check_markd
                     {u.id: fingerprint(json_text(asdict(u))) for u in snapshot.units})
 
 
+# Only received composition/validation errors are eligible. Stale caller
+# envelopes, invalid canonical inputs and provider/transport errors are not.
+_BODY_VALIDATION_FAILURES = frozenset({
+    "invalid_body_plan", "invalid_projection_token", "body_plan_unit_coverage",
+    "body_plan_lost_evidence", "body_plan_lost_claim_status", "body_plan_invalid_claim_status",
+    "body_plan_changed_stable_home", "body_plan_changed_unaffected_block", "body_fragment_changed_verbatim",
+    "markdown_unclosed_code_fence", "markdown_quote_attribution_mismatch", "markdown_invalid_evidence_marker",
+    "markdown_executable_link", "markdown_quote_not_grounded",
+})
+
+
 class BodyPlanWriter:
     def __init__(self, provider, generation_id: str, ledger=None, *, max_input_bytes=80000):
         if type(max_input_bytes) is not int or max_input_bytes < 8000:
@@ -683,13 +706,14 @@ class BodyPlanWriter:
             # A version/budget change may turn a page into fragments (or vice
             # versa). Such repartitioning must not bypass an unresolved child
             # invocation of this stable caller-owned request.
-            prefixes = (request_id + ":page:", request_id + ":group:")
+            prefixes = (request_id + ":page:", request_id + ":group:", request_id + ":repair:")
             unresolved = ledger.one(
                 "SELECT 1 FROM reader_text_artifacts WHERE generation_id=? "
                 "AND status IN ('running','unknown') AND prompt_version LIKE 'body-%' "
-                "AND (request_id=? OR substr(request_id,1,?)=? OR substr(request_id,1,?)=?) LIMIT 1",
+                "AND (request_id=? OR substr(request_id,1,?)=? OR substr(request_id,1,?)=? "
+                "OR substr(request_id,1,?)=?) LIMIT 1",
                 (self.generation_id, request_id, len(prefixes[0]), prefixes[0],
-                 len(prefixes[1]), prefixes[1]))
+                 len(prefixes[1]), prefixes[1], len(prefixes[2]), prefixes[2]))
             if unresolved:
                 raise ReadingError("text_provider_outcome_unknown")
         prompt_text = self._prompt(snapshot, previous, unchanged)
@@ -701,7 +725,7 @@ class BodyPlanWriter:
     def _prompt(snapshot, previous, unchanged, **context):
         prompt = {
             "task": "为会回来阅读这件事的人，写一篇持续更新的 Obsidian 笔记。生活故事与技术讨论同样认真对待。"
-                    "只返回 schema 要求的 {blocks:[...]}。unit_indices 选给定 snapshot.units 的序号，"
+                    "只返回 schema 要求的 JSON 对象 {blocks:[...]}。unit_indices 选给定 snapshot.units 的序号，"
                     "required_unit_indices 中的每个序号恰好一次，归入稳定 block。即使两个单元讲同一件事，"
                     "也要把两个序号都放入讲这件事的 block，正文合写一次即可。程序绑定身份、revision、证据、资源与状态；"
                     "不要输出内部 ID、处理说明、frontmatter 或 H1，标题由 publisher 提供。\n"
@@ -716,13 +740,16 @@ class BodyPlanWriter:
                     "转述仍保持其性质；不确定性在影响理解时自然说明，不追加‘未说明/只能确认’审计旁白。"
                     "保留所供称呼、归属、代码与技术词；性别未明确时用名字，不从名字或口吻推断他/她。"
                     "不要把分享者、经历中的人和引文作者混为一人，也不编造图像或文件正文。\n"
+                    "裸链接只证明有人分享了这个地址，不得从 URL path/slug 推断网页的真实标题、作者或结论。"
+                    "文件名只证明文件引用，不证明附件内部内容；保留链接和文件引用，不替未读取的材料写简介。\n"
                     "精确消息在来源页。quote-role 单元可忠实转述，选用能承载细节、语气或转折的准确措辞；"
                     "不要先总结再全文重复引用，也不要照搬 [回复] 等聊天包装。短引文放句内，长引文用带归属的"
                     "blockquote。特别注意：unit.verbatim 的每一段必须逐字原样出现在该单元所在 block，"
                     "包括虚词、标点和术语，不得同义改写或缩写；这适用于步骤、反证和更正义务。"
                     "将这些原样片段自然接入正文，避免另外重复解释同一内容。\n"
                     "精确时间留在来源页，仅在解释事件或变化时写日期时间，不把 semantic_at 修订时间当事件时间；"
-                    "需要时区时沿用所供时区。增量写作保留已有 block ID、全部 retained unit/evidence/resource 的"
+                    "正文一旦写出具体时分，必须同时标出 source_time 所给的 UTC offset，不裸写时分，"
+                    "也不换成未声明的本机时区。增量写作保留已有 block ID、全部 retained unit/evidence/resource 的"
                     "原 home。新细节回答或限定原来的点时，改写收到新单元的自动段落；只给独立部分或真实新场景"
                     "建新 block。没有收到新增或变化单元的 block 保持精确原字节，不顺手润色。手改冲突由程序处理。"
                     "retracted/contested 单元须以 correction/historical/counterevidence role 明确 changed status，"
@@ -788,14 +815,65 @@ class BodyPlanWriter:
                 raise ReadingError("body_fragment_changed_verbatim")
             return result.to_json()
         if ledger is not None:
-            artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
-                                              prompt_version="body-plan-v9", validate=validate)
+            try:
+                artifact = accepted_text_artifact(ledger, self.provider, prompt=prompt_text, request_id=request_id,
+                    prompt_version="body-plan-v9", validate=validate,
+                    validation_failure_codes=_BODY_VALIDATION_FAILURES)
+            except ReadingError as exc:
+                if exc.code not in _BODY_VALIDATION_FAILURES | {"text_request_already_failed"}:
+                    raise
+                artifact = self._repair_received_validation(ledger, prompt_text, validate)
+                if artifact is None:
+                    raise
             return BodyPlan.from_json(artifact)
         route = provider_binding(self.provider)
         result = self.provider.generate(prompt_text, request_id=request_id, generation_id=self.generation_id)
         if provider_binding(result) != route:
             raise ReadingError("text_provider_route_changed")
         return BodyPlan.from_json(validate(result.text))
+
+    def _repair_received_validation(self, ledger, prompt_text, validate):
+        """One durable child of the exact failed invocation, never a fresh retry.
+
+        The failed row is immutable and only our received-validation diagnostic
+        proves eligibility. Historical empty failures cannot acquire that proof
+        on resume. The normal artifact ledger owns dispatch and replay of the
+        child, so an interrupted/failed repair cannot create another attempt.
+        """
+        route = provider_binding(self.provider)
+        job_key = fingerprint(json_text([ledger.generation_id, "body-plan-v9", route, prompt_text]))
+        failed = ledger.one("SELECT * FROM reader_text_artifacts WHERE generation_id=? AND job_key=?",
+                            (ledger.generation_id, job_key))
+        if not failed or failed["status"] != "failed":
+            return None
+        try:
+            diagnostic = json.loads(failed["artifact_json"])
+        except (TypeError, ValueError):
+            return None
+        if (not isinstance(diagnostic, dict) or not isinstance(diagnostic.get("code"), str)
+                or diagnostic["code"] not in _BODY_VALIDATION_FAILURES):
+            return None
+        expected = {"schema": "received-validation-failure-v1", "code": diagnostic["code"],
+            "generation_id": ledger.generation_id, "job_key": job_key, "request_id": failed["request_id"],
+            "provider_route": route, "prompt_version": "body-plan-v9"}
+        if diagnostic != expected:
+            return None
+        prompt = json.loads(prompt_text)
+        # Replace only the generic introduction, retaining every concrete
+        # writing/validation instruction and all supplied context. This shorter
+        # prefix keeps even a full bounded page within its original input limit.
+        intro, task = prompt["task"].split("只返回 schema", 1)
+        repair_intro = "修复 " + diagnostic["code"] + "；完整重写。\n"
+        if len(repair_intro.encode("utf-8")) > len(intro.encode("utf-8")):
+            raise ReadingError("body_context_budget_exceeded")
+        prompt["task"] = repair_intro + "只返回 schema" + task
+        repair_prompt = json_text(prompt)
+        if len(repair_prompt.encode("utf-8")) > self.max_input_bytes:
+            raise ReadingError("body_context_budget_exceeded")
+        child = failed["request_id"] + ":repair:" + fingerprint(json_text([job_key, failed["request_id"]]))
+        return accepted_text_artifact(ledger, self.provider, prompt=repair_prompt, request_id=child,
+            prompt_version="body-plan-v9", validate=validate,
+            validation_failure_codes=_BODY_VALIDATION_FAILURES)
 
     @staticmethod
     def _partial(snapshot, units):

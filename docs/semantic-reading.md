@@ -48,7 +48,7 @@ statuses from the immutable snapshot, then validates the canonical `BodyPlan`.
 Optional exact evidence markers add supplied supporting excerpts; unknown refs
 still fail. Model-authored metadata cannot replace these bindings. Existing
 injected full-BodyPlan callers and durable canonical artifacts remain readable,
-and an explicitly wrong full envelope still fails rather than being repaired.
+and an explicitly wrong Item identity or revision still fails rather than being repaired.
 Every unit has exactly one paragraph home. A block receiving no new or changed
 units retains its previous bytes. A new immutable unit may be integrated into
 an existing block by rewriting its automatic prose, while preserving the block
@@ -132,9 +132,23 @@ persists a validated result before publishing files. `reader_text_artifacts`
 binds generation, exact prompt/snapshot, prompt version and provider route/model.
 Accepted results resume without a second provider call. A request ID cannot be
 reused for a different input or route; a running/unknown result cannot be
-resubmitted under a new ID. A known validation failure can be retried explicitly
-with a fresh request. Calling the pure `plan` helper without a ledger is intended
-for isolated rendering tests, not runtime publication.
+resubmitted under a new ID. For a complete response received from the bound
+route, a known Body composition/validation failure may receive **one** automatic
+repair. The failed row retains a small `received-validation-failure-v1`
+diagnostic bound to its exact generation, prompt, request and route; it is not
+an accepted Body artifact. The repair uses a deterministic `:repair:` child
+request, recorded before dispatch. Its bounded prompt replaces only the generic
+introduction with the validation code and keeps the complete snapshot, schema
+and concrete writing/validation instructions. Successful repair artifacts replay
+without another call, including after a crash before file publication; the
+original failed row remains unchanged. A failed repair stays exhausted on resume
+or a caller's fresh request ID for the same input. Unknown/running outcomes,
+wrong routes, provider failures, explicitly stale envelopes and historical
+failed rows without this diagnostic never create a repair. A repair interrupted
+after dispatch remains unresolved and blocks subsequent calls, including across
+Body versions and page/fragment repartitioning. Calling the pure `plan` helper
+without a ledger is intended for isolated rendering tests, not runtime
+publication and does not perform this durable repair.
 Current Body artifacts are `body-plan-v9` and `body-paged-v9`. They ask for one
 coherent reader-first note with grounded attribution, preserve each retained
 unit's unique home, and carry the program-owned metadata and exact explicit
@@ -143,6 +157,16 @@ The prompt enumerates every required unit index: overlapping units may share
 one prose block, but each still needs exactly one content home. Missing or
 duplicated indices fail validation; the program never assigns a missing home
 by guessing from similar text.
+Exact message times normally stay on source pages. If the body needs a time of
+day to explain a change, writer guidance requires the supplied UTC offset;
+it must not present a revision time as the event time or silently assume the
+reader's local timezone. Editorial acceptance still checks the actual output.
+Bare URL paths do not establish an unseen page's title, author or conclusions;
+filenames do not establish attachment contents. Writer guidance preserves the
+references without inventing a synopsis for unread material.
+Both ordinary and repair prompts explicitly request a JSON object, including
+localized writing instructions. This preserves the input requirement of
+endpoints that enforce the JSON keyword when JSON-object mode is selected.
 The paged aggregate key carries the same version, so a revised prompt never
 resumes a paged plan produced by an earlier one. Accepted v2-v8 artifacts remain
 historical evidence under their original contracts; these prompt instructions

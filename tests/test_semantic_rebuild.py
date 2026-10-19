@@ -58,6 +58,22 @@ class JobStateSummaryTests(unittest.TestCase):
         self.assertEqual(_job_state_summary(self.path, 200)["blocker"],
                          "semantic_job_busy_or_unknown")
 
+    def test_reader_unknown_or_running_blocks_without_semantic_job_work(self):
+        with closing(sqlite3.connect(self.path)) as conn:
+            conn.execute("DELETE FROM jobs")
+            conn.execute("CREATE TABLE reader_text_artifacts(status TEXT NOT NULL)")
+            conn.execute("INSERT INTO reader_text_artifacts VALUES('unknown')")
+            conn.commit()
+        for status in ("unknown", "running", "accepted", "failed", "pending"):
+            with self.subTest(status=status):
+                with closing(sqlite3.connect(self.path)) as conn:
+                    conn.execute("UPDATE reader_text_artifacts SET status=?", (status,))
+                    conn.commit()
+                summary = _job_state_summary(self.path, 200)
+                self.assertEqual(summary["blocker"],
+                    "semantic_job_busy_or_unknown" if status in {"unknown", "running"} else None)
+                self.assertEqual(summary["reader_states"], {status: 1})
+
 
 class SyntheticManagedRuntime:
     def __init__(self):
@@ -568,6 +584,28 @@ class RebuildCoordinatorTests(unittest.TestCase):
         self.assertNotIn("failed", status["job_states"])
         self.assertLess(status["job_states"].get("pending", 0), pending_jobs)
 
+    def test_unknown_reader_work_blocks_before_new_provider_source_or_freeze(self):
+        self.partial_run()
+        run = journal_details(self.runtime_root, "test-run")
+        with closing(sqlite3.connect(run["plan"]["database"])) as conn:
+            conn.execute("INSERT INTO reader_text_artifacts VALUES(?,?,?,?,?,'unknown','')",
+                (run["plan"]["generation_id"], "synthetic-body-key", "synthetic-body-request",
+                 "synthetic-route", "body-plan-v9"))
+            conn.commit()
+        before = self.coordinator.status("test-run")
+        self.assertEqual(before["reader_job_states"], {"unknown": 1})
+        with patch.object(self.coordinator, "source_factory",
+                          side_effect=AssertionError("source opened after unknown reader work")), \
+             patch.object(self.coordinator, "_roles",
+                          side_effect=AssertionError("provider constructed after unknown reader work")), \
+             patch.object(self.coordinator, "_freeze",
+                          side_effect=AssertionError("source recaptured after unknown reader work")):
+            blocked = self.execute()
+        self.assertEqual(blocked["code"], "semantic_job_busy_or_unknown", blocked)
+        self.assertEqual(blocked["reader_job_states"], {"unknown": 1})
+        self.assertTrue(blocked["restored"])
+        self.assertEqual(self.coordinator.status("test-run")["freeze_count"], before["freeze_count"])
+
     def test_second_full_pass_captures_old_time_late_row_and_changed_content(self):
         from tests.test_monitor_source import raw_message
         self.coordinator.plan(PROFILE, run_id="test-run")
@@ -984,6 +1022,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
             complete = self.coordinator.rollback("test-run", apply=True, allow_runtime_changes=True)
         self.assertEqual(complete["state"], "rolled_back")
         self.assertTrue(complete["restored"])
+        self.assertEqual(complete["code"], "rebuild_rollback_restored")
 
 
     def test_interrupt_before_provider_releases_locks_and_restores_exact_app(self):
