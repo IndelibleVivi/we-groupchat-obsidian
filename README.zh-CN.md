@@ -321,9 +321,10 @@ internal continuity docs。
 
 通义千问 provider 可通过 `ai_base_url` 指向 Model Studio 对应地域的
 OpenAI-compatible endpoint。结构化 monitor 调用使用
-`monitor_ai_timeout_seconds`（默认 90 秒），并发送 Qwen 原生的
-`enable_thinking=false`；自定义 OpenAI-compatible provider 继承同一 monitor
-timeout。确认自定义 endpoint 兼容后，可显式设置 `custom_thinking_parameter` 为
+`monitor_ai_timeout_seconds`（默认 90 秒），默认发送 Qwen 原生的
+`enable_thinking=false`。操作员可通过 `monitor_ai_thinking: true` 显式开启；
+历史 config 缺少该字段时保留默认行为。自定义 OpenAI-compatible provider
+继承同一 monitor timeout。确认自定义 endpoint 兼容后，可显式设置 `custom_thinking_parameter` 为
 `thinking`（DeepSeek dialect）或 `enable_thinking`（Qwen dialect），转发 monitor 的
 `monitor_ai_thinking` 设置；默认空值保留普通 custom request。参数已转发不代表中间
 gateway 或上游 model 已执行它。

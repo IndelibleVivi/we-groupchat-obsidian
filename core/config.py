@@ -361,6 +361,11 @@ def _sanitize_config(saved):
         if type(saved["custom_streaming"]) is not bool:
             raise ConfigError("custom_streaming_invalid")
         cfg["custom_streaming"] = saved["custom_streaming"]
+    # Absence remains the historical effective False without changing snapshots.
+    if "monitor_ai_thinking" in saved:
+        if type(saved["monitor_ai_thinking"]) is not bool:
+            raise ConfigError("monitor_ai_thinking_invalid")
+        cfg["monitor_ai_thinking"] = saved["monitor_ai_thinking"]
 
     monitor_chats = saved.get("monitor_chats")
     if isinstance(monitor_chats, list):

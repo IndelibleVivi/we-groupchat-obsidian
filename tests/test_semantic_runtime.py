@@ -3,8 +3,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 import json
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ai.semantic_provider import ProviderError
 from ai.semantic_provider import TextResult
@@ -19,6 +20,39 @@ from tests.test_semantic_engine import FakeText, FakeDecision
 from tests.test_semantic_retrieval import FakeEmbedding
 from tests.test_semantic_source import Source
 from tests.test_monitor_source import raw_message
+
+
+class ProviderThinkingConfigTests(unittest.TestCase):
+    def test_persisted_monitor_thinking_reaches_runtime_and_real_factory_kwargs(self):
+        from ai.factory import create_provider
+        from core.config import ConfigStore
+        profile = {"schema": "we-groupchat-obsidian.semantic-providers.v1", "decision": "text",
+                   "embedding": "local", "vector_index": "local", "local_embedding": {
+                       "endpoint": "http://127.0.0.1:12345/v1/embeddings", "model": "synthetic-embedding",
+                       "dimensions": 2, "context_window_tokens": 8192}}
+        native = SimpleNamespace(model="synthetic-text", summarize=Mock(side_effect=AssertionError("provider request")))
+        with tempfile.TemporaryDirectory() as folder:
+            store = ConfigStore(Path(folder) / "config.json")
+            store.replace({"ai_provider": "custom", "ai_model": "synthetic-text",
+                           "ai_base_url": "https://synthetic.invalid/v1", "custom_thinking_parameter": "thinking"})
+            for value in (None, True, False):
+                with self.subTest(value=value):
+                    if value is not None:
+                        store.update(lambda config: config.update(monitor_ai_thinking=value))
+                    config = store.inspect()
+                    if value is None:
+                        self.assertNotIn("monitor_ai_thinking", config)
+                    with patch("core.semantic.runtime.create_provider", wraps=create_provider) as factory, \
+                         patch("ai.factory.load_key", return_value="synthetic-key"), \
+                         patch("core.semantic.runtime.load_key", side_effect=AssertionError("secret access")), \
+                         patch("ai.openai_provider.OpenAIProvider", return_value=native) as provider, \
+                         patch("core.semantic.runtime.LocalEmbeddingProvider.from_config", return_value=FakeEmbedding()):
+                        ProviderRoles.from_profile(config, profile)
+                    expected = False if value is None else value
+                    self.assertIs(factory.call_args.args[0]["ai_thinking"], expected)
+                    self.assertIs(provider.call_args.kwargs["thinking"], expected)
+                    self.assertEqual(provider.call_args.kwargs["thinking_parameter"], "thinking")
+            native.summarize.assert_not_called()
 
 
 class SemanticRuntimeTests(unittest.TestCase):

@@ -163,6 +163,13 @@ unknown-outcome handling on disconnect; absent historical fields retain their
 original config fingerprint. This is source support, not evidence of a
 particular endpoint or candidate being activated.
 
+The optional `monitor_ai_thinking` boolean now survives locked ConfigStore
+updates and reopening. Missing historical fields remain absent and effective
+`false`; invalid explicit values fail closed. The existing runtime factory and
+rebuild provider binding consume the saved setting. This closes a source-level
+configuration gap, not evidence that a provider honors the setting or that a
+particular runtime was changed. See [semantic-providers.md](semantic-providers.md).
+
 Known deferred decisions now admit dependency-bound replanning and later-batch
 knowledge processing, while the applied prefix remains blocked until its gap
 is proved complete. More than 12 possible candidates receive bounded detailed

@@ -61,6 +61,71 @@ class ConfigTests(unittest.TestCase):
             90,
         )
 
+    def test_monitor_ai_thinking_roundtrips_true_false_and_latest_locked_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.json")
+            store, other = ConfigStore(path), ConfigStore(path)
+            initial = store.replace({})
+            enabled = other.update(lambda config: config.update(monitor_ai_thinking=True))
+            self.assertIs(enabled["monitor_ai_thinking"], True)
+            self.assertEqual(enabled["config_revision"], initial["config_revision"] + 1)
+            unrelated = store.update(lambda config: config.update(monitor_enabled=True))
+            self.assertIs(unrelated["monitor_ai_thinking"], True)
+            disabled = other.update(lambda config: config.update(monitor_ai_thinking=False))
+            self.assertIs(disabled["monitor_ai_thinking"], False)
+            self.assertTrue(disabled["monitor_enabled"])
+            self.assertEqual(disabled["config_revision"], initial["config_revision"] + 3)
+            self.assertEqual(store.read(), disabled)
+            self.assertEqual(store.inspect(), disabled)
+            unchanged = store.update(lambda config: config.update(monitor_ai_thinking=False))
+            self.assertEqual(unchanged, disabled)
+            with open(path, encoding="utf-8") as handle:
+                self.assertIs(json.load(handle)["monitor_ai_thinking"], False)
+
+    def test_monitor_ai_thinking_invalid_values_fail_without_changing_storage(self):
+        for invalid in (None, 0, 1, 0.0, "true", "false", [], {}):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "config.json")
+                store = ConfigStore(path)
+                before = store.replace({"monitor_ai_thinking": False})
+                with open(path, "rb") as handle:
+                    original_bytes = handle.read()
+                for write in (lambda: store.update(lambda config: config.update(monitor_ai_thinking=invalid)),
+                              lambda: store.replace({**before, "monitor_ai_thinking": invalid})):
+                    with self.assertRaisesRegex(ConfigError, "^monitor_ai_thinking_invalid$"):
+                        write()
+                    self.assertEqual(store.read(), before)
+                    with open(path, "rb") as handle:
+                        self.assertEqual(handle.read(), original_bytes)
+                with self.assertRaisesRegex(ConfigError, "^monitor_ai_thinking_invalid$"):
+                    _sanitize_config({"monitor_ai_thinking": invalid})
+                # Malformed on-disk fixture: readers must report the bad field,
+                # never silently discard it and expose an effective False.
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump({"config_revision": 7, "monitor_ai_thinking": invalid}, handle)
+                for read in (store.read, store.inspect):
+                    with self.assertRaisesRegex(ConfigError, "^monitor_ai_thinking_invalid$"):
+                        read()
+
+    def test_missing_monitor_ai_thinking_keeps_historical_snapshot_and_fingerprint(self):
+        from core.semantic.rebuild import fingerprint
+        self.assertNotIn("monitor_ai_thinking", DEFAULT_CONFIG)
+        self.assertNotIn("monitor_ai_thinking", _sanitize_config({}))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.json")
+            store = ConfigStore(path)
+            snapshot = store.replace({"monitor_ai_model": "synthetic-model"})
+            before = fingerprint(snapshot)
+            with open(path, "rb") as handle:
+                original_bytes = handle.read()
+            for loaded in (store.read(), store.inspect(), store.update(lambda config: None)):
+                self.assertNotIn("monitor_ai_thinking", loaded)
+                self.assertFalse(loaded.get("monitor_ai_thinking", False))
+                self.assertEqual(fingerprint(loaded), before)
+                self.assertEqual(loaded["config_revision"], snapshot["config_revision"])
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), original_bytes)
+
     def test_auto_detect_install_does_not_overwrite_concurrent_explicit_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.json")

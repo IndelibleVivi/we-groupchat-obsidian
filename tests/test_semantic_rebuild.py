@@ -1227,6 +1227,32 @@ class RebuildCoordinatorTests(unittest.TestCase):
         moved = journal_details(self.root / "stream-clean", "clean-run")
         self.assertIs(moved["plan"]["config"]["custom_streaming"], False)
 
+    def test_monitor_thinking_is_frozen_and_can_refresh_only_before_jobs(self):
+        self.partial_run()
+        before = journal_details(self.runtime_root, "test-run")
+        self.assertNotIn("monitor_ai_thinking", before["plan"]["config"])
+        self.assertNotIn("monitor_ai_thinking", self.config_store.inspect())
+        self.assertEqual(before["plan"]["config_fingerprint"], fingerprint(self.config_store.inspect()))
+        self.config_store.update(lambda value: value.update(monitor_ai_thinking=True))
+        with self.assertRaisesRegex(RebuildError, "relocation_provider_changed"):
+            self.relocate("test-run", destination_root=str(self._destination("thinking-jobs")),
+                          apply=True, allow_runtime_changes=True)
+        retained = journal_details(self.runtime_root, "test-run")
+        self.assertEqual(retained["plan"], before["plan"])
+        self.assertEqual(retained["plan_fingerprint"], before["plan_fingerprint"])
+        self.coordinator.plan(PROFILE, run_id="clean-run")
+        clean = journal_details(self.runtime_root, "clean-run")
+        self.assertIs(clean["plan"]["config"]["monitor_ai_thinking"], True)
+        self.config_store.update(lambda value: value.update(monitor_ai_thinking=False))
+        result = self.relocate("clean-run", destination_root=str(self._destination("thinking-clean")),
+                               apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "relocated", result)
+        self.assertEqual(result["job_count"], 0)
+        self.assertTrue(result["provider_refreshed"])
+        moved = journal_details(self.root / "thinking-clean", "clean-run")
+        self.assertIs(moved["plan"]["config"]["monitor_ai_thinking"], False)
+        self.assertEqual(moved["plan"]["config_fingerprint"], fingerprint(moved["plan"]["config"]))
+
     def test_interrupted_transfer_retry_resumes_without_losing_authority(self):
         self.partial_run()
         destination = self._destination("relocated")

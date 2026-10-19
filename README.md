@@ -398,9 +398,11 @@ Supported AI providers: Qwen, DeepSeek, Claude, OpenAI, Ollama.
 
 The Qwen provider accepts `ai_base_url` for a regional Model Studio
 OpenAI-compatible endpoint. Structured monitor calls use
-`monitor_ai_timeout_seconds` (90 seconds by default) and send Qwen's native
-`enable_thinking=false`; custom OpenAI-compatible providers inherit the same
-monitor timeout. For a known compatible custom endpoint, explicitly set
+`monitor_ai_timeout_seconds` (90 seconds by default) and default to Qwen's native
+`enable_thinking=false`. Operators can opt in with `monitor_ai_thinking: true`;
+historical configs without this field retain the default. Custom
+OpenAI-compatible providers inherit the same monitor timeout. For a known
+compatible custom endpoint, explicitly set
 `custom_thinking_parameter` to `thinking` (DeepSeek dialect) or `enable_thinking`
 (Qwen dialect) to forward the monitor's `monitor_ai_thinking` setting. Its default
 is empty, preserving ordinary custom requests. Forwarding the flag does not prove

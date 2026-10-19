@@ -43,6 +43,19 @@ The key is absent from defaults, so inspecting older configs does not change
 frozen fingerprints. Changing it is a material provider binding change;
 relocation can adopt it only for a generation with zero jobs.
 
+The monitor Text setting `monitor_ai_thinking` is an optional strict boolean.
+`ConfigStore` persists explicit `true` and `false` through its locked latest
+patch and rejects other values with `monitor_ai_thinking_invalid`. The field
+is absent from defaults; loading a historical config without it does not add it.
+Absence remains effective `false`, preserving the original snapshot and fingerprint.
+`ProviderRoles.from_profile` forwards that value through the existing transient
+`ai_thinking` factory argument. Custom endpoints also require an explicitly
+selected `custom_thinking_parameter` dialect; an empty dialect retains the
+ordinary custom request. Forwarding a flag does not prove gateway/model support.
+An explicit value is part of the frozen rebuild config. Changing it is already
+a material provider-binding change: an in-flight run retains its old snapshot,
+and relocation may adopt a change only while the generation has zero jobs.
+
 `ai.semantic_provider` exports:
 
 - `ProviderRoute(provider, model, task, fallback_from=None)`; every result carries
