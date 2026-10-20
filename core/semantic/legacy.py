@@ -1156,7 +1156,7 @@ def record_legacy_backups(store, manifest: LegacyInventory,
                 raise LegacyError("legacy_annotation_unaccounted")
             if source_first:
                 file = next(f for f in manifest.files if f.relative_path == relative)
-                _record_history_backup(conn, manifest, "file", relative, path, file.sha256, file.byte_length)
+                _record_history_backup(conn, manifest, manifest_id, "file", relative, path, file.sha256, file.byte_length)
         for external in manifest.external_files:
             backup_path = backups.get("external:" + external["path"])
             if not backup_path:
@@ -1170,16 +1170,18 @@ def record_legacy_backups(store, manifest: LegacyInventory,
                          (_json({"manifest_id": manifest_id, "file": external, "backup_path": str(backup_path)}),
                           _opaque(manifest.namespace, external["path"]), external["sha256"]))
             if source_first:
-                _record_history_backup(conn, manifest, "external", external["path"], str(backup_path),
+                _record_history_backup(conn, manifest, manifest_id, "external", external["path"], str(backup_path),
                                        external["sha256"], external["byte_length"])
 
 
-def _record_history_backup(conn, manifest, role, path, backup_path, sha256, byte_length):
+def _record_history_backup(conn, manifest, manifest_id, role, path, backup_path, sha256, byte_length):
+    # The caller validated and bound the whole inventory once for this operation.
+    # Rehashing it per file turns a linear backup into files x corpus work.
     identity = _opaque(manifest.namespace, role, path)
-    metadata = {"manifest_id": manifest.manifest_id, "role": role, "path": path,
+    metadata = {"manifest_id": manifest_id, "role": role, "path": path,
                 "sha256": sha256, "byte_length": byte_length, "backup_path": backup_path}
     prior = conn.execute("SELECT metadata_json FROM legacy_mappings WHERE kind='history_backup' "
-        "AND legacy_id=? AND target_type='file_backup' AND target_id=?", (identity, manifest.manifest_id)).fetchone()
+        "AND legacy_id=? AND target_type='file_backup' AND target_id=?", (identity, manifest_id)).fetchone()
     if prior:
         previous = json.loads(prior[0])
         if {k: v for k, v in previous.items() if k != "backup_path"} != {
@@ -1189,7 +1191,7 @@ def _record_history_backup(conn, manifest, role, path, backup_path, sha256, byte
         if len(data) != byte_length or _digest(data) != sha256:
             raise LegacyError("legacy_backup_bytes_mismatch")
         metadata = previous  # An identical freeze adopts its first exact copy.
-    _immutable_mapping(conn, "history_backup", identity, "file_backup", manifest.manifest_id,
+    _immutable_mapping(conn, "history_backup", identity, "file_backup", manifest_id,
                        "preserved_in_place", metadata)
 
 

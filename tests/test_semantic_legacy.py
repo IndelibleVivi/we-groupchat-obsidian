@@ -406,6 +406,37 @@ class SourceFirstHistoryTests(unittest.TestCase):
         self.assertIn(first.manifest_id, root)
         self.assertIn(second.manifest_id, root)
 
+    def test_backup_binds_inventory_identity_once_and_retains_exact_receipts(self):
+        from core.semantic import legacy
+        inventory = self.fixture.plan()
+        queue_dir = self.fixture.root / "synthetic-queue"
+        queue_dir.mkdir()
+        (queue_dir / "pending.jsonl").write_text(json.dumps({
+            "schema_version": "review_queue.v1", "id": "synthetic-pending", "status": "pending",
+            "title": "合成历史待办", "knowledge_topic_id": 1, "resources": {"links": [], "files": []}}) + "\n")
+        inventory = legacy.include_review_queue(inventory, queue_dir)
+        self.assertEqual(len(inventory.external_files), 1)
+        _, backups = preserve_history_fixture(self.store, inventory, self.fixture.root / "identity-backups", self.publisher)
+        with closing(self.store.connect()) as conn:
+            before = [tuple(row) for row in conn.execute(
+                "SELECT * FROM legacy_mappings WHERE kind='history_backup' ORDER BY legacy_id")]
+        self.assertEqual(len(before), sum(file.owned for file in inventory.files) + len(inventory.external_files))
+        whole_inventory_calls = []
+        original = legacy._json_digest
+
+        def observed(value):
+            if len(value) == 1 and value[0] is inventory:
+                whole_inventory_calls.append(True)
+            return original(value)
+
+        with patch.object(legacy, "_json_digest", side_effect=observed):
+            record_legacy_backups(self.store, inventory, backups)
+        self.assertEqual(len(whole_inventory_calls), 1)
+        with closing(self.store.connect()) as conn:
+            after = [tuple(row) for row in conn.execute(
+                "SELECT * FROM legacy_mappings WHERE kind='history_backup' ORDER BY legacy_id")]
+        self.assertEqual(before, after)
+
     def test_receipt_tampering_and_existing_semantic_history_fail_closed(self):
         inventory = self.fixture.plan()
         preserve_legacy_history(self.store, inventory)
