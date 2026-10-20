@@ -1,10 +1,12 @@
 """Synthetic reading acceptance; never touches a real vault or source."""
 from dataclasses import asdict, replace
 from concurrent.futures import ThreadPoolExecutor
+import io
 import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import tracemalloc
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,6 +16,7 @@ from core.semantic.projections import (
     BodyBlock, BodyPlan, BodyPlanWriter, CanonicalReadingAdapter, EvidenceExcerpt, ProjectionPublisher,
     ReadingError, ReadingLedger, ReadingRelation, ReadingResource, ReadingSnapshot,
     ReadingUnit, anchor, fingerprint, property_value, region_body, validate_body_plan, wikilink,
+    _identity_frontmatter,
     bind_reading_policy, CONTENT_READING_POLICY, SOURCE_READING_POLICY, EDITORIAL_READING_POLICY, EDITORIAL_V2_READING_POLICY,
 )
 
@@ -266,6 +269,163 @@ class ItemPathTests(ReadingHarness):
 
 
 class ProjectionTests(ReadingHarness):
+    def test_streamed_identity_frontmatter_matches_existing_parser(self):
+        identity = "synthetic:target"
+        normal = b'---\nwgo_id: "synthetic:target"\n---\n'
+        cases = {
+            "normal": normal + b"Body\n",
+            "quoted-crlf": b'---\r\n"wgo_id": "synthetic:target"\r\n--- \t\r\nBody',
+            "escaped-key": b'---\n"wgo\\u005fid": "synthetic:target"\n---\n',
+            "single-quoted": b"---\n'wgo_id': 'synthetic:target'\n---\n",
+            "unknown-yaml": b'---\nunknown: !custom\n  nested: [a, b]\n# note\nwgo_id: "synthetic:target"\n---\n',
+            "duplicate": b'---\nwgo_id: "synthetic:target"\n"wgo_id": "synthetic:target"\n---\n',
+            "bad-quoted-key": b'---\n"bad\\q": "other"\nwgo_id: "synthetic:target"\n---\n',
+            "unsupported-scalar": b'---\nwgo_id: |\n  synthetic:target\n---\n',
+            "closing-at-eof": normal[:-1],
+            "closing-spaces-at-eof": normal[:-1] + b" \t",
+            "not-a-closing-line": b'---\nwgo_id: "synthetic:target"\n---suffix\n---\n',
+            "empty-header": b"---\n---\n",
+            "unclosed-header": normal[:-4] + b"Body\n",
+            "partial-closing-line": normal[:-1] + b"\r",
+            "no-header": b'Body\nwgo_id: "synthetic:target"\n---\n',
+            "opening-with-spaces": b'--- \nwgo_id: "synthetic:target"\n---\n',
+            "bom": b"\xef\xbb\xbf" + normal,
+            "opening-prefix": b"---",
+            "opening-cr-prefix": b"---\r",
+            "empty": b"",
+            "body-property": normal + b'---\nwgo_id: "different"\n---\n',
+            "non-bmp": normal + ("猫🐈" * 4000).encode("utf-8"),
+            "late-invalid-utf8": normal + b"x" * 20000 + b"\xff",
+            "incomplete-utf8-at-eof": normal + b"x" * 20000 + b"\xf0\x9f\x90",
+            "invalid-header-utf8": b'---\nwgo_id: "synthetic:target"\n#\xff\n---\n',
+            "huge-valid-header": b'---\nunknown: ' + b"x" * 1100000 + b'\nwgo_id: "synthetic:target"\n---\nBody',
+            "huge-duplicate-header": normal[:-4] + b"unknown: " + b"x" * 1100000 + b'\n"wgo_id": "synthetic:target"\n---\n',
+            "huge-unclosed-header": normal[:-4] + b"x" * 1100000,
+        }
+
+        class ShortReads(io.BytesIO):
+            def __init__(self, raw, width):
+                super().__init__(raw)
+                self.width = width
+
+            def read(self, size=-1):
+                return super().read(min(size, self.width))
+
+        def parse(raw):
+            try:
+                return ("value", property_value(raw.decode("utf-8"), "wgo_id"))
+            except ReadingError as exc:
+                return ("reading-error", exc.code)
+            except UnicodeError:
+                return ("unicode-error",)
+
+        path = self.publisher._safe_path("oracle.md")
+        for name, raw in cases.items():
+            expected = parse(raw)
+            # Small reads split every opening/closing boundary and UTF-8 sequence;
+            # large headers also cross many actual 8192-byte file reads.
+            widths = (1, 2, 3, 7, 8192) if len(raw) < 50000 else (8192,)
+            for width in widths:
+                with self.subTest(case=name, width=width):
+                    stream = ShortReads(raw, width)
+                    try:
+                        actual = ("value", property_value(_identity_frontmatter(stream), "wgo_id"))
+                    except ReadingError as exc:
+                        actual = ("reading-error", exc.code)
+                    except UnicodeError:
+                        actual = ("unicode-error",)
+                    self.assertEqual(actual, expected)
+                    if actual[0] == "value":
+                        self.assertEqual(stream.tell(), len(raw))
+            with self.subTest(case=name, lookup=True):
+                path.write_bytes(raw)
+                found = self.publisher._find_id(identity)
+                self.assertEqual(found, "oracle.md" if expected == ("value", identity) else None)
+
+    def test_identity_scan_memory_does_not_scale_with_wide_unicode_body(self):
+        path = self.publisher._safe_path("Index.md")
+        with path.open("wb") as stream:
+            stream.write(b'---\nwgo_id: "synthetic:index"\n---\n')
+            remaining = 2831063 - 344000 - 1
+            while remaining:
+                count = min(8192, remaining)
+                stream.write(b"x" * count)
+                remaining -= count
+            stream.write(("汉" * 344000 + "🐈").encode("utf-8"))
+        # This is a 3.5 MB file whose decoded body needs four bytes per character.
+        # Identity lookup needs its tiny frontmatter, not a whole-body Unicode copy.
+        tracemalloc.start()
+        try:
+            self.assertEqual(self.publisher._find_id("synthetic:index"), "Index.md")
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 1024 * 1024)
+
+    def test_identity_scan_checks_late_duplicate_after_large_header(self):
+        snapshot = self.snapshot()
+        receipt = self.publish(snapshot)
+        original = self.publisher.read(receipt.path)
+        renamed = self.publisher.root / "renamed.md"
+        (self.publisher.root / receipt.path).rename(renamed)
+        duplicate = self.publisher._safe_path("nested/late-duplicate.md")
+        duplicate.write_bytes(b"---\nunknown: " + b"x" * 1100000 +
+                              b'\nwgo_id: "box-cat"\n---\nUntouched personal body.\n')
+        with self.assertRaisesRegex(ReadingError, "projection_identity_collision"):
+            self.publisher.resolve(snapshot.item_id)
+        self.assertEqual(renamed.read_bytes(), original)
+        # The old parser excludes a note with invalid UTF-8 anywhere in its body;
+        # finding the header must not make that note a false duplicate.
+        duplicate.write_bytes(duplicate.read_bytes() + b"\xff")
+        self.assertEqual(self.publisher.resolve(snapshot.item_id), "renamed.md")
+        self.assertEqual(renamed.read_bytes(), original)
+
+    def test_identity_scan_preserves_unreadable_recorded_target_failure(self):
+        snapshot = self.snapshot()
+        receipt = self.publish(snapshot)
+        path = self.publisher.root / receipt.path
+        unreadable = path.read_bytes() + b"x" * 20000 + b"\xff"
+        path.write_bytes(unreadable)
+        before = dict(self.publisher.record(snapshot.item_id))
+        with self.assertRaisesRegex(ReadingError, "projection_unreadable_ownership"):
+            self.publish(snapshot)
+        self.assertEqual(path.read_bytes(), unreadable)
+        self.assertEqual(dict(self.publisher.record(snapshot.item_id)), before)
+
+    def test_identity_scan_preserves_filesystem_failures(self):
+        path = self.publisher._safe_path("note.md")
+        path.write_bytes(b'---\nwgo_id: "synthetic:target"\n---\n')
+        with patch("core.semantic.projections.os.open", side_effect=PermissionError):
+            with self.assertRaisesRegex(ReadingError, "projection_read_failed"):
+                self.publisher._find_id("synthetic:target")
+        linked = self.publisher.root / "linked-directory"
+        linked.symlink_to(self.base, target_is_directory=True)
+        with self.assertRaisesRegex(ReadingError, "projection_symlink"):
+            self.publisher._find_id("synthetic:target")
+
+    def test_identity_scan_keeps_publication_resume_bytes_and_receipts(self):
+        index = self.publisher.publish_document(object_id="synthetic:index", path="Legacy/Index.md",
+            title="Synthetic index", body="索引正文。" * 50000 + "🐈", content_revision=1)
+        index_raw = self.publisher.read(index.path)
+        index_record = dict(self.publisher.record(index.object_id))
+        snapshot = self.snapshot()
+        receipt = self.publish(snapshot)
+        original = self.publisher.read(receipt.path)
+        renamed = self.publisher.root / "renamed.md"
+        (self.publisher.root / receipt.path).rename(renamed)
+        renamed_time = renamed.stat().st_mtime_ns
+        resumed = self.publish(snapshot)
+        recorded = dict(self.publisher.record(snapshot.item_id))
+        again = self.publish(snapshot)
+        self.assertEqual((resumed.status, again.status), ("unchanged", "unchanged"))
+        self.assertEqual((resumed.path, again.path), ("renamed.md", "renamed.md"))
+        self.assertEqual((resumed.file_hash, again.file_hash), (receipt.file_hash, receipt.file_hash))
+        self.assertEqual(renamed.read_bytes(), original)
+        self.assertEqual(renamed.stat().st_mtime_ns, renamed_time)
+        self.assertEqual(dict(self.publisher.record(snapshot.item_id)), recorded)
+        self.assertEqual(self.publisher.read(index.path), index_raw)
+        self.assertEqual(dict(self.publisher.record(index.object_id)), index_record)
+
     def responsibility_snapshot(self, *, fresh):
         from core.semantic.store import SemanticStore
         store = SemanticStore(self.base / ("fresh.sqlite" if fresh else "legacy.sqlite"),

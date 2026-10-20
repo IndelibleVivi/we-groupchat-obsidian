@@ -5,6 +5,7 @@ The caller supplies snapshots and a connection factory for its generation DB.
 """
 from __future__ import annotations
 
+import codecs
 from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ import sqlite3
 import stat
 import tempfile
 import threading
-from typing import Callable, Iterable
+from typing import BinaryIO, Callable, Iterable
 import unicodedata
 import uuid
 
@@ -1719,6 +1720,55 @@ def _frontmatter(text: str) -> tuple[str, str, str]:
     return match.group(2), text[match.end():], match.group(1)
 
 
+def _identity_frontmatter(stream: BinaryIO) -> str:
+    """Validate every UTF-8 byte, retaining only a possible frontmatter header.
+
+    The existing property parser remains authoritative. Headers have no new
+    size limit; their bytes are retained through the exact closing boundary.
+    Body chunks are validated and discarded without a whole-page Unicode copy.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    boundary = re.compile(rb"---[ \t]*(?:\r?\n)?")
+    header = bytearray()
+    opening = None
+    complete = False
+    line_start = search = 0
+    while chunk := stream.read(8192):
+        decoder.decode(chunk)
+        if complete or opening == 0:
+            continue
+        header.extend(chunk)
+        if opening is None:
+            if header.startswith(b"---\n"):
+                opening = 4
+            elif header.startswith(b"---\r\n"):
+                opening = 5
+            elif len(header) < 5:
+                continue
+            else:
+                opening = 0
+                header.clear()
+                continue
+            line_start = search = opening
+        while True:
+            end = header.find(b"\n", search)
+            if end < 0:
+                search = len(header)
+                break
+            end += 1
+            if boundary.fullmatch(header, line_start, end):
+                del header[end:]
+                complete = True
+                break
+            line_start = search = end
+    decoder.decode(b"", final=True)
+    if not opening:
+        return ""
+    if not complete and not boundary.fullmatch(header, line_start):
+        raise ReadingError("invalid_frontmatter_boundary")
+    return header.decode("utf-8")
+
+
 def _yaml_entries(frontmatter: str) -> list[tuple[str | None, str]]:
     entries: list[tuple[str | None, str]] = []
     for line in frontmatter.splitlines(keepends=True):
@@ -1959,6 +2009,23 @@ class ProjectionPublisher:
                 os.unlink(temporary)
         return True
 
+    def _identity(self, path: str):
+        safe = self._safe_path(path, create_parents=False)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(safe, flags)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ReadingError("projection_non_regular")
+                try:
+                    return property_value(_identity_frontmatter(stream), "wgo_id")
+                except (ReadingError, UnicodeError):
+                    # An unrelated user note need not be parseable. A recorded
+                    # target still undergoes strict parsing during publication.
+                    return None
+        except OSError as exc:
+            raise ReadingError("projection_read_failed") from exc
+
     def _find_id(self, object_id: str) -> str | None:
         matches: list[str] = []
         for directory, names, files in os.walk(self.root, followlinks=False):
@@ -1970,13 +2037,7 @@ class ProjectionPublisher:
                 if not filename.endswith(".md"):
                     continue
                 path = (Path(directory) / filename).relative_to(self.root).as_posix()
-                raw = self.read(path)
-                try:
-                    value = property_value(raw.decode("utf-8"), "wgo_id")
-                except (ReadingError, UnicodeError):
-                    # An unrelated user note need not be parseable. A recorded
-                    # target still undergoes strict parsing during publication.
-                    continue
+                value = self._identity(path)
                 if value == object_id:
                     matches.append(path)
         if len(matches) > 1:

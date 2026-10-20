@@ -15,6 +15,17 @@ current_revision=...)` requires a fresh canonical content-revision reader.
 The root is the managed `WGO` directory, not the entire vault. File links are
 root-relative and every filesystem operation rejects managed symlinks.
 
+Identity resolution scans every Markdown file under the managed root, including
+renamed notes, to detect duplicate `wgo_id` ownership. It validates the entire
+file as strict UTF-8 in bounded chunks and passes only its frontmatter to the
+existing property parser. Long bodies therefore do not require whole-page
+Unicode copies during each identity scan. Frontmatter remains untruncated and
+uses memory proportional to the header; large headers and duplicate properties
+retain their existing parsing rules. An invalid unrelated note is excluded from
+identity matching, while an unreadable recorded publication target still fails
+ownership validation. File bytes, manual annotations and publication receipts
+retain their existing preservation contracts.
+
 `ProjectionPublisher.for_store(store, managed_root)` creates the ledger on the
 actual `SemanticStore.connect()` database and installs fresh revision/alias
 readers. `CanonicalReadingAdapter(store).snapshot(item_id)` reads `get_item`,
