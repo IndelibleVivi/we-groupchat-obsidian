@@ -17,7 +17,9 @@ from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import stat
+import string
 from typing import Any, Iterable, Iterator, Mapping
+from urllib.parse import quote
 
 from core.url_safety import redact_urls_in_text
 
@@ -915,10 +917,19 @@ def _history_visible(value: Any) -> str:
 
 def _history_link(path: str, label: str) -> str:
     target = _relative(path)
-    if any(c in target for c in "[]|#^\n\r"):
+    if not isinstance(label, str) or any(ord(c) < 32 or 127 <= ord(c) <= 159 or c in "\u2028\u2029"
+                                        for c in target + label):
         raise LegacyError("legacy_navigation_path_invalid")
-    visible = label.replace("[", "(").replace("]", ")").replace("|", "·")
-    return "[[" + redact_urls_in_text(target).removesuffix(".md") + "|" + visible + "]]"
+    target, visible = redact_urls_in_text(target), redact_urls_in_text(label)
+    if (any(c in target for c in "[]|#^%:?<>&")
+            or any(c in visible for c in "\\`*_{}[]#!|~^=$%<>&")):
+        # Obsidian supports URL-encoded Markdown internal links. Encode literal
+        # percent signs too: %23 in a filename must not become a heading link.
+        # Entities keep the displayed label literal, including Markdown/HTML,
+        # after URL redaction. Never interpolate it as executable link syntax.
+        literal = "".join("&#" + str(ord(c)) + ";" if c in string.punctuation else c for c in visible)
+        return "[" + literal + "](" + quote(target, safe="/") + ")"
+    return "[[" + target.removesuffix(".md") + "|" + visible + "]]"
 
 
 def build_history_publication_plan(manifest: LegacyInventory) -> dict[str, Any]:
@@ -980,7 +991,7 @@ def history_document_body(manifest: LegacyInventory, plan: Mapping[str, Any], do
             topic = next((r for r in manifest.records if r.legacy_ref == entry.get("legacy_ref")), None)
             title = topic.payload.get("title") or topic.text if topic else {
                 "records": "其他旧记录", "queue": "历史 Review Queue", "page": entry.get("old_path", "历史原页")}[entry["kind"]]
-            lines.append("- " + _history_link("WGO/" + entry["path"], _history_visible(title).replace("\n", " ")))
+            lines.append("- " + _history_link("WGO/" + entry["path"], str(title).replace("\n", " ")))
     elif kind == "page":
         lines = ["# 历史原页", "", _history_link(document["old_path"], "打开保留的原页"), "",
                  "整页缺少可信机器基线，已保留全部原始字节、个人文字、frontmatter、链接与锚点。"]

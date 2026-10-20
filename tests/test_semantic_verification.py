@@ -1033,6 +1033,55 @@ class SourceFirstHistoryVerificationTests(unittest.TestCase):
         (self.fixture.projections / path).unlink()
         self.assertIn("item_current_projection_missing", self.codes())
 
+    @unittest.skipIf(os.name == "nt", "Preserve POSIX legacy filename containing a reserved Windows pipe")
+    def test_special_history_filename_preserves_bytes_resumes_and_verifies_exact_destination(self):
+        import html
+        import re
+        from urllib.parse import unquote, urlsplit
+        path = "Old/记录[%23]|#^百分%.md"
+        title = "旧标题 [原意]|**字面文本** https://example.test/a?token=synthetic-secret&ok=1"
+        original = self.old.page_bytes
+        (self.old.vault / path).write_bytes(original)
+        with closing(sqlite3.connect(self.old.db)) as conn:
+            conn.execute("INSERT INTO topics VALUES(?,?,?,?,?,?,?)", (10, title, "旧记录仍是历史资料", path,
+                "synthetic-chat", "[]", "[]"))
+            conn.commit()
+        inventory, plan, backups = self.add_history()
+        document = next(document for document in plan["documents"] if document.get("old_path") == path)
+        published = self.fixture.projections / document["path"]
+        markdown = published.read_text()
+        match = re.search(r"\[打开保留的原页\]\(([^()\s<>]+)\)", markdown)
+        self.assertIsNotNone(match)
+        destination = urlsplit(match[1])
+        self.assertEqual((destination.scheme, destination.netloc, destination.query, destination.fragment), ("", "", "", ""))
+        self.assertEqual(unquote(destination.path), path)
+        index = next(document for document in plan["documents"] if document["kind"] == "index")
+        index_text = (self.fixture.projections / index["path"]).read_text()
+        labels = [html.unescape(value) for value in re.findall(r"\[([^\[\]\r\n]*)\]\([^()\s<>]+\)", index_text)]
+        self.assertIn(redact_urls_in_text(title), labels)
+        self.assertNotIn("synthetic-secret", index_text)
+        page = next(page for page in plan["pages"] if page["old_path"] == path)
+        self.assertEqual((self.old.vault / path).read_bytes(), original)
+        self.assertEqual(backups[path].read_bytes(), original)
+        self.assertEqual((self.fixture.projections / page["history_backup_path"]).read_bytes(), original)
+        report = self.fixture.verify()
+        self.assertTrue(report.complete, report.to_dict())
+        before = {entry["path"]: (self.fixture.projections / entry["path"]).read_bytes() for entry in plan["documents"]}
+        resumed, resumed_plan, _ = self.add_history()
+        self.assertEqual(resumed.manifest_id, inventory.manifest_id)
+        self.assertEqual(resumed_plan, plan)
+        self.assertEqual(before, {name: (self.fixture.projections / name).read_bytes() for name in before})
+        self.assertEqual((self.old.vault / path).read_bytes(), original)
+        report = self.fixture.verify()
+        self.assertTrue(report.complete, report.to_dict())
+        self.assertEqual(report.counts["legacy_history_passes"], 2)
+        # A different but well-formed encoded local target is still tampering;
+        # the independent verifier must retain its strict expected-body check.
+        changed = markdown.replace(match[1], match[1].replace("%23", "%2523", 1))
+        self.assertNotEqual(changed, markdown)
+        published.write_text(changed)
+        self.assertIn("legacy_history_navigation_content_mismatch", self.codes())
+
     def test_missing_or_tampered_history_records_and_resources_are_not_conserved(self):
         with self.fixture.store.transaction() as conn:
             row = dict(conn.execute("SELECT * FROM legacy_mappings WHERE target_type='history_record' "

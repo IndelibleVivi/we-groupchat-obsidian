@@ -1,12 +1,15 @@
 """Synthetic old-schema/page conservation; no source/provider/runtime access."""
 import hashlib
+import html
 import json
 import os
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import re
 import tempfile
 import unittest
+from urllib.parse import unquote, urlsplit
 from unittest.mock import patch
 
 from core.semantic.legacy import (
@@ -14,6 +17,7 @@ from core.semantic.legacy import (
     plan_legacy, import_legacy, legacy_resources, SOURCE_FIRST_POLICY,
     preserve_legacy_history, build_history_publication_plan, record_legacy_backups,
     publish_legacy_navigation,
+    _history_link,
 )
 from core.semantic.store import SemanticStore
 
@@ -389,6 +393,65 @@ class SourceFirstHistoryTests(unittest.TestCase):
         replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
         self.assertEqual("published", replay["status"])
 
+    @unittest.skipIf(os.name == "nt", "Preserve POSIX legacy filenames containing reserved Windows characters")
+    def test_special_original_filenames_publish_exact_encoded_links_and_resume_without_page_changes(self):
+        paths = ["Old/方括号[原页].md", "Old/竖|线.md", "Old/散步#记录^原文.md",
+                 "Old/百分%20和%23.md", "Old/资料 (v1)&备注.md", "Old/疑问?token=literal.md"]
+        with closing(sqlite3.connect(self.fixture.db)) as conn:
+            for index, path in enumerate(paths, 10):
+                (self.fixture.vault / path).write_bytes(self.fixture.page_bytes)
+                conn.execute("INSERT INTO topics VALUES(?,?,?,?,?,?,?)",
+                    (index, "原页 " + str(index), "原页的保全记录", path, "synthetic-chat", "[]", "[]"))
+            conn.commit()
+        inventory = self.fixture.plan()
+        plan, backups = preserve_history_fixture(self.store, inventory, self.fixture.root / "special-backups", self.publisher)
+        documents = {document.get("old_path"): document for document in plan["documents"] if document["kind"] == "page"}
+        for path in paths:
+            published = (self.projections / documents[path]["path"]).read_text()
+            targets = [unquote(match) for match in re.findall(r"\[[^\[\]\r\n]*\]\(([^()\s<>]+)\)", published)]
+            self.assertIn(path, targets)
+            self.assertEqual((self.fixture.vault / path).read_bytes(), self.fixture.page_bytes)
+            self.assertEqual(backups[path].read_bytes(), self.fixture.page_bytes)
+            page = next(page for page in plan["pages"] if page["old_path"] == path)
+            self.assertEqual((self.projections / page["history_backup_path"]).read_bytes(), self.fixture.page_bytes)
+        before = {document["path"]: (self.projections / document["path"]).read_bytes() for document in plan["documents"]}
+        replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
+        self.assertEqual(replay["status"], "published")
+        self.assertTrue(all(receipt["status"] == "unchanged" for receipt in replay["receipts"]))
+        self.assertEqual(before, {path: (self.projections / path).read_bytes() for path in before})
+
+    def test_old_partial_publication_resumes_with_same_plan_and_preserved_pages(self):
+        from core.semantic import legacy
+        from core.url_safety import redact_urls_in_text
+        path = "Old/prior[failed].md"
+        (self.fixture.vault / path).write_bytes(self.fixture.page_bytes)
+        with closing(sqlite3.connect(self.fixture.db)) as conn:
+            conn.execute("INSERT INTO topics VALUES(?,?,?,?,?,?,?)", (10, "旧页面", "旧记录", path, "synthetic", "[]", "[]"))
+            conn.commit()
+        inventory = self.fixture.plan()
+        plan = build_history_publication_plan(inventory)
+        def frozen_old_link(path, label):
+            # Exact historical link behavior: it could publish the Index, then
+            # fail on the first topic/page linking a bracketed original name.
+            target = legacy._relative(path)
+            if any(c in target for c in "[]|#^\n\r"):
+                raise LegacyError("legacy_navigation_path_invalid")
+            visible = label.replace("[", "(").replace("]", ")").replace("|", "·")
+            return "[[" + redact_urls_in_text(target).removesuffix(".md") + "|" + visible + "]]"
+        with patch.object(legacy, "_history_link", side_effect=frozen_old_link), \
+             self.assertRaisesRegex(LegacyError, "legacy_navigation_path_invalid"):
+            preserve_history_fixture(self.store, inventory, self.fixture.root / "partial-backups", self.publisher)
+        index = next(document for document in plan["documents"] if document["kind"] == "index")
+        before = (self.projections / index["path"]).read_bytes()
+        self.assertIn(b"prior(failed)", before)
+        result = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
+        self.assertEqual(result["status"], "published")
+        self.assertNotEqual((self.projections / index["path"]).read_bytes(), before)
+        self.assertEqual((self.fixture.vault / path).read_bytes(), self.fixture.page_bytes)
+        self.assertEqual(build_history_publication_plan(inventory), plan)
+        replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
+        self.assertTrue(all(receipt["status"] == "unchanged" for receipt in replay["receipts"]))
+
     def test_refresh_retains_both_immutable_passes_and_original_whole_page_backups(self):
         first = self.fixture.plan()
         old_plan, old_backups = preserve_history_fixture(self.store, first, self.fixture.root / "backup-1", self.publisher)
@@ -450,6 +513,47 @@ class SourceFirstHistoryTests(unittest.TestCase):
             conn.execute("UPDATE generation_manifest SET metadata_json=?", (json.dumps({"history_policy": SOURCE_FIRST_POLICY}),))
         with self.assertRaisesRegex(LegacyError, "legacy_history_semantic_contamination"):
             preserve_legacy_history(old_store, inventory)
+
+
+class HistoryLinkTests(unittest.TestCase):
+    def test_ordinary_wikilink_bytes_and_markdown_exact_targets(self):
+        self.assertEqual(_history_link("Old/普通 一页.md", "打开原页"), "[[Old/普通 一页|打开原页]]")
+        for target in ("Old/[brackets].md", "Old/pipe|name.md", "Old/hash#caret^name.md", "Old/percent%20%23.md",
+                       "Old/%%comment%%.md", "Old/%2e%2e/%2f.md", "Old/a?token=literal&b=2.md", "Old/<note>.md",
+                       "Old/(v1)&more.md", "javascript:alert(1).md"):
+            with self.subTest(target=target):
+                rendered = _history_link(target, "打开原页")
+                match = re.fullmatch(r"\[([^\[\]\r\n]*)\]\(([^()\s<>]+)\)", rendered)
+                self.assertIsNotNone(match, rendered)
+                destination = urlsplit(match[2])
+                self.assertEqual((destination.scheme, destination.netloc, destination.query, destination.fragment), ("", "", "", ""))
+                self.assertEqual(unquote(destination.path), target)
+                self.assertEqual(html.unescape(match[1]), "打开原页")
+
+    def test_literal_label_is_redacted_before_markdown_syntax_is_escaped(self):
+        from core.url_safety import redact_urls_in_text
+        label = '[[别页]]|**粗体** _斜体_ `代码` %%隐藏%% #^引用 ![图](javascript:alert(1)) <b>HTML</b> &amp; '
+        label += 'https://example.test/a?token=synthetic-secret&ok=1'
+        for target in ("Old/safe.md", "Old/[special]#name.md"):
+            with self.subTest(target=target):
+                rendered = _history_link(target, label)
+                match = re.fullmatch(r"\[([^\[\]\r\n]*)\]\(([^()\s<>]+)\)", rendered)
+                self.assertIsNotNone(match, rendered)
+                self.assertEqual(html.unescape(match[1]), redact_urls_in_text(label))
+                self.assertEqual(unquote(match[2]), target)
+                self.assertNotIn("synthetic-secret", rendered)
+                for active in ("[[", "**", "%%", "![", "<b>", "javascript:"):
+                    self.assertNotIn(active, rendered)
+
+    def test_control_newline_and_path_escape_still_fail_closed(self):
+        for target in ("../outside.md", "/outside.md", "//outside/path.md", "Old/../outside.md", "Old/./note.md", "Old\\note.md",
+                       "Old/line\nbreak.md", "Old/line\rbreak.md", "Old/tab\tname.md", "Old/nul\x00.md", "Old/delete\x7f.md",
+                       "Old/next\x85line.md", "Old/unicode\u2028line.md", "Old/unicode\u2029paragraph.md"):
+            with self.subTest(target=repr(target)), self.assertRaises(LegacyError):
+                _history_link(target, "label")
+        for label in ("label\nnew", "label\rnew", "label\tnew", "label\x00new", "label\x7fnew", "label\u2028new"):
+            with self.subTest(label=repr(label)), self.assertRaisesRegex(LegacyError, "legacy_navigation_path_invalid"):
+                _history_link("Old/safe.md", label)
 
 
 if __name__ == "__main__":

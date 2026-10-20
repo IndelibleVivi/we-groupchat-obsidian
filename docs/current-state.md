@@ -13,6 +13,11 @@ is implied by this document.
   history passes; they create no legacy captures, Items, model jobs or semantic
   completion claims. Plans without the field retain `legacy-semantic-v1` and
   their original fingerprint and obligations.
+- History navigation supports literal link delimiters and percent signs in
+  existing filenames through encoded Markdown internal links. Ordinary safe
+  wikilinks retain their bytes; original pages, anchors and recovery copies
+  remain unchanged. This source fix does not imply that a private migration
+  has resumed or completed.
 - The candidate adds immutable source versions, Observations/Items, claim and
   identity operations, hybrid search, explicit local or Cloudflare embedding and
   local or remote vector indexing, captured member attribution, Markdown bodies

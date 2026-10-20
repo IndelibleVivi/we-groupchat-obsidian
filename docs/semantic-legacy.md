@@ -145,6 +145,29 @@ backups, the same canonical database/generation and actual reading-publisher
 receipts. A conflict remains `projection_pending`; history preservation never
 manufactures a model disposition or a successful projection receipt.
 
+Source-first history navigation keeps existing wikilink bytes for ordinary safe
+paths and labels. A target containing link delimiters such as `[]|#^`, literal
+percent signs or URI separators instead uses a percent-encoded Markdown internal
+link, retaining the `.md` extension and vault-root folder path. For example,
+`Old/记录[原页]#1.md` becomes
+`[打开保留的原页](Old/%E8%AE%B0%E5%BD%95%5B%E5%8E%9F%E9%A1%B5%5D%231.md)`.
+Literal `%23` in a filename is encoded as `%2523`, so one URL decode returns the
+exact filename rather than creating an anchor. This follows Obsidian's
+[supported internal-link formats and URL-encoding guidance](https://help.obsidian.md/links).
+It does not rename or rewrite an original page, its anchors or recovery bytes.
+
+The link helper applies canonical URL redaction before escaping the displayed
+label. Labels needing literal Markdown/HTML punctuation use numeric character
+references, which retain the displayed characters without introducing links,
+embeds, comments or formatting; see the
+[CommonMark character-reference contract](https://spec.commonmark.org/0.31.2/#entity-and-numeric-character-references).
+Absolute paths, traversal, backslashes, line breaks and control characters still
+fail closed. This fallback changes only source-first navigation rendering,
+not inventory/publication-plan identities or the legacy-semantic compatibility
+mapping. Independent verification continues to require the exact expected
+navigation body, real projection receipts and preserved original/backup bytes;
+a different but syntactically valid encoded target is still rejected.
+
 `build_publication_plan(inventory, topic_item_map, item_paths)` accepts only
 explicit legacy topic reference IDs and canonical Item IDs/paths. Titles never
 resolve identity. One Item produces a redirect navigation page, several Items
