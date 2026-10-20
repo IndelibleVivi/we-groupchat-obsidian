@@ -68,17 +68,18 @@ class DeliveryTests(ReadingHarness):
         event = self.delivery.register(self.event())
         self.assertEqual(self.send(event.event_id, live=True).status, "accepted")
         target = self.delivery.resolve_click(event.event_id)
-        self.assertTrue(target.endswith("box-cat.md"))
+        self.assertEqual(target, str(self.publisher.root / "条目/箱猫.md"))
         self.assertEqual(self.controls.preference("box-cat").known_revision, 0)
         self.assertEqual(self.ledger.all("SELECT * FROM reader_open_observations"), [])
 
     def test_click_resolves_rename_and_rejects_symlink_escape(self):
         self.prepare()
         event = self.delivery.register(self.event())
-        source = self.publisher.root / "条目/box-cat.md"
+        source = self.publisher.root / self.publisher.resolve("box-cat")
         renamed = self.publisher.root / "猫的新名字.md"
         source.rename(renamed)
         self.assertEqual(self.delivery.resolve_click(event.event_id), str(renamed))
+        self.assertFalse(source.exists())
         renamed.unlink()
         renamed.symlink_to(self.base / "outside.md")
         with self.assertRaisesRegex(ReadingError, "projection_symlink"):

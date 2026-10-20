@@ -22,6 +22,10 @@ is implied by this document.
 - Product-specific private adapters are outside this public repository. Generic
   resource capture, context retention by explicit injection, CAS and v3 snapshot
   transport remain supported building blocks.
+- New Item filenames use readable titles with short IDs for collisions; existing
+  mapped or user-renamed pages retain their locations. The optional Obsidian
+  plugin includes scoped reading styles for machine properties and duplicate
+  filename headings. Neither source change implies installation or activation.
 - Source tests, complete migration verification, application build, installation,
   activation, actual incremental acceptance and any remote publication are
   separate evidence. This file makes no claim about a particular live runtime.

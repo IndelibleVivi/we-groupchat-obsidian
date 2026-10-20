@@ -327,6 +327,12 @@
   repairs; an exhausted child cannot turn into another attempt on resume.
   Only the optional `integrations/obsidian/` plugin provides a verified visible
   open event; no plugin means manual known/read controls, not assumed reading.
+  New Item paths use a safe readable title and short-ID collision handling under
+  the projection root lock. Existing identity files and durable path mappings
+  take priority; title changes do not move them. Keep identity redirects separate
+  from alias resolution. The optional plugin's reading styles hide only machine
+  presentation, preserve user properties and editable bytes, and never grant a
+  read event or change canonical identity.
   Historical rebuild does not notify. Brief opening, item reading, knowing and
   notification acceptance remain separate facts. Delivery requires its explicit
   change floor and stable device identity.

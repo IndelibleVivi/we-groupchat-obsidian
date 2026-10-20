@@ -42,8 +42,12 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 正文可以综合一段讨论、选用关键原话；完整原文仍在关联的来源页，多条补充证据收进可展开的来源区。
 新抽取把 unit 当作值得留下的知识和完整场景，而不是消息目录或取证清单；旧 page job
 继续使用其冻结的 policy 与结果，不会因新版本被重新解释。
-可选的[本地 Obsidian 插件](integrations/obsidian/README.md)只为确实可见的页面记录打开事件；
+可选的[本地 Obsidian 插件](integrations/obsidian/README.md)只为确实可见的页面记录打开事件，
+并在阅读模式收起机器属性与重复的文件名标题，保留用户属性和原始可编辑 Markdown；
 未装插件时使用手动读过／已知动作。仓库提供插件源码，不自动安装或启用。
+
+新 Item 页初始使用可读标题作为文件名，冲突时增加短 ID。已有 UUID 文件名、保存的位置与用户改名
+继续保留，后续自动标题变化不会移动页面。
 
 SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务或 Cloudflare BGE-M3，
 派生索引可以选本地 cosine 或 Cloudflare Vectorize。完整本地路线要求文本、判断和 embedding

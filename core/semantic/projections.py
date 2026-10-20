@@ -18,6 +18,7 @@ import stat
 import tempfile
 import threading
 from typing import Callable, Iterable
+import unicodedata
 import uuid
 
 from core.platform import LockMode, create_file_lock
@@ -1855,6 +1856,7 @@ _ROOT_LOCKS_GUARD = threading.Lock()
 class ProjectionPublisher:
     MAX_SOURCE_PAGE_CHARS = 24000
     MAX_SOURCE_PAGE_EXCERPTS = 32
+    MAX_ITEM_FILENAME_BYTES = 240
 
     def __init__(self, ledger: ReadingLedger, root: str | Path, *,
                  current_revision: Callable[[str], int | None],
@@ -2040,14 +2042,54 @@ class ProjectionPublisher:
                               (self.ledger.generation_id, item_id))
         return BodyPlan.from_json(row[0]) if row else None
 
-    def publish_document(self, *, object_id: str, path: str, title: str, body: str,
+    def _initial_item_path(self, conn, item_id: str, title: str) -> str:
+        """Choose a new Item position under the publication root lock/transaction."""
+        _token(item_id)
+        visible = unicodedata.normalize("NFC", redact_urls_in_text(title))
+        stem = "".join(c if c.isprintable() and c not in '<>:"/\\|?*[]#^' else " "
+                       for c in visible)
+        stem = re.sub(r"\s+", " ", stem).strip(" .") or "未命名事项"
+        stem_bytes = stem.encode("utf-8")
+        directory = self._safe_path("条目", directory=True)
+
+        def name_key(name):
+            return unicodedata.normalize("NFC", name).casefold()
+
+        occupied = set()
+        for entry in directory.iterdir():
+            if entry.is_symlink():
+                raise ReadingError("projection_symlink")
+            occupied.add(name_key(entry.name))
+        # Missing files still have an owner: do not reassign their durable path.
+        for row in conn.execute("SELECT path FROM reader_projections WHERE generation_id=? AND object_id<>?",
+                                (self.ledger.generation_id, item_id)):
+            relative = Path(row[0])
+            if relative.parent.as_posix() == "条目":
+                occupied.add(name_key(relative.name))
+        for collision in range(len(occupied) + 1):
+            suffix = ((" · " + item_id[:8] + (f"-{collision}" if collision > 1 else ""))
+                      if collision else "")
+            budget = self.MAX_ITEM_FILENAME_BYTES - len((suffix + ".md").encode("utf-8"))
+            base = stem_bytes[:budget].decode("utf-8", errors="ignore").rstrip(" .")
+            filename = (base or "未命名事项") + suffix + ".md"
+            if name_key(filename) not in occupied:
+                path = "条目/" + filename
+                self._safe_path(path)
+                return path
+        raise ReadingError("projection_path_collision")
+
+    def publish_document(self, *, object_id: str, path: str | None, title: str, body: str,
                          content_revision: int, semantic_at: str = "", region: str = "body",
                          is_current: Callable[[], bool] | None = None,
                          authorized_hash: str | None = None,
                          proposal_guards: dict | None = None,
                          _proposal_resolution: tuple[str, str] | None = None,
                          _personal_append: str = "") -> ProjectionReceipt:
-        """Publish a prepared document. authorized_hash is only for validated controls."""
+        """Publish a prepared document; path=None allocates a new Item's title path.
+
+        Existing identity/mapping always wins. authorized_hash is only for
+        validated controls.
+        """
         _token(region)
         if _machine_markers(body):
             raise ReadingError("nested_machine_region")
@@ -2058,7 +2100,9 @@ class ProjectionPublisher:
             row = conn.execute("SELECT * FROM reader_projections WHERE generation_id=? AND object_id=?",
                                (self.ledger.generation_id, object_id)).fetchone()
             found = self._find_id(object_id)
-            target = found or (row["path"] if row else path)
+            target = found or (row["path"] if row else None)
+            if target is None:
+                target = self._initial_item_path(conn, object_id, title) if path is None else path
             raw = self.read(target)
             if raw is None:
                 text = "# " + redact_urls_in_text(title).replace("\n", " ") + "\n"
@@ -2420,7 +2464,7 @@ class ProjectionPublisher:
         body = _drop_duplicate_title_heading("\n\n".join(paragraphs), snapshot.title,
             verbatim=tuple(fragment for unit in snapshot.units for fragment in unit.verbatim))
         receipt = self.publish_document(
-            object_id=snapshot.item_id, path=f"条目/{_token(snapshot.item_id)}.md", title=snapshot.title,
+            object_id=_token(snapshot.item_id), path=None, title=snapshot.title,
             body=body, content_revision=snapshot.content_revision,
             semantic_at=snapshot.semantic_at,
             is_current=lambda: self.current_revision(snapshot.item_id) == snapshot.content_revision)
@@ -2496,7 +2540,7 @@ class ProjectionPublisher:
             latest = store.get_item(item_id)
             return (latest is not None and latest["content_revision"] == revision and latest["aliases"] == item["aliases"]
                     and all(self.current_revision(id_) == rev and self.ready(id_, rev) for id_, rev in target_revisions.items()))
-        receipt = self.publish_document(object_id=item_id, path=f"条目/{_token(item_id)}.md", title=item["title"], body=body,
+        receipt = self.publish_document(object_id=_token(item_id), path=None, title=item["title"], body=body,
                                         content_revision=revision,
                                         semantic_at=CanonicalReadingAdapter._time(item["semantic_updated_at"]), is_current=current)
         self._ack_published(store, item_id, revision, receipt)

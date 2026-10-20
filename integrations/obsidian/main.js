@@ -28,12 +28,19 @@ function visibleView(app) {
     return view;
 }
 
-function identity(text) {
+function frontmatter(text) {
+    if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > MAX_NOTE_BYTES) return null;
     if (!text.startsWith("---\n") && !text.startsWith("---\r\n")) return null;
     const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
     if (!match) return null;
     const fields = parseYaml(match[1]);
     if (!fields || typeof fields !== "object") return null;
+    return fields;
+}
+
+function identity(text) {
+    const fields = frontmatter(text);
+    if (!fields) return null;
     const id = fields.wgo_id;
     const generation = fields.wgo_generation;
     const revision = fields.wgo_content_revision;
@@ -41,6 +48,53 @@ function identity(text) {
         typeof generation !== "string" || !generation || generation.length > 200 ||
         !Number.isSafeInteger(revision) || revision <= 0) return null;
     return {item_id: id, generation_id: generation, content_revision: revision};
+}
+
+class ReadingPresentation {
+    constructor(app) {
+        this.app = app;
+        this.elements = new Set();
+    }
+
+    sync() {
+        const current = new Set();
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            const view = leaf.view;
+            if (!(view instanceof MarkdownView) || leaf.isDeferred || !view.containerEl) continue;
+            const element = view.containerEl;
+            current.add(element);
+            let fields = null;
+            try {
+                const relative = view.file?.path;
+                if (typeof relative === "string" && relative.startsWith(ROOT + "/") &&
+                    relative.endsWith(".md") && relative.length <= 1028 &&
+                    !relative.split("/").some(part => !part || part === "." || part === ".." || part === ".wgo")) {
+                    fields = frontmatter(view.getViewData());
+                }
+            } catch (_) { /* Presentation never changes note or read-event state. */ }
+            const managed = !!fields && typeof fields.wgo_id === "string" &&
+                fields.wgo_id.length > 0 && fields.wgo_id.length <= 200 &&
+                typeof fields.wgo_generation === "string" && fields.wgo_generation.length > 0 &&
+                fields.wgo_generation.length <= 200 && Number.isSafeInteger(fields.wgo_content_revision) &&
+                fields.wgo_content_revision > 0;
+            element.classList.toggle("wgo-reader-page", managed);
+            element.classList.toggle("wgo-reader-machine-only", managed &&
+                Object.keys(fields).every(key => key.startsWith("wgo_")));
+        }
+        for (const element of this.elements) {
+            if (!current.has(element)) this.clear(element);
+        }
+        this.elements = current;
+    }
+
+    clear(element) {
+        element.classList.remove("wgo-reader-page", "wgo-reader-machine-only");
+    }
+
+    unload() {
+        for (const element of this.elements) this.clear(element);
+        this.elements.clear();
+    }
 }
 
 async function regularPath(base, relative, {directory = false, create = false} = {}) {
@@ -170,12 +224,14 @@ class VisibleOpenWriter {
 class WGOReaderObserver extends Plugin {
     onload() {
         this.writer = new VisibleOpenWriter(this.app);
+        this.presentation = new ReadingPresentation(this.app);
         this.pending = false;
         this.running = false;
         this.stopped = false;
         this.documents = new WeakSet();
         const schedule = (reset = false) => {
             if (reset) this.writer.reset();
+            this.presentation.sync();
             this.pending = true;
             this.bindDocument(schedule);
             if (!this.running) void this.flush();
@@ -185,6 +241,7 @@ class WGOReaderObserver extends Plugin {
         this.registerEvent(this.app.workspace.on("layout-change", () => schedule()));
         this.registerEvent(this.app.vault.on("modify", file => {
             if (visibleView(this.app)?.file === file) schedule();
+            else if (file.path?.startsWith(ROOT + "/")) this.presentation.sync();
         }));
         this.app.workspace.onLayoutReady(() => schedule());
     }
@@ -217,8 +274,9 @@ class WGOReaderObserver extends Plugin {
     onunload() {
         this.stopped = true;
         this.writer.reset();
+        this.presentation.unload();
     }
 }
 
 module.exports = WGOReaderObserver;
-module.exports._test = {VisibleOpenWriter, visibleView, identity};
+module.exports._test = {VisibleOpenWriter, visibleView, identity, ReadingPresentation};

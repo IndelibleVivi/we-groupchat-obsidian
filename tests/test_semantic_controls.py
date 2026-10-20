@@ -27,16 +27,24 @@ class ControlsTests(ReadingHarness):
         path.write_text(text)
 
     def test_query_callback_answer_receipt_history_and_no_loop(self):
-        self.publish()
+        item = self.publish()
+        self.assertEqual(item.path, "条目/箱猫.md")
         self.controls.initialize_query()
         self.set_query("猫最近怎样？")
         result = self.controls.run_query()
         self.assertEqual(result.status, "success")
-        self.assertIn("[[WGO/条目/box-cat|箱猫]]", (self.publisher.root / "检索.md").read_text())
+        original_link = "[[WGO/" + item.path.removesuffix(".md") + "|箱猫]]"
+        self.assertIn(original_link, (self.publisher.root / "检索.md").read_text())
         self.assertEqual(self.controls.run_query().status, "unchanged")
         self.assertEqual(len(self.searches), 1)
+        renamed = self.publisher.root / "我的猫笔记.md"
+        (self.publisher.root / item.path).rename(renamed)
         self.set_query("它住哪里？")
         self.assertEqual(self.controls.run_query().revision, 2)
+        current = (self.publisher.root / "检索.md").read_text()
+        self.assertIn("[[WGO/我的猫笔记|箱猫]]", current)
+        self.assertNotIn(original_link, current)
+        self.assertFalse((self.publisher.root / item.path).exists())
         history = self.controls.query_history()
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]["query_text"], "猫最近怎样？")

@@ -1,5 +1,6 @@
 """Synthetic reading acceptance; never touches a real vault or source."""
 from dataclasses import asdict, replace
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import sqlite3
@@ -132,6 +133,136 @@ class ReadingHarness(unittest.TestCase):
         jobs.accept(job["job_id"], "test-worker", artifact,
                     validate=lambda value: validate_accepted_artifact(value, artifact))
         return store.apply_proposal(job["job_id"], actions, read_set=read_set)
+
+
+class ItemPathTests(ReadingHarness):
+    def test_first_item_filename_is_readable_and_title_changes_keep_its_position(self):
+        item_id = "12345678-1111-4111-8111-111111111111"
+        snapshot = self.snapshot(item_id=item_id, title="河岸散步")
+        first = self.publish(snapshot)
+        self.assertEqual(first.path, "条目/河岸散步.md")
+        self.assertEqual(property_value(self.publisher.read(first.path).decode(), "wgo_id"), item_id)
+        self.assertEqual(self.publisher.record(item_id)["path"], first.path)
+        self.revisions[item_id] = 2
+        revised = replace(snapshot, content_revision=2, title="傍晚的河岸")
+        self.assertEqual(self.publish(revised).path, first.path)
+        self.assertEqual(self.publisher.resolve(item_id), first.path)
+        self.assertEqual(len(list((self.publisher.root / "条目").glob("*.md"))), 1)
+
+    def test_title_collisions_keep_user_bytes_and_disambiguate_short_id_collisions(self):
+        user_path = self.publisher._safe_path("条目/河岸散步.md")
+        user_bytes = b"# A personal note\nKeep these bytes.\n"
+        user_path.write_bytes(user_bytes)
+        ids = ("12345678-1111-4111-8111-111111111111", "12345678-2222-4222-8222-222222222222")
+        receipts = [self.publish(self.snapshot(item_id=id_, title="河岸散步")) for id_ in ids]
+        self.assertEqual(user_path.read_bytes(), user_bytes)
+        self.assertEqual(len({r.path for r in receipts}), 2)
+        for id_, receipt in zip(ids, receipts):
+            self.assertRegex(receipt.path, r"^条目/河岸散步 · 12345678(?:-\d+)?\.md$")
+            self.assertNotIn(id_, receipt.path)
+            self.assertEqual(self.publisher.resolve(id_), receipt.path)
+            self.assertEqual(self.publish(self.snapshot(item_id=id_, title="换一个标题")).path, receipt.path)
+        self.assertEqual(self.publisher.pending_proposals(), [])
+
+    def test_legacy_uuid_and_missing_durable_paths_remain_owned_positions(self):
+        legacy = self.snapshot(item_id="87654321-1111-4111-8111-111111111111", title="旧页")
+        legacy_path = "条目/" + legacy.item_id + ".md"
+        self.publisher.publish_document(object_id=legacy.item_id, path=legacy_path, title=legacy.title,
+            body=legacy.units[0].text, content_revision=1)
+        self.assertEqual(self.publish(replace(legacy, title="模型给的新标题")).path, legacy_path)
+        reserved = self.snapshot(item_id="reserved-item", title="河岸散步")
+        reserved_path = "条目/河岸散步.md"
+        self.publisher.publish_document(object_id=reserved.item_id, path=reserved_path, title=reserved.title,
+            body=reserved.units[0].text, content_revision=1)
+        (self.publisher.root / reserved_path).unlink()
+        other = self.publish(self.snapshot(item_id="another-item", title="河岸散步"))
+        self.assertNotEqual(other.path, reserved_path)
+        self.assertTrue(other.path.startswith("条目/河岸散步 · "))
+        restored = self.publish(replace(reserved, title="另一个模型标题"))
+        self.assertEqual(restored.path, reserved_path)
+        self.assertEqual(property_value(self.publisher.read(other.path).decode(), "wgo_id"), "another-item")
+
+    def test_filename_is_redacted_link_safe_and_bounded_without_changing_identity(self):
+        title = " ../ 河岸/[散步]|#^\\?*\nhttps://example.org/a?token=synthetic-secret " + "雨🚶" * 150
+        snapshot = self.snapshot(item_id="safe-name", title=title)
+        receipt = self.publish(snapshot)
+        name = Path(receipt.path).name
+        self.assertEqual(Path(receipt.path).parent.as_posix(), "条目")
+        self.assertIn("河岸", name)
+        self.assertNotIn("synthetic-secret", name)
+        self.assertFalse(any(c in name for c in '<>:"/\\|?*[]#^\r\n\x00'))
+        self.assertLessEqual(len(name.encode("utf-8")), 240)
+        self.assertIn(receipt.path.removesuffix(".md"), wikilink("WGO/" + receipt.path))
+        self.assertEqual(property_value(self.publisher.read(receipt.path).decode(), "wgo_id"), snapshot.item_id)
+
+    def test_equivalent_title_names_collide_and_empty_cleaned_titles_remain_readable(self):
+        first = self.publish(self.snapshot(item_id="first-name", title="Cafe\u0301"))
+        second = self.publish(self.snapshot(item_id="second-name", title="CAFÉ"))
+        self.assertEqual(first.path, "条目/Café.md")
+        self.assertTrue(second.path.startswith("条目/CAFÉ · "))
+        fallback = self.publish(self.snapshot(item_id="fallback-id", title="/\\|[]#^\x00.."))
+        self.assertEqual(fallback.path, "条目/未命名事项.md")
+
+    def test_title_symlink_fails_closed_instead_of_using_a_collision_suffix(self):
+        outside = self.base / "outside.md"
+        outside.write_text("Private user bytes.\n")
+        link = self.publisher._safe_path("条目/河岸散步.md")
+        link.symlink_to(outside)
+        with self.assertRaisesRegex(ReadingError, "projection_symlink"):
+            self.publish(self.snapshot(item_id="symlink-item", title="河岸散步"))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(outside.read_text(), "Private user bytes.\n")
+        self.assertIsNone(self.publisher.record("symlink-item"))
+
+    def test_concurrent_same_title_publishers_allocate_distinct_real_targets(self):
+        snapshots = [self.snapshot(item_id=id_, title="同一标题") for id_ in ("concurrent-one", "concurrent-two")]
+        other = ProjectionPublisher(self.ledger, self.publisher.root, current_revision=self.revisions.get,
+                                    file_lock=MacOSFileLock())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(publisher.publish_item, snapshot, self.plan(snapshot))
+                       for publisher, snapshot in zip((self.publisher, other), snapshots)]
+            receipts = [future.result() for future in futures]
+        self.assertEqual(len({r.path for r in receipts}), 2)
+        self.assertIn("条目/同一标题.md", {r.path for r in receipts})
+        for snapshot, receipt in zip(snapshots, receipts):
+            self.assertTrue(receipt.path.startswith("条目/同一标题"))
+            self.assertEqual(property_value(self.publisher.read(receipt.path).decode(), "wgo_id"), snapshot.item_id)
+            self.assertTrue(self.publisher.ready(snapshot.item_id, 1))
+
+    def test_readable_and_user_renamed_paths_pass_independent_verification(self):
+        from tests.test_semantic_verification import VerificationFixture
+        directory = self.base / "verification"
+        directory.mkdir()
+        fixture = VerificationFixture(directory)
+        path = fixture.publisher.resolve("item")
+        self.assertEqual(path, "条目/周末散步.md")
+        self.assertTrue(fixture.verify().complete)
+        renamed = fixture.projections / "我自己的可读名字.md"
+        (fixture.projections / path).rename(renamed)
+        self.assertTrue(fixture.verify().complete)
+        (fixture.projections / "duplicate.md").write_bytes(renamed.read_bytes())
+        self.assertIn("projection_identity_collision", {issue.code for issue in fixture.verify().issues})
+
+    def test_unpublished_merged_identity_gets_its_own_readable_redirect(self):
+        store, _first, _span = self.canonical_story()
+        old_id = "abcdef01-1111-4111-8111-111111111111"
+        second, _span = self.canonical_extract(store, "later-identity", "猫又回到箱子旁。")
+        self.canonical_actions(store, [{"action_key": "create-old", "type": "CREATE_ITEM", "item_id": old_id,
+            "kind": "life", "title": "箱猫", "identity_scope": {"scene": "同一只猫"},
+            "observation_ids": [second["observation_id"]]}])
+        self.canonical_actions(store, [{"action_key": "merge-old", "type": "MERGE_ITEMS",
+            "item_ids": ["stable-cat", old_id], "target_item_id": "stable-cat", "reason": "同一只猫的延续"}])
+        publisher = ProjectionPublisher.for_store(store, self.base / "identity-WGO", file_lock=MacOSFileLock())
+        snapshot = CanonicalReadingAdapter(store).snapshot("stable-cat")
+        current = publisher.publish_item(snapshot, self.plan(snapshot))
+        before = publisher.read(current.path)
+        redirect = publisher.publish_identity_redirect(store, old_id)
+        self.assertEqual(current.path, "条目/箱猫.md")
+        self.assertEqual(redirect.path, "条目/箱猫 · abcdef01.md")
+        self.assertEqual(property_value(publisher.read(redirect.path).decode(), "wgo_id"), old_id)
+        self.assertEqual(publisher.read(current.path), before)
+        self.assertEqual(publisher.resolve(old_id), current.path)
+        self.assertIn(wikilink("WGO/" + current.path, "箱猫"), publisher.read(redirect.path).decode())
 
 
 class ProjectionTests(ReadingHarness):
@@ -1561,7 +1692,8 @@ class ProjectionTests(ReadingHarness):
         path = self.publisher._safe_path("条目/box-cat.md")
         legacy = "---\nmy_field: [foo, bar]\n---\n# 旧笔记\n整页来源未知，全部保留。\n"
         path.write_text(legacy)
-        receipt = self.publish(snapshot)
+        receipt = self.publisher.publish_document(object_id=snapshot.item_id, path="条目/box-cat.md",
+            title=snapshot.title, body=snapshot.units[0].text, content_revision=1)
         self.assertEqual(receipt.status, "conflict")
         self.assertEqual(path.read_text(), legacy)
         self.publisher.resolve_proposal(receipt.proposal_id, "adopt", expected_revision=1,
@@ -1760,11 +1892,14 @@ class ProjectionTests(ReadingHarness):
         snapshot = self.snapshot()
         legacy = self.publisher._safe_path("条目/box-cat.md")
         legacy.write_text("# 全部是个人文字\n保留我。\n")
-        result = self.publish(snapshot)
+        result = self.publisher.publish_document(object_id=snapshot.item_id, path="条目/box-cat.md",
+            title=snapshot.title, body=snapshot.units[0].text, content_revision=1)
         self.publisher.resolve_proposal(result.proposal_id, "keep_personal", expected_revision=1,
                                          expected_file_hash=result.file_hash)
-        repeated = self.publish(snapshot)
+        repeated = self.publisher.publish_document(object_id=snapshot.item_id, path="条目/box-cat.md",
+            title=snapshot.title, body=snapshot.units[0].text, content_revision=1)
         self.assertEqual(repeated.status, "personal")
+        self.assertEqual(self.publisher.record(snapshot.item_id)["path"], "条目/box-cat.md")
         self.assertEqual(self.publisher.pending_proposals(), [])
         self.assertEqual(legacy.read_text(), "# 全部是个人文字\n保留我。\n")
 
@@ -1794,7 +1929,7 @@ class ProjectionTests(ReadingHarness):
         query_path.write_text(patch_properties(query_path.read_text(), {"查询": "箱子里的猫"}, machine_only=False))
         result = controls.run_query()
         self.assertEqual(result.status, "success")
-        self.assertIn("stable-cat", query_path.read_text())
+        self.assertIn(wikilink("WGO/" + receipt.path, snapshot.title), query_path.read_text())
         self.assertIn("检索覆盖仍有未完成部分", query_path.read_text())
 
     def test_pending_file_keeps_captured_filename_in_reading_surface(self):

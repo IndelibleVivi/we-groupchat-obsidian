@@ -1,0 +1,7 @@
+/* Keep the authored heading and user properties visible. Machine identity
+   remains in the unchanged Markdown and is available in editing mode. */
+.wgo-reader-page .markdown-preview-view .inline-title,
+.wgo-reader-page .markdown-preview-view .metadata-property[data-property-key^="wgo_"],
+.wgo-reader-machine-only .markdown-preview-view .metadata-container {
+    display: none;
+}

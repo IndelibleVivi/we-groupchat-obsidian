@@ -50,8 +50,14 @@ Bodies can use comparison tables, ordered steps, lists and attributed quotations
 where the material calls for them. New details can update the original generated
 paragraph naturally; unaffected paragraphs, required original wording and manual
 edits retain their existing protections. The optional [local Obsidian plugin](integrations/obsidian/README.md)
-records only a verified visible open. Without it, use explicit read/known actions.
+records only a verified visible open and keeps machine properties and duplicate
+filename headings out of reading mode, while retaining user properties and the
+original editable Markdown. Without it, use explicit read/known actions.
 The plugin is source-only and is not installed or enabled automatically.
+
+New Item pages start with a readable title as their filename, adding a short ID
+only for a collision. Existing UUID filenames, saved paths and user renames stay
+in place; a later generated title change does not move the page.
 
 The body can combine an exchange into a coherent explanation and select its
 key quotations; complete original excerpts remain on linked source pages.

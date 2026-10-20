@@ -853,6 +853,72 @@ class ReaderRuntimeTests(ReadingHarness):
 
 
 class ObsidianPluginTests(ReadingHarness):
+    def test_reading_presentation_tracks_managed_panes_without_editing_notes(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is unavailable; Obsidian presentation mock not executed")
+        plugin = Path(__file__).resolve().parents[1] / "integrations/obsidian/main.js"
+        script = r'''
+const assert = require('node:assert/strict');
+const Module = require('node:module');
+class MarkdownView {}
+const oldLoad = Module._load;
+Module._load = function(name, ...rest) {
+  if (name === 'obsidian') return {Plugin: class {}, MarkdownView, parseYaml: raw => Object.fromEntries(raw.split('\n').filter(Boolean).map(line => {
+    const cut = line.indexOf(':'); return [line.slice(0, cut), JSON.parse(line.slice(cut + 1).trim())];
+  }))};
+  return oldLoad.call(this, name, ...rest);
+};
+const {ReadingPresentation} = require(process.argv[1])._test;
+const original = '---\nwgo_id: "cat"\nwgo_generation: "generation"\nwgo_content_revision: 3\n---\n# 猫的日常\n正文和证据保持原样。\n';
+function pane(relative, text = original) {
+  const classes = new Set();
+  const view = new MarkdownView();
+  view.file = {path: relative}; view.text = text; view.getViewData = () => view.text;
+  view.containerEl = {classList: {
+    toggle: (name, on) => on ? classes.add(name) : classes.delete(name),
+    remove: (...names) => names.forEach(name => classes.delete(name))
+  }};
+  return {view, classes};
+}
+const item = pane('WGO/条目/猫的日常.md');
+const source = pane('WGO/来源/cat-0001.md', original.replace('"cat"', '"source:cat:1"'));
+const ordinary = pane('日记.md');
+const unowned = pane('WGO/手记.md', '# 用户手记\n原样保留。\n');
+let leaves = [item, source, ordinary, unowned];
+const presentation = new ReadingPresentation({workspace: {getLeavesOfType: type => {
+  assert.equal(type, 'markdown'); return leaves;
+}}});
+presentation.sync();
+assert(item.classes.has('wgo-reader-page')); assert(item.classes.has('wgo-reader-machine-only'));
+assert(source.classes.has('wgo-reader-page')); assert(source.classes.has('wgo-reader-machine-only'));
+assert.equal(ordinary.classes.size, 0); assert.equal(unowned.classes.size, 0);
+assert.equal(item.view.text, original);
+item.view.text = original.replace('\n---\n#', '\n关注: "下次变化"\n---\n#');
+presentation.sync();
+assert(item.classes.has('wgo-reader-page')); assert(!item.classes.has('wgo-reader-machine-only'));
+assert(item.view.text.includes('关注: "下次变化"'));
+item.view.file.path = '日记.md'; presentation.sync(); assert.equal(item.classes.size, 0);
+item.view.file.path = 'WGO/../日记.md'; presentation.sync(); assert.equal(item.classes.size, 0);
+item.view.file.path = 'WGO/.wgo/private.md'; presentation.sync(); assert.equal(item.classes.size, 0);
+item.view.file.path = 'WGO/条目/猫的日常.md'; item.view.text = original; presentation.sync();
+assert(item.classes.has('wgo-reader-page'));
+item.isDeferred = true; presentation.sync(); assert.equal(item.classes.size, 0);
+item.isDeferred = false; presentation.sync(); assert(item.classes.has('wgo-reader-page'));
+item.view.text = '---\nwgo_id: invalid yaml\n---\n正文\n'; presentation.sync();
+assert.equal(item.classes.size, 0);
+item.view.text = original; presentation.sync();
+leaves = [ordinary, unowned]; presentation.sync();
+assert.equal(item.classes.size, 0); assert.equal(source.classes.size, 0);
+leaves = [item, source]; presentation.sync(); presentation.unload();
+assert.equal(item.classes.size, 0); assert.equal(source.classes.size, 0);
+assert.equal(item.view.text, original);
+process.stdout.write('scoped reading presentation assertions passed\n');
+'''
+        result = subprocess.run([node, "-e", script, str(plugin)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("presentation assertions passed", result.stdout)
+
     def test_mocked_actual_pane_only_and_private_atomic_event(self):
         node = shutil.which("node")
         if not node:

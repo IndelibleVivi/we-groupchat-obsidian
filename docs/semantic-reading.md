@@ -354,9 +354,20 @@ The effective budget never exceeds an injected provider's declared input limit.
 
 `ProjectionPublisher.publish_item(snapshot, plan)` publishes bounded source
 pages first, then the one Item file. `publish_view` contains links/embeds, never
-copies Item paragraphs. IDs determine original filenames; later titles do not
-rename files. `wgo_id` scanning discovers user renames; duplicate identities
-fail closed. `resolve(id)` and `ready(id, revision)` recheck disk state.
+copies Item paragraphs. A new Item starts at `条目/<readable-title>.md`, using a
+bounded, URL-redacted filename component. A filename already occupied by a user
+note, another Item or its durable mapping receives a short Item-ID suffix;
+colliding short IDs receive a further numeric suffix. Dates do not participate
+in identity or filename disambiguation. `item_id` and `wgo_id` remain the identity,
+independent of the filename.
+Existing files take precedence, including retained UUID filenames and user
+renames; a missing file retains its recorded position. Later model titles never
+rename files, and this policy does not migrate older pages. Initial allocation
+and publication share the root lock and file CAS. `wgo_id` scanning discovers user
+renames; duplicate identities and symlinks fail closed. Merged/split identity
+pages use their own direct identity and the same initial naming rule, without
+following an alias to choose their position. `resolve(id)` and `ready(id, revision)`
+recheck disk state.
 Structured body anchors sit on their own line with blank lines around them,
 immediately after the actual table, list, quote or code block, before generated
 source footers. This follows Obsidian's [block-link rules](https://obsidian.md/help/links).
