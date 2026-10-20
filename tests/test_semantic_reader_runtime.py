@@ -853,6 +853,206 @@ class ReaderRuntimeTests(ReadingHarness):
 
 
 class ObsidianPluginTests(ReadingHarness):
+    def _run_scheduler_case(self, scenario):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is unavailable; Obsidian scheduler mock not executed")
+        plugin = Path(__file__).resolve().parents[1] / "integrations/obsidian/main.js"
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const Module = require('node:module');
+class MarkdownView {}
+class Plugin {
+  constructor(app) { this.app = app; this.disposers = []; }
+  registerEvent(ref) { this.disposers.push(() => ref.off()); }
+  registerDomEvent(target, name, callback) {
+    target.addEventListener(name, callback);
+    this.disposers.push(() => target.removeEventListener(name, callback));
+  }
+  disposeRegistered() { for (const dispose of this.disposers.splice(0)) dispose(); }
+}
+const oldLoad = Module._load;
+Module._load = function(name, ...rest) {
+  if (name === 'obsidian') return {Plugin, MarkdownView, parseYaml: raw =>
+    Object.fromEntries(raw.split('\n').filter(Boolean).map(line => {
+      const cut = line.indexOf(':');
+      return [line.slice(0, cut), JSON.parse(line.slice(cut + 1).trim())];
+    }))};
+  return oldLoad.call(this, name, ...rest);
+};
+const Observer = require(process.argv[1]);
+Module._load = oldLoad;
+const base = fs.realpathSync(process.argv[2]);
+const scenario = process.argv[3];
+function bus() {
+  const callbacks = new Map();
+  return {
+    on(name, callback) {
+      if (!callbacks.has(name)) callbacks.set(name, new Set());
+      callbacks.get(name).add(callback);
+      return {off: () => callbacks.get(name).delete(callback)};
+    },
+    emit(name, value) { for (const callback of [...(callbacks.get(name) || [])]) callback(value); }
+  };
+}
+function document() {
+  const doc = new EventTarget(), win = new EventTarget();
+  doc.visibilityState = 'visible'; doc.focused = true;
+  doc.hasFocus = () => doc.focused; doc.defaultView = win;
+  doc.frames = new Map(); doc.requests = 0;
+  win.getComputedStyle = () => ({display: 'block', visibility: 'visible'});
+  win.requestAnimationFrame = callback => {
+    const id = ++doc.requests; doc.frames.set(id, callback); return id;
+  };
+  win.cancelAnimationFrame = id => doc.frames.delete(id);
+  doc.release = () => {
+    for (const [id, callback] of [...doc.frames]) {
+      doc.frames.delete(id); callback(0);
+    }
+  };
+  return doc;
+}
+function pane(doc, name, id) {
+  const view = new MarkdownView(), classes = new Set();
+  view.file = {path: 'WGO/条目/' + name + '.md'};
+  view.text = '---\nwgo_id: "' + id + '"\nwgo_generation: "generation"\n' +
+    'wgo_content_revision: 3\n---\n合成的可见内容。\n';
+  view.getViewData = () => view.text;
+  view.containerEl = {ownerDocument: doc, isConnected: true,
+    getBoundingClientRect: () => ({width: 640, height: 480}), classList: {
+      toggle: (name, on) => on ? classes.add(name) : classes.delete(name),
+      remove: (...names) => names.forEach(name => classes.delete(name))
+    }};
+  view.leaf = {view, isDeferred: false}; view.classes = classes;
+  fs.mkdirSync(path.dirname(path.join(base, view.file.path)), {recursive: true});
+  fs.writeFileSync(path.join(base, view.file.path), view.text);
+  return view;
+}
+const a = document(), b = document();
+const first = pane(a, '旧合成', 'old'), second = pane(b, '当前合成', 'current');
+let active = first, observeCalls = 0, serial = 0;
+const flushes = [];
+const workspace = Object.assign(bus(), {
+  getActiveViewOfType: Type => active instanceof Type ? active : null,
+  getLeavesOfType: () => [first.leaf, second.leaf],
+  onLayoutReady: callback => { workspace.ready = callback; }
+});
+const vault = Object.assign(bus(), {adapter: {getBasePath: () => base}});
+const observer = new Observer({workspace, vault});
+const originalFlush = observer.flush.bind(observer);
+observer.flush = () => { const work = originalFlush(); flushes.push(work); return work; };
+observer.onload();
+observer.writer.now = () => 100;
+observer.writer.random = () => (++serial).toString(16).padStart(32, '0');
+const originalObserve = observer.writer.observe.bind(observer.writer);
+observer.writer.observe = () => { observeCalls++; return originalObserve(); };
+const turn = () => new Promise(resolve => setImmediate(resolve));
+function events() {
+  const inbox = path.join(base, 'WGO/.wgo/reader-events');
+  return fs.existsSync(inbox) ? fs.readdirSync(inbox).filter(n => n.endsWith('.json'))
+    .map(n => JSON.parse(fs.readFileSync(path.join(inbox, n), 'utf8'))) : [];
+}
+function stop() { observer.onunload(); observer.disposeRegistered(); }
+(async () => {
+  workspace.ready();
+  assert.equal(a.frames.size, 1);
+  const lateFrame = [...a.frames.values()][0];
+  if (scenario === 'supersede') {
+    a.visibilityState = 'hidden'; a.focused = false; first.containerEl.isConnected = false;
+    a.defaultView.closed = true;
+    a.dispatchEvent(new Event('visibilitychange'));
+    active = second;
+    workspace.emit('active-leaf-change', second.leaf);
+    for (let i = 0; i < 100; i++) workspace.emit('layout-change');
+    b.defaultView.dispatchEvent(new Event('focus'));
+    await turn();
+    assert.equal(b.requests, 1, 'new focused document must get a frame without the old callback');
+    assert.equal(observeCalls, 0, 'cancelling a frame is not visible-open evidence');
+    assert.equal(flushes.length, 1, 'bursts must reuse the one running drain');
+    b.release(); await flushes[0];
+    assert.deepEqual(events().map(event => event.item_id), ['current']);
+    assert.equal(observeCalls, 1);
+    lateFrame(0); await turn();
+    assert.equal(observeCalls, 1); assert.equal(events().length, 1);
+  } else if (scenario === 'unload') {
+    stop();
+    await turn();
+    assert.equal(observer.running, false, 'unload must release the wait before any old callback');
+    assert.equal(observeCalls, 0); assert.equal(events().length, 0);
+    lateFrame(0); await flushes[0];
+    assert.equal(observeCalls, 0, 'a late frame must not enter observe after unload');
+    assert.equal(events().length, 0);
+    assert.equal(observer.running, false);
+    const count = flushes.length;
+    workspace.ready(); await turn();
+    assert.equal(flushes.length, count, 'late layout-ready must not restart an unloaded plugin');
+    assert.equal(observer.pending, false); assert.equal(first.classes.size, 0);
+  } else if (scenario === 'epoch') {
+    second.containerEl.ownerDocument = a;
+    a.release();
+    active = second;
+    workspace.emit('active-leaf-change', second.leaf);
+    await turn();
+    assert.equal(a.requests, 2, 'same-document supersession needs its own current frame');
+    assert.equal(observeCalls, 0);
+    a.release(); await flushes[0];
+    assert.deepEqual(events().map(event => event.item_id), ['current']);
+  } else if (scenario === 'document') {
+    a.release(); active = second; // The active document changes before queued continuation.
+    await turn();
+    assert.equal(b.requests, 1, 'an old-document frame must not authorize the current document');
+    assert.equal(observeCalls, 0);
+    b.release(); await flushes[0];
+    assert.deepEqual(events().map(event => event.item_id), ['current']);
+  } else if (scenario === 'hidden' || scenario === 'no-focus') {
+    a.visibilityState = 'hidden'; first.containerEl.isConnected = false; active = second;
+    if (scenario === 'hidden') b.visibilityState = 'hidden';
+    else b.focused = false;
+    workspace.emit('active-leaf-change', second.leaf);
+    await turn(); lateFrame(0); await turn(); b.release(); await flushes[0];
+    assert.equal(events().length, 0, 'hidden and unfocused current panes never finalize');
+    lateFrame(0); await turn(); assert.equal(events().length, 0);
+  } else if (scenario === 'normal') {
+    assert.equal(observeCalls, 0);
+    a.release(); await flushes[0];
+    assert.deepEqual(events().map(event => event.item_id), ['old']);
+    workspace.emit('layout-change'); await turn();
+    assert.equal(a.requests, 2);
+    a.release(); await flushes[1];
+    assert.equal(events().length, 1, 'a layout-only refresh must keep content deduplication');
+  } else throw new Error('unknown synthetic scheduler case');
+  if (!observer.stopped) stop();
+  assert.equal(observer.running, false);
+  process.stdout.write('scheduler case passed: ' + scenario + '\n');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        result = subprocess.run([node, "-e", script, str(plugin), str(self.base), scenario],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("scheduler case passed: " + scenario, result.stdout)
+
+    def test_scheduler_supersedes_stalled_old_document_and_coalesces_bursts(self):
+        self._run_scheduler_case("supersede")
+
+    def test_scheduler_unload_blocks_late_frame_and_layout_ready(self):
+        self._run_scheduler_case("unload")
+
+    def test_scheduler_rechecks_epoch_after_same_document_frame_callback(self):
+        self._run_scheduler_case("epoch")
+
+    def test_scheduler_rechecks_current_document_after_frame_callback(self):
+        self._run_scheduler_case("document")
+
+    def test_scheduler_stale_frames_cannot_finalize_hidden_or_unfocused_panes(self):
+        for scenario in ("hidden", "no-focus"):
+            with self.subTest(scenario=scenario):
+                self._run_scheduler_case(scenario)
+
+    def test_scheduler_normal_frame_path_preserves_deduplication(self):
+        self._run_scheduler_case("normal")
+
     def test_reading_presentation_tracks_managed_panes_without_editing_notes(self):
         node = shutil.which("node")
         if not node:

@@ -11,6 +11,8 @@
 
 插件至少需要 Obsidian 1.7.2。它通过 `getActiveViewOfType(MarkdownView)`、active-leaf/file-open/layout、可见性和窗口焦点事件检查当前 pane，并排除 DeferredView。它还要求页面可见文本与当前磁盘文件逐字一致；未保存的编辑不会被当成已确认的 canonical 版本。API 依据见 [Obsidian API](https://github.com/obsidianmd/obsidian-api/blob/master/obsidian.d.ts) 与 [Deferred views 指南](https://github.com/obsidianmd/obsidian-developer-docs/blob/main/en/Plugins/Guides/Defer%20views.md)。
 
+调度请求会合并到一个串行任务。可见 document 的 frame 等待可以被后续请求或卸载取消，因此旧窗口隐藏、关闭或不再回调时，不会一直挡住新窗口的任务。等待结束后仍须核对当前 document、调度 epoch 和插件是否已停止；取消本身不构成可见打开证据。卸载会解除未完成等待，迟到的 frame 或 layout-ready 回调不能重启观察。此调度不使用 timer 轮询，也不放松焦点、可见性、文件身份或磁盘字节检查。合成调度测试与实际 Obsidian native 验收仍是两项独立证据。
+
 阅读样式只作用于 `WGO/` 内带完整 WGO 身份属性的 Markdown pane。阅读模式保留正文中的可读标题，收起 Obsidian 重复显示的文件名标题与 `wgo_*` 机器属性；用户自己的关注、静音等属性继续显示。纯机器属性区不占正文空间。切换到编辑模式仍能查看和编辑原始属性，切换到普通笔记或卸载插件会移除该局部样式。样式不会改写 Markdown、重命名文件、修改阅读状态，也不改变可见打开事件的验证条件。
 
 事件只写入 `WGO/.wgo/reader-events/<opaque-id>.json`，先写私有临时文件，再原子改名。事件包括逻辑 Item/简报 ID、generation、显示的 content revision、WGO 内相对路径、文件 SHA-256 和观察时间，不含正文。目录为 `0700`、事件为 `0600`；symlink、越界路径和非普通文件会拒绝。当前文件权限实现只支持具有 POSIX 私有权限语义的桌面环境，尚无 Windows DACL 验收，不应据此宣称 Windows 插件支持。

@@ -1,7 +1,7 @@
 {
   "id": "wgo-reader-observer",
   "name": "WGO Reader Observer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.7.2",
   "description": "Record the exact WGO Item or brief version visible in the active pane, locally.",
   "author": "WGO contributors",

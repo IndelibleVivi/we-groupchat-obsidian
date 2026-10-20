@@ -228,11 +228,16 @@ class WGOReaderObserver extends Plugin {
         this.pending = false;
         this.running = false;
         this.stopped = false;
+        this.scheduleEpoch = 0;
+        this.frameWait = null;
         this.documents = new WeakSet();
         const schedule = (reset = false) => {
+            if (this.stopped) return;
             if (reset) this.writer.reset();
             this.presentation.sync();
             this.pending = true;
+            this.scheduleEpoch++;
+            this.cancelFrame();
             this.bindDocument(schedule);
             if (!this.running) void this.flush();
         };
@@ -256,14 +261,47 @@ class WGOReaderObserver extends Plugin {
         this.registerDomEvent(doc.defaultView, "blur", () => schedule(true));
     }
 
+    cancelFrame() {
+        this.frameWait?.cancel();
+    }
+
+    waitForFrame(doc) {
+        const win = doc?.defaultView;
+        if (doc?.visibilityState !== "visible" || typeof win?.requestAnimationFrame !== "function") {
+            return Promise.resolve(true);
+        }
+        return new Promise(resolve => {
+            const waiter = {id: null, cancel: null};
+            const finish = ready => {
+                if (this.frameWait !== waiter) return;
+                this.frameWait = null;
+                resolve(ready);
+            };
+            waiter.cancel = () => {
+                if (this.frameWait !== waiter) return;
+                try { win.cancelAnimationFrame?.(waiter.id); }
+                catch (_) { /* A detached window need not accept cancellation. */ }
+                finish(false);
+            };
+            this.frameWait = waiter;
+            try { waiter.id = win.requestAnimationFrame(() => finish(true)); }
+            catch (_) { finish(false); }
+        });
+    }
+
     async flush() {
         this.running = true;
         try {
             while (this.pending && !this.stopped) {
                 this.pending = false;
+                const epoch = this.scheduleEpoch;
                 const doc = this.app.workspace.getActiveViewOfType(MarkdownView)?.containerEl?.ownerDocument;
-                if (doc?.visibilityState === "visible" && doc.defaultView?.requestAnimationFrame) {
-                    await new Promise(resolve => doc.defaultView.requestAnimationFrame(resolve));
+                const ready = await this.waitForFrame(doc);
+                if (this.stopped) break;
+                if (!ready || epoch !== this.scheduleEpoch) continue;
+                if (this.app.workspace.getActiveViewOfType(MarkdownView)?.containerEl?.ownerDocument !== doc) {
+                    this.pending = true;
+                    continue;
                 }
                 try { await this.writer.observe(); }
                 catch (_) { /* Fail closed, without logging paths or note text. */ }
@@ -273,6 +311,9 @@ class WGOReaderObserver extends Plugin {
 
     onunload() {
         this.stopped = true;
+        this.pending = false;
+        this.scheduleEpoch++;
+        this.cancelFrame();
         this.writer.reset();
         this.presentation.unload();
     }
