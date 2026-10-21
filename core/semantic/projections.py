@@ -2608,6 +2608,47 @@ class ProjectionPublisher:
             content += "\n\n^" + anchor(excerpt.id)
         return f"### {label}\n\n来源时间：{excerpt.source_time or '未提供'}；获知时间：{excerpt.known_at or '未提供'}\n\n" + content
 
+    @staticmethod
+    def _source_instant(value):
+        try:
+            instant = datetime.fromisoformat(value)
+            return instant.astimezone(timezone.utc) if instant.utcoffset() is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _source_time_range(cls, values):
+        values = list(values)
+        dated = [instant for value in values if (instant := cls._source_instant(value)) is not None]
+        if not dated:
+            return "时间范围未确定"
+        first, last = min(dated), max(dated)
+        start = first.strftime("%Y-%m-%d %H:%M:%S")
+        end = last.strftime("%H:%M:%S" if first.date() == last.date() else "%Y-%m-%d %H:%M:%S")
+        label = start + ("–" + end if first != last else "") + " UTC"
+        return label + (" · 部分时间未提供" if len(dated) != len(values) else "")
+
+    @classmethod
+    def _render_source_page(cls, fragments):
+        """Compact only the known generated prefix; retain cached fragment bytes."""
+        rows, times = [], []
+        prefix = re.compile(r"\A### ([^\n]*)\n\n来源时间：([^\n]*)；获知时间：[^\n]*\n\n"
+                            r"(?:本条消息发言／转述者：([^\n]*)\n\n)?(?=`{3,}text\n)")
+        for index, fragment in enumerate(fragments):
+            match = prefix.match(fragment)
+            if match is None:
+                rows.append((None, index, fragment))
+                times.append("")
+                continue
+            label, source_time, speaker = match.groups()
+            speaker = speaker or "显示名未提供"
+            qualifier = " · " + label if label not in {"来源", "原文准确片段"} else ""
+            rows.append((cls._source_instant(source_time), index,
+                         "**" + speaker + "**" + qualifier + "\n\n" + fragment[match.end():]))
+            times.append(source_time)
+        rows.sort(key=lambda row: (row[0] is None, row[0] or datetime.max.replace(tzinfo=timezone.utc), row[1]))
+        return cls._source_time_range(times) + "\n\n" + "\n\n".join(row[2] for row in rows)
+
     def _publish_sources(self, snapshot: ReadingSnapshot):
         _token(snapshot.item_id)
         pages: dict[int, list[str]] = {}
@@ -2655,7 +2696,7 @@ class ProjectionPublisher:
                                  (self.ledger.generation_id, snapshot.item_id, evidence.id, fragment, fingerprint(fragment)))
                 pages.setdefault(assigned, []).append(fragment)
         for page, fragments in sorted(pages.items()):
-            rendered = "\n\n".join(fragments)
+            rendered = self._render_source_page(fragments)
             if len(rendered) > self.MAX_SOURCE_PAGE_CHARS:
                 raise ReadingError("source_page_too_large")
             receipt = self.publish_document(
@@ -2701,7 +2742,7 @@ class ProjectionPublisher:
         evidence = {e.id: e for e in snapshot.evidence}
         paragraphs = []
         for block in plan.blocks:
-            text, placed = render_markdown_evidence(redact_urls_in_text(block.text),
+            text, _ = render_markdown_evidence(redact_urls_in_text(block.text),
                 {id_: evidence[id_] for id_ in block.evidence_ids},
                 lambda id_, table: self.evidence_link(snapshot.item_id, id_, table=table,
                                                        alias=evidence_alias(evidence[id_])), block_anchor=anchor(block.id))
@@ -2710,12 +2751,18 @@ class ProjectionPublisher:
                 if unit.status != "current":
                     label = "已撤回的历史陈述" if unit.status == "retracted" else "存在争议的陈述"
                     text += "\n\n" + label + ("：" + redact_urls_in_text(unit.reason) if unit.reason else "，请结合本段更正和来源阅读。")
-            refs = [self.evidence_link(snapshot.item_id, e, alias=evidence_alias(evidence[e]))
-                    for e in block.evidence_ids if e not in placed]
-            if len(refs) > 1:
-                text += f"\n\n> [!quote]- 本段来源（{len(refs)} 条）\n" + "\n".join("> - " + ref for ref in refs)
-            elif refs:
-                text += "\n\n" + refs[0]
+            if block.evidence_ids:
+                times = (evidence[e].source_time for e in block.evidence_ids)
+                originals = ["> [!quote]+ 本段原话 · " + self._source_time_range(times)]
+                ordered = sorted(enumerate(block.evidence_ids), key=lambda pair:
+                    (self._source_instant(evidence[pair[1]].source_time) is None,
+                     self._source_instant(evidence[pair[1]].source_time) or datetime.max.replace(tzinfo=timezone.utc), pair[0]))
+                for _, evidence_id in ordered:
+                    excerpt = evidence[evidence_id]
+                    link = self.evidence_link(snapshot.item_id, evidence_id, alias=excerpt.speaker_name or "显示名未提供")
+                    originals.extend((">", "> " + link,
+                                      ">", "> !" + link))
+                text += "\n\n" + "\n".join(originals)
             resource_refs = [self._resource_text(resources[r]) for r in block.resource_ids]
             paragraphs.append(text + ("\n\n" + " · ".join(resource_refs) if resource_refs else ""))
         if snapshot.relations:

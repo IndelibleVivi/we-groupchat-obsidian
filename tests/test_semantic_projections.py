@@ -2033,7 +2033,7 @@ class ProjectionTests(ReadingHarness):
             with self.subTest(code=code), self.assertRaisesRegex(ReadingError, code):
                 validate_body_plan(snapshot, plan(bad))
 
-    def test_named_quote_attribution_binds_citation_and_keeps_one_source_link(self):
+    def test_named_quote_attribution_keeps_one_authored_citation_and_inline_originals(self):
         quote, later = "猫在纸箱里睡着了。", "今天下雨了。"
         snapshot = replace(self.snapshot(item_id="named-quote"),
             units=(ReadingUnit("story", quote, ("e1",), role="quote", verbatim=(quote,)),),
@@ -2048,7 +2048,10 @@ class ProjectionTests(ReadingHarness):
         receipt = self.publisher.publish_item(snapshot, accepted)
         body = region_body(self.publisher.read(receipt.path).decode(), "body")
         self.assertIn("—— 阿甲", body)
-        self.assertEqual(body.count("#^" + anchor("e1")), 1)
+        authored, originals = body.split("> [!quote]+", 1)
+        self.assertEqual(authored.count("#^" + anchor("e1")), 1)
+        for evidence_id in ("e1", "e2"):
+            self.assertIn("!" + self.publisher.evidence_link(snapshot.item_id, evidence_id, alias="阿甲"), originals)
         # The same named speaker citing a different excerpt must reject, not pass
         # because the quotation happens to match some other supplied evidence.
         with self.assertRaisesRegex(ReadingError, "markdown_quote_not_grounded"):
@@ -2148,7 +2151,7 @@ class ProjectionTests(ReadingHarness):
                     self.assertIn("\\|小禾的消息]]", prefix.rstrip().splitlines()[-1])
                 else:
                     self.assertTrue(prefix.rstrip().endswith(ending))
-                    self.assertIn("|小禾的消息]]", suffix)
+                self.assertIn("!" + self.publisher.evidence_link(id_, "e1", alias="小禾"), suffix)
                 view = self.publisher.publish_view("view-" + id_, "完整块", [(id_, "stable", id_)], embed=True)
                 view_text = self.publisher.read(view.path).decode()
                 self.assertIn("![[WGO/", view_text)
@@ -2559,24 +2562,58 @@ class ProjectionTests(ReadingHarness):
         self.assertIn(text, body)
         self.assertNotIn("[回复]", body)
         self.assertIn(original, publisher.read("来源/answer-0001.md").decode())
-        self.assertIn(publisher.evidence_link("answer", span, alias="木桥的消息"), body)
+        self.assertIn("!" + publisher.evidence_link("answer", span, alias="木桥"), body)
         plan = publisher.load_plan("answer")
         self.assertEqual(plan.blocks[0].unit_ids, (snapshot.units[0].id,))
         self.assertEqual(plan.blocks[0].evidence_ids, (span,))
         with self.assertRaisesRegex(ReadingError, "markdown_quote_not_grounded"):
             validate_body_plan(snapshot, replace(plan, blocks=(replace(plan.blocks[0], text="> 已实测全部客户端"),)))
 
-    def test_many_evidence_links_are_collapsed_without_losing_exact_targets(self):
+    def test_original_messages_are_expanded_in_place_with_exact_source_block_targets(self):
         snapshot = self.snapshot()
-        snapshot = replace(snapshot, evidence=tuple(EvidenceExcerpt("e" + str(i), "猫在箱子里。", speaker_name="小禾")
+        snapshot = replace(snapshot, evidence=tuple(EvidenceExcerpt("e" + str(i), "猫在箱子里。", speaker_name="小禾",
+            source_time="2026-10-09T12:00:00+08:00")
             for i in range(1, 5)), units=(replace(snapshot.units[0], evidence_ids=("e1", "e2", "e3", "e4")),))
         receipt = self.publish(snapshot)
         body = region_body(self.publisher.read(receipt.path).decode(), "body")
-        self.assertIn("> [!quote]- 本段来源（4 条）", body)
+        self.assertIn("> [!quote]+ 本段原话 · 2026-10-09 04:00:00 UTC", body)
+        self.assertNotIn("来源时间：", body)
         for excerpt in snapshot.evidence:
-            link = self.publisher.evidence_link(snapshot.item_id, excerpt.id, alias="小禾的消息")
-            self.assertIn("> - " + link, body)
+            link = self.publisher.evidence_link(snapshot.item_id, excerpt.id, alias="小禾")
+            self.assertIn("> " + link, body)
+            self.assertIn("> !" + link, body)
             self.assertIn("^" + anchor(excerpt.id), self.publisher.read("来源/box-cat-0001.md").decode())
+
+    def test_inline_cited_single_message_also_has_an_expanded_original(self):
+        snapshot = self.snapshot()
+        snapshot = replace(snapshot, evidence=(replace(snapshot.evidence[0], source_time=""),))
+        plan = self.plan(snapshot)
+        plan = replace(plan, blocks=(replace(plan.blocks[0], text=plan.blocks[0].text + " {{evidence:e1}}"),))
+        receipt = self.publisher.publish_item(snapshot, plan)
+        body = region_body(self.publisher.read(receipt.path).decode(), "body")
+        link = self.publisher.evidence_link(snapshot.item_id, "e1", alias="显示名未提供")
+        self.assertIn("> [!quote]+ 本段原话 · 时间范围未确定", body)
+        self.assertIn("> !" + link, body)
+        self.assertIn(snapshot.units[0].text, body)
+
+    def test_inline_original_follows_a_renamed_source_and_preserves_content_and_annotations(self):
+        from core.semantic.projections import patch_properties
+        snapshot = self.snapshot()
+        self.publish(snapshot)
+        source = self.publisher.root / "来源/box-cat-0001.md"
+        source.write_text(source.read_text() + "\n我保留的旁注。\n")
+        original = source.read_bytes()
+        renamed = source.with_name("我保留的原话.md")
+        source.rename(renamed)
+        receipt = self.publish(snapshot)
+        body = region_body(self.publisher.read(receipt.path).decode(), "body")
+        self.assertIn("> !" + wikilink("WGO/来源/我保留的原话.md", "显示名未提供", block=anchor("e1")), body)
+        after = renamed.read_text()
+        expected = patch_properties(original.decode(),
+            {name: property_value(after, name) for name in ("wgo_render_revision", "wgo_annotation_revision")})
+        self.assertEqual(after, expected)
+        self.assertFalse(source.exists())
+        self.assertEqual(self.publisher.load_plan(snapshot.item_id).content_revision, snapshot.content_revision)
 
     def test_adapter_names_are_captured_labels_not_cross_source_identity(self):
         from core.semantic.store import SemanticStore
@@ -2599,6 +2636,36 @@ class ProjectionTests(ReadingHarness):
         self.assertIsNone(by_text["独立记录 2"].speaker_name)
         self.assertNotIn("wxid_", json.dumps(asdict(snapshot), ensure_ascii=False))
 
+    def test_source_page_shows_one_time_range_and_speakers_without_rewriting_cached_fragments(self):
+        raw = "原话里的来源时间：不是机器字段\n```\n保留这行。"
+        excerpts = (EvidenceExcerpt("later", raw, source_time="2026-10-09T12:01:00+08:00", speaker_name="小禾"),
+                    EvidenceExcerpt("earlier", "更早的消息。", source_time="2026-10-09T04:00:00+00:00", speaker_name="阿甲"))
+        snapshot = replace(self.snapshot(), evidence=excerpts,
+                           units=(replace(self.snapshot().units[0], evidence_ids=("later", "earlier")),))
+        receipt = self.publish(snapshot)
+        page = self.publisher.read("来源/box-cat-0001.md").decode()
+        self.assertIn("2026-10-09 04:00:00–04:01:00 UTC", page)
+        self.assertIn("**阿甲**", page)
+        self.assertIn("**小禾**", page)
+        self.assertNotIn("### 来源", page)
+        self.assertNotIn("获知时间：", page)
+        self.assertNotIn("本条消息发言／转述者：", page)
+        self.assertIn(raw, page)
+        self.assertLess(page.index("更早的消息。"), page.index(raw))
+        for excerpt in excerpts:
+            self.assertIn("^" + anchor(excerpt.id), page)
+            stored = self.ledger.one("SELECT fragment FROM reader_source_fragments WHERE evidence_id=?", (excerpt.id,))
+            self.assertEqual(stored[0], self.publisher._source_fragment(excerpt))
+        body = region_body(self.publisher.read(receipt.path).decode(), "body")
+        self.assertEqual(body.count("04:00:00–04:01:00 UTC"), 1)
+
+    def test_source_time_range_retains_unknown_and_different_day_boundaries(self):
+        label = self.publisher._source_time_range(("2026-10-09T23:59:00Z", "2026-10-10T00:01:00+00:00", ""))
+        self.assertEqual(label, "2026-10-09 23:59:00–2026-10-10 00:01:00 UTC · 部分时间未提供")
+        self.assertEqual(self.publisher._source_time_range(("2026-10-09", "bad")), "时间范围未确定")
+        unknown = "Unrecognized preserved fragment.\n"
+        self.assertIn(unknown, self.publisher._render_source_page((unknown,)))
+
     def test_source_attribution_upgrade_is_render_only_and_exact_old_body_bound(self):
         snapshot = replace(self.snapshot(), evidence=(replace(self.snapshot().evidence[0], speaker_name="小禾"),))
         self.publish(snapshot)
@@ -2619,7 +2686,7 @@ class ProjectionTests(ReadingHarness):
         self.assertEqual(after["content_revision"], before["content_revision"])
         self.assertEqual(after["semantic_at"], before["semantic_at"])
         self.assertEqual(after["render_revision"], before["render_revision"] + 1)
-        self.assertIn("本条消息发言／转述者：小禾", source_file.read_text())
+        self.assertIn("**小禾**", source_file.read_text())
         self.assertIn("个人旁注：保留这句话。", source_file.read_text())
         with self.ledger.transaction() as conn:
             conn.execute("UPDATE reader_source_fragments SET fragment=?,fragment_hash=? WHERE evidence_id=?",

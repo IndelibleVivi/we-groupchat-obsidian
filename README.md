@@ -49,7 +49,11 @@ source identities kept separate from display names and people being discussed.
 Bodies can use comparison tables, ordered steps, lists and attributed quotations
 where the material calls for them. New details can update the original generated
 paragraph naturally; unaffected paragraphs, required original wording and manual
-edits retain their existing protections. The optional [local Obsidian plugin](integrations/obsidian/README.md)
+edits retain their existing protections. Each paragraph's source callout opens
+by default and embeds the exact original evidence blocks in the same note,
+with one timestamp range above the captured speakers and their messages; it can
+be collapsed while reading. Linked source pages use the same compact layout and
+remain in the same vault. The optional [local Obsidian plugin](integrations/obsidian/README.md)
 records only a verified visible open and keeps machine properties and duplicate
 filename headings out of reading mode, while retaining user properties and the
 original editable Markdown. Without it, use explicit read/known actions.

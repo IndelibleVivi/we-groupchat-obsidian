@@ -39,6 +39,14 @@ is implied by this document.
   filename headings. Its frame waits are cancelled when superseded or unloaded;
   late callbacks cannot observe an unloaded plugin or authorize a different
   document. These source changes do not imply installation or activation.
+- Item paragraphs now show cited original evidence blocks in place, inside
+  expanded, collapsible callouts with one timestamp range followed by captured
+  speakers and messages. Source pages use the same compact presentation without
+  repeating per-message source/knowledge timestamps or machine attribution labels.
+  This native Obsidian presentation reuses the same source block targets and
+  follows renamed source pages. It preserves accepted Body plans, canonical
+  knowledge and source fragments; no new provider call is required. Item and
+  source pages must be opened inside the same Vault for embeds to resolve.
 - Projection identity lookup validates complete UTF-8 files in bounded chunks
   while parsing only their frontmatter. It retains full-root collision and
   rename checks without decoding unrelated note bodies into whole strings.

@@ -415,8 +415,9 @@ class ReaderRuntimeTests(ReadingHarness):
             link = runtime.publisher.evidence_link(item_id, excerpt.id)
             self.assertIn(anchor(excerpt.id), link)
         sources = "\n".join(path.read_text() for path in (runtime.publisher.root / "来源").glob("*.md"))
-        self.assertIn("本条消息发言／转述者：小禾", sources)
-        self.assertIn("本条消息发言／转述者：阿岚", sources)
+        self.assertIn("**小禾**", sources)
+        self.assertIn("**阿岚**", sources)
+        self.assertNotIn("本条消息发言／转述者：", sources)
         self.assertIn("````text\n" + provider.SOURCES[2] + "\n````", sources)
         self.assertNotIn("wxid_", sources)
         prompts = [json.loads(prompt) for prompt in provider.prompts if prompt.startswith("{")]

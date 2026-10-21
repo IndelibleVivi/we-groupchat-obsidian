@@ -290,6 +290,12 @@
   verbatim obligations; unaffected blocks retain exact bytes. Markdown tables, lists and attributed quotations
   retain exact evidence links, unit homes and original words. Manual conflicts retain exact bytes and require
   visible resolution. Properties/actions/query use canonical revisions.
+  Item source callouts embed every cited exact source block in place, default
+  expanded and collapsible, with one source timestamp range followed by captured
+  speaker labels and messages. Source pages use the same compact presentation;
+  rendering must preserve exact cached fragment bytes and stable evidence anchors.
+  Keep their targets in the same Vault and follow identity-based source renames;
+  accepted Body plans, source fragments and manual-conflict guards retain their owners.
   A canonical `quote` unit does not force its whole message into body prose:
   exact source excerpts remain on source pages; meaningful quotation and faithful
   paraphrase can share one content home. Explicit `verbatim`, complete procedural
