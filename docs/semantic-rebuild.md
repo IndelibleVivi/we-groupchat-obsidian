@@ -310,7 +310,10 @@ dev/inode/mode/size/mtime/ctime 重新核对。首次读取保持完整 strict U
 parser；变化、不足、非 POSIX 或不支持的额外 metadata API 均走原解析。缓存只保留
 metadata 与有界 ID，不保留正文/header/artifact，正常或异常退出即清空。普通 app/resolve
 不默认缓存，target 的 machine baseline、人工冲突、annotation 与双重 full-file hash CAS
-保持原样。这减少重复 byte parsing，完整目录/metadata 工作仍随文档数与文件数相乘，
+保持原样。支持相关 POSIX API 时，history lookup 使用目录相对的 no-follow open，
+按目录执行祖先检查和前后身份核验；每个文件仍独立比对新 fd 与当前 absolute path。
+不支持时保留 strict path 遍历，目录替换或中断不能返回局部结果，所有 descriptor 都需关闭。
+这减少重复 byte parsing 与逐文件重复祖先检查，完整目录/metadata 工作仍随文档数与文件数相乘，
 不构成全量时长或内存上限保证。
 parallel wave 准备只读取轻量 batch metadata（`batch_id` 与 capture order），再
 逐 batch 读取 core members 计算 overlap-owner wave，不预先解出全部 capture

@@ -280,18 +280,22 @@ class ProjectionTests(ReadingHarness):
             documents.append(document)
         before = {d["path"]: self.publisher.read(d["path"]) for d in documents}
         with patch.object(projections, "_identity_frontmatter", wraps=_identity_frontmatter) as parsed, \
-             patch.object(projections.os, "walk", wraps=os.walk) as walked:
+             patch.object(self.publisher, "_identity_paths",
+                          wraps=self.publisher._identity_paths) as scanned:
             with self.publisher.history_identity_cache():
                 for _ in range(2):
                     for document in documents:
                         self.assertEqual(self.publisher.publish_document(**document).status, "unchanged")
-            self.assertEqual(walked.call_count, 16)
+            self.assertEqual(scanned.call_count, 16)
             self.assertEqual(parsed.call_count, 8)
             self.assertEqual(before, {d["path"]: self.publisher.read(d["path"]) for d in documents})
             # Ordinary lookup remains uncached, and a new history invocation
             # parses the current files rather than adopting the previous cache.
             self.publisher.resolve(documents[0]["object_id"])
-            self.publisher.resolve(documents[0]["object_id"])
+            with patch.object(projections.os, "walk", wraps=os.walk) as ordinary:
+                self.publisher.resolve(documents[0]["object_id"])
+            self.assertEqual(ordinary.call_count, 1)
+            self.assertEqual(scanned.call_count, 16)
             self.assertEqual(parsed.call_count, 24)
             with self.publisher.history_identity_cache():
                 self.publisher.resolve(documents[0]["object_id"])
@@ -324,6 +328,197 @@ class ProjectionTests(ReadingHarness):
                 self.publish(snapshot)
             self.assertEqual(renamed.read_bytes(), original)
             self.assertEqual(dict(self.publisher.record(snapshot.item_id)), row)
+
+    def test_history_identity_cache_descriptor_scan_tracks_membership_and_rejects_ancestor_replacement(self):
+        parent = self.publisher._safe_path("first/deep", directory=True)
+        target = parent / "note.md"
+        original = b'---\nwgo_id: "synthetic:target"\n---\n'
+        target.write_bytes(original)
+        with self.publisher.history_identity_cache(), \
+             patch.object(self.publisher, "_directory_path_identity",
+                          wraps=self.publisher._directory_path_identity) as admitted, \
+             patch.object(self.publisher, "_find_id_paths",
+                          wraps=self.publisher._find_id_paths) as fallback:
+            self.assertEqual(self.publisher.resolve("synthetic:target"), "first/deep/note.md")
+            directory_checks = admitted.call_count
+            for index in range(20):
+                self.publisher._safe_path(f"first/deep/duplicate-{index}.md").write_bytes(original)
+            with self.assertRaisesRegex(ReadingError, "projection_identity_collision"):
+                self.publisher.resolve("synthetic:target")
+            self.assertEqual(fallback.call_count, 0)
+            for index in range(20):
+                self.publisher._safe_path(f"first/deep/duplicate-{index}.md").unlink()
+            renamed = self.publisher.root / "first" / "renamed"
+            parent.rename(renamed)
+            self.assertEqual(self.publisher.resolve("synthetic:target"), "first/renamed/note.md")
+            self.assertEqual((renamed / "note.md").read_bytes(), original)
+            self.assertGreaterEqual(admitted.call_count, directory_checks)
+            renamed.rename(parent)
+            original_path_identity = self.publisher._directory_path_identity
+            def replace_deep_after_first_admission(path):
+                observed = original_path_identity(path)
+                if (path.name == "first" and path.parent == self.publisher.root
+                        and not getattr(self, "_replacement_started", False)):
+                    self._replacement_started = True
+                    parent.parent.rename(self.base / "detached-first")
+                    path.mkdir()
+                    (path / "deep").mkdir()
+                    (path / "deep" / "note.md").write_bytes(original)
+                return observed
+            with patch.object(self.publisher, "_directory_path_identity",
+                              side_effect=replace_deep_after_first_admission):
+                self.assertEqual(self.publisher.resolve("synthetic:target"),
+                                 "first/deep/note.md")
+            self.assertEqual(fallback.call_count, 1)
+
+    def test_history_identity_cache_descriptor_scan_falls_back_when_native_identity_is_unavailable(self):
+        self.publisher._safe_path("group/deep", directory=True)
+        self.publisher._safe_path("group/deep/note.md").write_bytes(
+            b'---\nwgo_id: "synthetic:target"\n---\n')
+        with self.publisher.history_identity_cache(), \
+             patch.object(self.publisher, "_same_directory_identity", return_value=False), \
+             patch.object(self.publisher, "_find_id_paths",
+                          wraps=self.publisher._find_id_paths) as fallback:
+            self.assertEqual(self.publisher.resolve("synthetic:target"),
+                             "group/deep/note.md")
+            self.assertEqual(fallback.call_count, 1)
+
+    def test_history_identity_cache_descriptor_scan_has_directory_bounded_admission_and_strict_fallback(self):
+        import core.semantic.projections as projections
+        for directory in range(4):
+            parent = self.publisher._safe_path(f"group-{directory}", directory=True)
+            for index in range(8):
+                (parent / f"{index}.md").write_bytes(
+                    f'---\nwgo_id: "synthetic:{directory}:{index}"\n---\n'.encode())
+        with patch.object(self.publisher, "_identity_unchanged",
+                          wraps=self.publisher._identity_unchanged) as unchanged, \
+             patch.object(self.publisher, "_identity_paths",
+                          wraps=self.publisher._identity_paths) as walked:
+            with self.publisher.history_identity_cache():
+                self.assertEqual(self.publisher.resolve("synthetic:3:7"), "group-3/7.md")
+                self.assertEqual(self.publisher._find_id_paths("synthetic:3:7"), ["group-3/7.md"])
+            self.assertEqual(walked.call_count, 1)
+            self.assertGreaterEqual(unchanged.call_count, 32)
+        with self.publisher.history_identity_cache(), \
+             patch.object(self.publisher, "_supports_identity_descriptors", return_value=False), \
+             patch.object(projections.os, "walk", wraps=os.walk) as walked:
+            self.assertEqual(self.publisher.resolve("synthetic:3:7"), "group-3/7.md")
+            self.assertEqual(walked.call_count, 1)
+
+    def test_identity_scan_descriptor_ancestor_admission_is_per_directory(self):
+        for directory in range(6):
+            parent = self.publisher._safe_path(f"groups/{directory}/nested", directory=True)
+            for index in range(12):
+                (parent / f"{index}.md").write_bytes(
+                    f'---\nwgo_id: "synthetic:{directory}:{index}"\n---\n'.encode())
+        with self.publisher.history_identity_cache(), \
+             patch.object(self.publisher, "_directory_path_identity",
+                          wraps=self.publisher._directory_path_identity) as admitted:
+            self.assertEqual(self.publisher.resolve("synthetic:5:11"),
+                             "groups/5/nested/11.md")
+        # Root, groups, six groups and six nested directories are admitted;
+        # Markdown count does not multiply ancestor validation.
+        self.assertEqual(admitted.call_count, 28)
+        self.assertLess(admitted.call_count, 72)
+
+    def test_identity_scan_ordinary_app_path_does_not_use_descriptor_scan(self):
+        import core.semantic.projections as projections
+        self.publisher._safe_path("note.md").write_bytes(
+            b'---\nwgo_id: "synthetic:target"\n---\n')
+        with patch.object(self.publisher, "_find_id_descriptors",
+                          side_effect=AssertionError("ordinary path used descriptors")), \
+             patch.object(projections.os, "walk", wraps=os.walk) as walked:
+            self.assertEqual(self.publisher.resolve("synthetic:target"), "note.md")
+            self.assertEqual(walked.call_count, 1)
+
+    def test_identity_scan_descriptor_fds_are_released_on_success(self):
+        opened = []
+        original = self.publisher._read_identity
+        def tracked(safe, fd, expected):
+            opened.append(fd)
+            return original(safe, fd, expected)
+        self.publisher._safe_path("group/deep", directory=True)
+        self.publisher._safe_path("group/deep/note.md").write_bytes(
+            b'---\nwgo_id: "synthetic:target"\n---\n')
+        with self.publisher.history_identity_cache(), \
+             patch.object(self.publisher, "_read_identity", side_effect=tracked):
+            self.assertEqual(self.publisher.resolve("synthetic:target"), "group/deep/note.md")
+        self.assertTrue(opened)
+        for fd in opened:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def test_identity_scan_descriptor_fds_are_released_on_walker_and_interruption_failures(self):
+        roots, files = [], []
+        original_root = self.publisher._open_projection_root_descriptor
+        original_read = self.publisher._read_identity
+        def tracked_root():
+            fd = original_root()
+            roots.append(fd)
+            return fd
+        def tracked_read(safe, fd, expected):
+            files.append(fd)
+            return original_read(safe, fd, expected)
+        self.publisher._safe_path("note.md").write_bytes(
+            b'---\nwgo_id: "synthetic:target"\n---\n')
+        with self.publisher.history_identity_cache(), \
+             patch.object(self.publisher, "_open_projection_root_descriptor", side_effect=tracked_root), \
+             patch("core.semantic.projections.os.fwalk",
+                   side_effect=OSError("synthetic fwalk failure")), \
+             patch.object(self.publisher, "_find_id_paths",
+                          wraps=self.publisher._find_id_paths):
+            self.assertEqual(self.publisher.resolve("synthetic:target"), "note.md")
+        self.assertTrue(roots)
+        for fd in roots:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        roots.clear()
+        self.publisher._safe_path("group/deep/spare.md").write_bytes(
+            b'---\nwgo_id: "synthetic:spare"\n---\n')
+        def interrupt(*args, **kwargs):
+            raise RuntimeError("synthetic interruption")
+        with self.publisher.history_identity_cache(), \
+             patch.object(self.publisher, "_open_projection_root_descriptor", side_effect=tracked_root), \
+             patch.object(self.publisher, "_read_identity", side_effect=tracked_read), \
+             patch("core.semantic.projections._identity_frontmatter", side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+                self.publisher._find_id_descriptors("synthetic:spare")
+        self.assertTrue(roots)
+        self.assertTrue(files)
+        for fd in (*roots, *files):
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def test_history_identity_cache_discards_partial_descriptor_matches_on_file_replacement(self):
+        import core.semantic.projections as projections
+        path = self.publisher._safe_path("first.md")
+        path.write_bytes(b'---\nwgo_id: "synthetic:target"\n---\n')
+        second = self.publisher._safe_path("second.md")
+        second.write_bytes(b'---\nwgo_id: "synthetic:other"\n---\n')
+        original = self.publisher._identity_in_directory
+        calls = []
+        def stale_second(first, second):
+            if (calls and calls[-1] == "second.md"
+                    and not getattr(self, "_stale_second", False)):
+                self._stale_second = True
+                raise projections._IdentityDescriptorStale
+            return os.path.samestat(first, second)
+        def replace_second(path, absolute, directory_fd):
+            filename = Path(path).name
+            calls.append(filename)
+            if filename == "second.md":
+                replacement = self.publisher.root / "replacement.tmp"
+                replacement.write_bytes(b'---\nwgo_id: "synthetic:target"\n---\n')
+                os.replace(replacement, second)
+            return original(path, absolute, directory_fd)
+        with self.publisher.history_identity_cache(), \
+             patch.object(self.publisher, "_same_file_identity", side_effect=stale_second), \
+             patch.object(self.publisher, "_identity_in_directory", side_effect=replace_second), \
+             patch.object(self.publisher, "_find_id_paths",
+                          wraps=self.publisher._find_id_paths) as fallback:
+            with self.assertRaisesRegex(ReadingError, "projection_identity_collision"):
+                self.publisher.resolve("synthetic:target")
+            self.assertEqual(fallback.call_count, 1)
 
     def test_history_identity_cache_invalidates_same_size_mtime_restoration_inode_and_tail_changes(self):
         path = self.publisher._safe_path("note.md")
@@ -457,6 +652,17 @@ class ProjectionTests(ReadingHarness):
             expected = projections._identity_cache_stamp(os.fstat(stream.fileno()))
             with patch.object(Path, "stat", side_effect=NotImplementedError):
                 self.assertFalse(self.publisher._identity_unchanged(path, stream.fileno(), expected))
+
+    def test_history_identity_cache_descriptor_metadata_failure_uses_strict_path(self):
+        import core.semantic.projections as projections
+        path = self.publisher._safe_path("note.md")
+        path.write_bytes(b'---\nwgo_id: "synthetic:target"\n---\n')
+        with self.publisher.history_identity_cache(), \
+             patch.object(projections, "_identity_cache_stamp", return_value=None), \
+             patch.object(self.publisher, "_find_id_paths",
+                          wraps=self.publisher._find_id_paths) as fallback:
+            self.assertEqual(self.publisher.resolve("synthetic:target"), "note.md")
+            self.assertEqual(fallback.call_count, 1)
 
     def test_history_identity_cache_preserves_annotations_conflicts_and_both_file_hash_cas_checks(self):
         document = dict(object_id="synthetic:manual", path="Legacy/manual.md", title="Synthetic",

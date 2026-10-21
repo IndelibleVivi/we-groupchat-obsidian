@@ -46,6 +46,11 @@ is implied by this document.
   may reuse the parsed identity. Directory membership is still scanned on every
   lookup; ordinary app/resolve work remains uncached. Changed or unavailable
   metadata forces the original parser, and cache scope never retains bodies.
+  Supported POSIX history scans use directory-relative no-follow file opens
+  with admission and revalidation per directory, reducing repeated ancestor
+  checks. Each file still binds a fresh descriptor to its current absolute-path
+  identity. Unsupported platforms retain strict path traversal; directory
+  replacement and interruptions must not yield a partial lookup or leak handles.
 - Source tests, complete migration verification, application build, installation,
   activation, actual incremental acceptance and any remote publication are
   separate evidence. This file makes no claim about a particular live runtime.

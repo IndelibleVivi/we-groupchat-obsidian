@@ -357,13 +357,16 @@ class SourceFirstHistoryTests(unittest.TestCase):
         expected = {path.relative_to(self.projections).as_posix() for path in self.projections.rglob("*.md")
                     if ".wgo" not in path.relative_to(self.projections).parts}
         with patch.object(projections, "_identity_frontmatter", wraps=projections._identity_frontmatter) as parsed, \
-             patch.object(projections.os, "walk", wraps=os.walk) as walked:
+             patch.object(self.publisher, "_identity_paths",
+                          wraps=self.publisher._identity_paths) as walked:
             for invocation in (1, 2):
                 replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
                 self.assertTrue(all(r["status"] == "unchanged" for r in replay["receipts"]))
                 self.assertEqual(walked.call_count, invocation * count)
                 self.assertEqual(parsed.call_count, invocation * len(expected))
-            self.publisher.resolve(plan["documents"][0]["object_id"])
+            with patch.object(projections.os, "walk", wraps=os.walk) as ordinary:
+                self.publisher.resolve(plan["documents"][0]["object_id"])
+            self.assertEqual(ordinary.call_count, 1)
             self.assertEqual(parsed.call_count, 3 * len(expected))
 
     def test_interrupted_history_publication_discards_parsed_identity_cache_before_retry(self):

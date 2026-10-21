@@ -368,6 +368,10 @@
   to reuse parsed IDs for unchanged native file metadata. Every lookup still
   walks the full current root and verifies fresh fd/path identity; duplicates,
   renames, parser semantics and target/manual/CAS checks remain authoritative.
+  Supported POSIX history lookups may use directory-relative no-follow opens,
+  admitting and revalidating each directory instead of repeating ancestor
+  checks for every file. Retain current absolute-file identity checks, strict
+  fallback, complete traversal and descriptor cleanup on every exit.
   Cache no body/header/artifact bytes, release it on exit, and fall back to the
   original parser when native change-time evidence is unavailable.
   Publish the fixed projection, install v3 via CAS, activate the pin, record the

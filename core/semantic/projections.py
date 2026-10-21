@@ -18,7 +18,7 @@ import sqlite3
 import stat
 import tempfile
 import threading
-from typing import BinaryIO, Callable, Iterable
+from typing import BinaryIO, Callable, Iterable, Iterator
 import unicodedata
 import uuid
 
@@ -32,6 +32,10 @@ class ReadingError(RuntimeError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+class _IdentityDescriptorStale(Exception):
+    """A directory-bound file no longer matches its current absolute path."""
 
 
 def fingerprint(value: str | bytes) -> str:
@@ -2050,41 +2054,183 @@ class ProjectionPublisher:
             # observation falls back to the original strict byte parser.
             return False
 
+    def _read_identity(self, safe: Path, fd: int, expected_admission):
+        """Parse one admitted fd and publish metadata-only reuse after revalidation."""
+        admitted = expected_admission is not None
+        try:
+            observed = os.fstat(fd)
+            if (expected_admission is not None
+                    and not self._same_file_identity(observed, expected_admission)):
+                raise _IdentityDescriptorStale
+            if not stat.S_ISREG(observed.st_mode):
+                raise ReadingError("projection_non_regular")
+            path = safe.relative_to(self.root).as_posix()
+            cache = getattr(self._lock_local, "identity_cache", None)
+            before = _identity_cache_stamp(observed) if cache is not None else None
+            if expected_admission is not None and before is None:
+                raise _IdentityDescriptorStale
+            with os.fdopen(fd, "rb") as stream:
+                fd = -1
+                if cache is not None:
+                    cached = cache.get(path)
+                    if before is not None and cached is not None and cached[0] == before:
+                        if self._identity_unchanged(safe, stream.fileno(), before):
+                            if admitted:
+                                self._current_identity_path(safe, observed)
+                            return cached[1]
+                    cache.pop(path, None)
+                try:
+                    value = property_value(_identity_frontmatter(stream), "wgo_id")
+                except (ReadingError, UnicodeError):
+                    if admitted:
+                        self._current_identity_path(safe, observed)
+                    return None
+                if (cache is not None and before is not None
+                        and (value is None or isinstance(value, str) and len(value) <= 4096)
+                        and self._identity_unchanged(safe, stream.fileno(), before)):
+                    cache[path] = (before, value)
+                if admitted:
+                    self._current_identity_path(safe, observed)
+                return value
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    @staticmethod
+    def _same_file_identity(first, second) -> bool:
+        try:
+            return bool(os.path.samestat(first, second))
+        except (AttributeError, TypeError):
+            return False
+
+    def _current_identity_path(self, safe: Path, observed):
+        try:
+            current = os.stat(safe, follow_symlinks=False)
+        except OSError as exc:
+            raise _IdentityDescriptorStale from exc
+        if not self._same_file_identity(observed, current):
+            raise _IdentityDescriptorStale
+        return current
+
+    def _identity_in_directory(self, path: str, absolute: Path, directory_fd: int):
+        safe = absolute / Path(path).name
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        current = os.stat(safe, follow_symlinks=False)
+        if stat.S_ISLNK(current.st_mode):
+            raise ReadingError("projection_symlink")
+        if not stat.S_ISREG(current.st_mode):
+            raise ReadingError("projection_non_regular")
+        fd = os.open(Path(path).name, flags, dir_fd=directory_fd)
+        return self._read_identity(safe, fd, current)
+
     def _identity(self, path: str):
         safe = self._safe_path(path, create_parents=False)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(safe, flags)
-            with os.fdopen(fd, "rb") as stream:
-                observed = os.fstat(stream.fileno())
-                if not stat.S_ISREG(observed.st_mode):
-                    raise ReadingError("projection_non_regular")
-                cache = getattr(self._lock_local, "identity_cache", None)
-                before = _identity_cache_stamp(observed) if cache is not None else None
-                if cache is not None:
-                    cached = cache.get(path)
-                    if (before is not None and cached is not None and cached[0] == before
-                            and self._identity_unchanged(safe, stream.fileno(), before)):
-                        return cached[1]
-                    cache.pop(path, None)
-                try:
-                    value = property_value(_identity_frontmatter(stream), "wgo_id")
-                except (ReadingError, UnicodeError):
-                    # An unrelated user note need not be parseable. A recorded
-                    # target still undergoes strict parsing during publication.
-                    return None
-                # A metadata cache must not retain arbitrary user JSON or huge
-                # scalars. This only limits reuse; parsing/lookup stays exact.
-                if (cache is not None and before is not None
-                        and (value is None or isinstance(value, str) and len(value) <= 4096)
-                        and self._identity_unchanged(safe, stream.fileno(), before)):
-                    cache[path] = (before, value)
-                return value
-        except OSError as exc:
+            return self._read_identity(safe, fd, None)
+        except (OSError, _IdentityDescriptorStale) as exc:
             raise ReadingError("projection_read_failed") from exc
 
-    def _find_id(self, object_id: str) -> str | None:
-        matches: list[str] = []
+    @staticmethod
+    def _supports_identity_descriptors() -> bool:
+        return (os.name == "posix" and hasattr(os, "fwalk")
+                and hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+                and os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd)
+
+    def _open_projection_root_descriptor(self) -> int:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        observer = os.stat
+        opener = os.open
+        current = opener("/", flags)
+        try:
+            for part in self.root.parts[1:]:
+                before = observer(part, dir_fd=current, follow_symlinks=False)
+                child = opener(part, flags, dir_fd=current)
+                if not self._same_directory_identity(before, child):
+                    os.close(child)
+                    raise _IdentityDescriptorStale
+                os.close(current)
+                current = child
+        except BaseException:
+            os.close(current)
+            raise
+        return current
+
+    def _directory_path_identity(self, path: Path):
+        if any(candidate.is_symlink() for candidate in (path, *path.parents)):
+            raise ReadingError("projection_symlink")
+        return os.stat(path, follow_symlinks=False)
+
+    @staticmethod
+    def _same_directory_identity(observed, directory_fd: int) -> bool:
+        try:
+            opened = os.fstat(directory_fd)
+            fields = ("st_dev", "st_ino")
+            expected = tuple(getattr(observed, name, None) for name in fields)
+            actual = tuple(getattr(opened, name, None) for name in fields)
+            return (all(value is not None for value in (*expected, *actual))
+                    and stat.S_ISDIR(opened.st_mode) and expected == actual)
+        except (AttributeError, OSError, TypeError):
+            return False
+
+    def _revalidate_directory(self, path: Path, directory_fd: int) -> None:
+        try:
+            observed = self._directory_path_identity(path)
+        except OSError as exc:
+            raise _IdentityDescriptorStale from exc
+        if not self._same_directory_identity(observed, directory_fd):
+            raise _IdentityDescriptorStale
+
+    def _identity_paths(self) -> Iterator[tuple[str, Path, int]]:
+        """Yield current Markdown paths with a still-open containing directory."""
+        root_fd = self._open_projection_root_descriptor()
+        walked = None
+        try:
+            walked = os.fwalk(".", topdown=True, follow_symlinks=False, dir_fd=root_fd)
+            for directory, names, files, directory_fd in walked:
+                names[:] = [name for name in names if name != ".wgo"]
+                relative = Path(directory).relative_to(".")
+                absolute = self.root / relative
+                self._revalidate_directory(absolute, directory_fd)
+                for name in names:
+                    try:
+                        observed = os.stat(name, dir_fd=directory_fd,
+                                           follow_symlinks=False)
+                    except OSError as exc:
+                        raise ReadingError("projection_read_failed") from exc
+                    if stat.S_ISLNK(observed.st_mode):
+                        raise ReadingError("projection_symlink")
+                for filename in files:
+                    if not filename.endswith(".md"):
+                        continue
+                    path = (relative / filename).as_posix()
+                    yield path, absolute, directory_fd
+                self._revalidate_directory(absolute, directory_fd)
+        finally:
+            if walked is not None:
+                walked.close()
+            os.close(root_fd)
+
+    def _find_id_descriptors(self, object_id: str) -> str | None:
+        matches = []
+        paths = self._identity_paths()
+        try:
+            for path, absolute, directory_fd in paths:
+                try:
+                    value = self._identity_in_directory(path, absolute, directory_fd)
+                except OSError as exc:
+                    raise ReadingError("projection_read_failed") from exc
+                if value == object_id:
+                    matches.append(path)
+                    if len(matches) > 1:
+                        raise ReadingError("projection_identity_collision")
+        finally:
+            paths.close()
+        return matches[0] if matches else None
+
+    def _find_id_paths(self, object_id: str):
+        matches = []
         for directory, names, files in os.walk(self.root, followlinks=False):
             names[:] = [n for n in names if n != ".wgo"]
             for name in names:
@@ -2097,6 +2243,18 @@ class ProjectionPublisher:
                 value = self._identity(path)
                 if value == object_id:
                     matches.append(path)
+        return matches
+
+    def _find_id(self, object_id: str) -> str | None:
+        if (getattr(self._lock_local, "identity_cache", None) is not None
+                and self._supports_identity_descriptors()):
+            try:
+                return self._find_id_descriptors(object_id)
+            except (OSError, _IdentityDescriptorStale):
+                # Unsupported descriptors, unavailable native identity and
+                # directory replacement all discard the partial snapshot.
+                pass
+        matches = self._find_id_paths(object_id)
         if len(matches) > 1:
             raise ReadingError("projection_identity_collision")
         return matches[0] if matches else None
