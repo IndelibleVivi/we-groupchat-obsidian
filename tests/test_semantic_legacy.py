@@ -349,6 +349,45 @@ class SourceFirstHistoryTests(unittest.TestCase):
         self.publisher = ProjectionPublisher(ReadingLedger(self.store.connect, self.store.generation_id), self.projections,
             current_revision=CanonicalReadingAdapter(self.store).current_revision)
 
+    def test_history_replay_scopes_identity_byte_reuse_to_one_invocation_and_walks_each_document(self):
+        from core.semantic import projections
+        inventory = self.fixture.plan()
+        plan, _backups = preserve_history_fixture(self.store, inventory, self.fixture.root / "cache-backups", self.publisher)
+        count = len(plan["documents"]) + 1
+        expected = {path.relative_to(self.projections).as_posix() for path in self.projections.rglob("*.md")
+                    if ".wgo" not in path.relative_to(self.projections).parts}
+        with patch.object(projections, "_identity_frontmatter", wraps=projections._identity_frontmatter) as parsed, \
+             patch.object(projections.os, "walk", wraps=os.walk) as walked:
+            for invocation in (1, 2):
+                replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
+                self.assertTrue(all(r["status"] == "unchanged" for r in replay["receipts"]))
+                self.assertEqual(walked.call_count, invocation * count)
+                self.assertEqual(parsed.call_count, invocation * len(expected))
+            self.publisher.resolve(plan["documents"][0]["object_id"])
+            self.assertEqual(parsed.call_count, 3 * len(expected))
+
+    def test_interrupted_history_publication_discards_parsed_identity_cache_before_retry(self):
+        from core.semantic import projections
+        inventory = self.fixture.plan()
+        plan, _backups = preserve_history_fixture(self.store, inventory, self.fixture.root / "interrupted-cache", self.publisher)
+        count = len(plan["documents"]) + 1
+        original, calls = self.publisher.publish_document, []
+        def interrupted(**kwargs):
+            calls.append(kwargs["object_id"])
+            if len(calls) == 2:
+                raise projections.ReadingError("synthetic_publication_interruption")
+            return original(**kwargs)
+        with patch.object(projections, "_identity_frontmatter", wraps=projections._identity_frontmatter) as parsed:
+            with patch.object(self.publisher, "publish_document", side_effect=interrupted), \
+                 self.assertRaisesRegex(LegacyError, "legacy_publication_conflict"):
+                publish_legacy_navigation(self.store, inventory, plan, self.publisher)
+            self.assertEqual(parsed.call_count, count)
+            self.publisher.resolve(plan["documents"][0]["object_id"])
+            self.assertEqual(parsed.call_count, 2 * count)
+            replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
+            self.assertTrue(all(r["status"] == "unchanged" for r in replay["receipts"]))
+            self.assertEqual(parsed.call_count, 3 * count)
+
     def test_history_receipts_preserve_exact_rows_resources_and_do_not_create_semantic_work(self):
         inventory = self.fixture.plan()
         with patch.object(self.store, "capture_batch", side_effect=AssertionError("history is not a source batch")):

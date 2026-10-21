@@ -364,6 +364,12 @@
   must still be verified and associated; different refs publish separately.
   A later call revalidates and repairs projections rather than trusting an old
   publication receipt. Keep this cache local and declaration-only.
+  Source-first history publication may scope `publisher.history_identity_cache`
+  to reuse parsed IDs for unchanged native file metadata. Every lookup still
+  walks the full current root and verifies fresh fd/path identity; duplicates,
+  renames, parser semantics and target/manual/CAS checks remain authoritative.
+  Cache no body/header/artifact bytes, release it on exit, and fall back to the
+  original parser when native change-time evidence is unavailable.
   Publish the fixed projection, install v3 via CAS, activate the pin, record the
   provisional receipt, release locks, restore the exact app and verify live
   incremental acceptance in that order. Failed provisional evidence remains

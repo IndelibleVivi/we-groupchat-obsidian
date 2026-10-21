@@ -38,6 +38,10 @@ is implied by this document.
 - Projection identity lookup validates complete UTF-8 files in bounded chunks
   while parsing only their frontmatter. It retains full-root collision and
   rename checks without decoding unrelated note bodies into whole strings.
+  During one source-first history publication, stable POSIX fd/path metadata
+  may reuse the parsed identity. Directory membership is still scanned on every
+  lookup; ordinary app/resolve work remains uncached. Changed or unavailable
+  metadata forces the original parser, and cache scope never retains bodies.
 - Source tests, complete migration verification, application build, installation,
   activation, actual incremental acceptance and any remote publication are
   separate evidence. This file makes no claim about a particular live runtime.

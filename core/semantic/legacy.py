@@ -1236,7 +1236,7 @@ def _publish_history_navigation(store, manifest, supplied, publisher):
     revision = max(1, store.read_revision())
     receipts, histories = [], []
     try:
-        with publisher.locked():
+        with publisher.history_identity_cache():
             for page in supplied["pages"]:
                 file = next(f for f in manifest.files if f.relative_path == page["old_path"])
                 raw = original(file)

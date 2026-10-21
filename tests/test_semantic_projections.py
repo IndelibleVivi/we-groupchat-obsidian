@@ -3,6 +3,7 @@ from dataclasses import asdict, replace
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -269,6 +270,234 @@ class ItemPathTests(ReadingHarness):
 
 
 class ProjectionTests(ReadingHarness):
+    def test_history_identity_cache_reads_once_but_walks_on_every_unchanged_publication(self):
+        import core.semantic.projections as projections
+        documents = []
+        for index in range(8):
+            document = dict(object_id="synthetic:history:" + str(index), path=f"Legacy/{index}.md",
+                            title="Synthetic", body="Known history.", content_revision=1)
+            self.publisher.publish_document(**document)
+            documents.append(document)
+        before = {d["path"]: self.publisher.read(d["path"]) for d in documents}
+        with patch.object(projections, "_identity_frontmatter", wraps=_identity_frontmatter) as parsed, \
+             patch.object(projections.os, "walk", wraps=os.walk) as walked:
+            with self.publisher.history_identity_cache():
+                for _ in range(2):
+                    for document in documents:
+                        self.assertEqual(self.publisher.publish_document(**document).status, "unchanged")
+            self.assertEqual(walked.call_count, 16)
+            self.assertEqual(parsed.call_count, 8)
+            self.assertEqual(before, {d["path"]: self.publisher.read(d["path"]) for d in documents})
+            # Ordinary lookup remains uncached, and a new history invocation
+            # parses the current files rather than adopting the previous cache.
+            self.publisher.resolve(documents[0]["object_id"])
+            self.publisher.resolve(documents[0]["object_id"])
+            self.assertEqual(parsed.call_count, 24)
+            with self.publisher.history_identity_cache():
+                self.publisher.resolve(documents[0]["object_id"])
+                self.publisher.resolve(documents[0]["object_id"])
+            self.assertEqual(parsed.call_count, 32)
+
+    def test_history_identity_cache_follows_rename_and_rejects_new_or_changed_duplicate_before_publish(self):
+        snapshot = self.snapshot()
+        receipt = self.publish(snapshot)
+        with self.publisher.history_identity_cache():
+            self.assertEqual(self.publish(snapshot).status, "unchanged")
+            renamed = self.publisher.root / "renamed.md"
+            (self.publisher.root / receipt.path).rename(renamed)
+            self.assertEqual(self.publish(snapshot).path, "renamed.md")
+            self.assertFalse((self.publisher.root / receipt.path).exists())
+            original = renamed.read_bytes()
+            row = dict(self.publisher.record(snapshot.item_id))
+            duplicate = self.publisher.root / "new-duplicate.md"
+            duplicate.write_bytes(original)
+            with self.assertRaisesRegex(ReadingError, "projection_identity_collision"):
+                self.publish(snapshot)
+            self.assertEqual(renamed.read_bytes(), original)
+            self.assertEqual(dict(self.publisher.record(snapshot.item_id)), row)
+            duplicate.unlink()
+            existing = self.publisher.root / "previously-unowned.md"
+            existing.write_text("No machine identity.\n")
+            self.assertEqual(self.publisher.resolve(snapshot.item_id), "renamed.md")
+            existing.write_bytes(original)
+            with self.assertRaisesRegex(ReadingError, "projection_identity_collision"):
+                self.publish(snapshot)
+            self.assertEqual(renamed.read_bytes(), original)
+            self.assertEqual(dict(self.publisher.record(snapshot.item_id)), row)
+
+    def test_history_identity_cache_invalidates_same_size_mtime_restoration_inode_and_tail_changes(self):
+        path = self.publisher._safe_path("note.md")
+        first = b'---\nwgo_id: "synthetic:first"\n---\nBody\n'
+        second = first.replace(b"first", b"other")
+        path.write_bytes(first)
+        with self.publisher.history_identity_cache():
+            self.assertEqual(self.publisher.resolve("synthetic:first"), "note.md")
+            before = path.stat()
+            path.write_bytes(second)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            after = path.stat()
+            self.assertEqual((after.st_size, after.st_mtime_ns), (before.st_size, before.st_mtime_ns))
+            self.assertNotEqual(after.st_ctime_ns, before.st_ctime_ns)
+            self.assertEqual(self.publisher.resolve("synthetic:other"), "note.md")
+            replacement = self.publisher.root / "replacement.tmp"
+            replacement.write_bytes(first)
+            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            os.replace(replacement, path)
+            self.assertNotEqual(path.stat().st_ino, after.st_ino)
+            self.assertEqual(self.publisher.resolve("synthetic:first"), "note.md")
+            path.write_bytes(first + b"\xff")
+            self.assertIsNone(self.publisher.resolve("synthetic:first"))
+            path.write_bytes(first)
+            self.assertEqual(self.publisher.resolve("synthetic:first"), "note.md")
+
+    def test_history_identity_cache_keeps_full_parser_oracle_and_only_caches_successful_results(self):
+        import core.semantic.projections as projections
+        path = self.publisher._safe_path("oracle.md")
+        normal = b'---\n"wgo_id": "synthetic:target"\n---\nBody\n'
+        cases = (normal, b"No identity.\n", normal + b"x" * 20000 + b"\xff",
+                 normal.replace(b"---\nBody", b'wgo_id: "synthetic:target"\n---\nBody'),
+                 b'---\nunknown: ' + b"x" * 1100000 + b'\n"wgo_id": "synthetic:target"\n---\nBody')
+        with self.publisher.history_identity_cache():
+            for raw in cases:
+                with self.subTest(prefix=raw[:40], size=len(raw)):
+                    path.write_bytes(raw)
+                    try:
+                        expected = property_value(raw.decode("utf-8"), "wgo_id")
+                        valid = True
+                    except (ReadingError, UnicodeError):
+                        expected, valid = None, False
+                    with patch.object(projections, "_identity_frontmatter", wraps=_identity_frontmatter) as parsed:
+                        for _ in range(2):
+                            self.assertEqual(self.publisher.resolve("synthetic:target"),
+                                             "oracle.md" if expected == "synthetic:target" else None)
+                        self.assertEqual(parsed.call_count, 1 if valid else 2)
+
+    def test_history_identity_cache_preserves_symlink_nonregular_and_open_failures(self):
+        import stat
+        path = self.publisher._safe_path("note.md")
+        raw = b'---\nwgo_id: "synthetic:target"\n---\nBody\n'
+        path.write_bytes(raw)
+        with self.publisher.history_identity_cache():
+            self.assertEqual(self.publisher.resolve("synthetic:target"), "note.md")
+            with patch("core.semantic.projections.os.open", side_effect=PermissionError), \
+                 self.assertRaisesRegex(ReadingError, "projection_read_failed"):
+                self.publisher.resolve("synthetic:target")
+            with patch("core.semantic.projections.os.fstat", return_value=SimpleNamespace(st_mode=stat.S_IFIFO)), \
+                 self.assertRaisesRegex(ReadingError, "projection_non_regular"):
+                self.publisher.resolve("synthetic:target")
+            target = self.base / "regular-synthetic.bin"
+            path.rename(target)
+            path.symlink_to(target)
+            with self.assertRaisesRegex(ReadingError, "projection_symlink"):
+                self.publisher.resolve("synthetic:target")
+            path.unlink()
+            os.mkfifo(path)
+            with self.assertRaisesRegex(ReadingError, "projection_non_regular"):
+                self.publisher.resolve("synthetic:target")
+
+    def test_history_identity_cache_releases_on_error_and_never_retains_large_headers(self):
+        import core.semantic.projections as projections
+        for index in range(8):
+            path = self.publisher._safe_path(f"{index}.md")
+            path.write_bytes(b'---\nunknown: ' + b"x" * 1100000 +
+                f'\nwgo_id: "synthetic:{index}"\n---\n'.encode() + ("汉🐈" * 2000).encode())
+        with patch.object(projections, "_identity_frontmatter", wraps=_identity_frontmatter) as parsed:
+            with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+                with self.publisher.history_identity_cache():
+                    tracemalloc.start()
+                    try:
+                        self.publisher.resolve("synthetic:0")
+                        self.publisher.resolve("synthetic:0")
+                        retained, _peak = tracemalloc.get_traced_memory()
+                    finally:
+                        tracemalloc.stop()
+                    self.assertLess(retained, 512 * 1024)
+                    self.assertEqual(parsed.call_count, 8)
+                    raise RuntimeError("synthetic interruption")
+            self.publisher.resolve("synthetic:0")
+            self.assertEqual(parsed.call_count, 16)
+            with self.publisher.history_identity_cache():
+                self.publisher.resolve("synthetic:0")
+                self.publisher.resolve("synthetic:0")
+            self.assertEqual(parsed.call_count, 24)
+
+    def test_history_identity_cache_falls_back_when_metadata_is_missing_or_changes_during_parsing(self):
+        import core.semantic.projections as projections
+        path = self.publisher._safe_path("note.md")
+        first = b'---\nwgo_id: "synthetic:first"\n---\nBody\n'
+        second = first.replace(b"first", b"other")
+        path.write_bytes(first)
+        with self.publisher.history_identity_cache():
+            self.assertEqual(self.publisher.resolve("synthetic:first"), "note.md")
+            with patch.object(projections, "_identity_cache_stamp", return_value=None), \
+                 patch.object(projections, "_identity_frontmatter", wraps=_identity_frontmatter) as parsed:
+                self.publisher.resolve("synthetic:first")
+                self.publisher.resolve("synthetic:first")
+                self.assertEqual(parsed.call_count, 2)
+        changed = []
+        def edit_after_parse(stream):
+            value = _identity_frontmatter(stream)
+            if not changed:
+                path.write_bytes(second)
+                changed.append(True)
+            return value
+        with self.publisher.history_identity_cache(), \
+             patch.object(projections, "_identity_frontmatter", side_effect=edit_after_parse) as parsed:
+            self.assertEqual(self.publisher.resolve("synthetic:first"), "note.md")
+            self.assertEqual(self.publisher.resolve("synthetic:other"), "note.md")
+            self.assertEqual(parsed.call_count, 2)
+        # Missing/ambiguous native fields do not form a reusable identity.
+        for observed in (SimpleNamespace(st_mode=path.stat().st_mode),
+                         SimpleNamespace(**{key: getattr(path.stat(), key) for key in
+                            ("st_dev", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")}, st_ino=0)):
+            self.assertIsNone(projections._identity_cache_stamp(observed))
+        with patch.object(projections.os, "name", "nt"):
+            self.assertIsNone(projections._identity_cache_stamp(None))
+        with path.open("rb") as stream:
+            expected = projections._identity_cache_stamp(os.fstat(stream.fileno()))
+            with patch.object(Path, "stat", side_effect=NotImplementedError):
+                self.assertFalse(self.publisher._identity_unchanged(path, stream.fileno(), expected))
+
+    def test_history_identity_cache_preserves_annotations_conflicts_and_both_file_hash_cas_checks(self):
+        document = dict(object_id="synthetic:manual", path="Legacy/manual.md", title="Synthetic",
+                        body="Known history.", content_revision=1)
+        receipt = self.publisher.publish_document(**document)
+        target = self.publisher.root / receipt.path
+        with self.publisher.history_identity_cache():
+            self.publisher.resolve(document["object_id"])
+            target.write_bytes(target.read_bytes() + b"\nPersonal annotation.\n")
+            self.publisher.publish_document(**document)
+            self.assertIn(b"Personal annotation.", target.read_bytes())
+            self.assertEqual(property_value(target.read_text(), "wgo_annotation_revision"), 1)
+            manual = target.read_bytes().replace(b"Known history.", b"Personal rewrite.")
+            target.write_bytes(manual)
+            conflict = self.publisher.publish_document(**document)
+            self.assertEqual(conflict.status, "conflict")
+            self.assertEqual(target.read_bytes(), manual)
+            self.assertEqual(self.publisher.read(".wgo/backups/" + conflict.proposal_id + ".md"), manual)
+        for stage in (2, 3):
+            with self.subTest(cas_read=stage):
+                document = dict(object_id=f"synthetic:cas:{stage}", path=f"Legacy/cas-{stage}.md",
+                                title="Synthetic", body="Old preparation.", content_revision=1)
+                receipt = self.publisher.publish_document(**document)
+                target = self.publisher.root / receipt.path
+                before = target.read_bytes()
+                row = dict(self.publisher.record(document["object_id"]))
+                original_read, reads = self.publisher.read, []
+                def edit_before_cas(path):
+                    if path == receipt.path:
+                        reads.append(path)
+                        if len(reads) == stage:
+                            target.write_bytes(before + b"\nConcurrent personal edit.\n")
+                    return original_read(path)
+                with self.publisher.history_identity_cache():
+                    self.publisher.resolve(document["object_id"])
+                    with patch.object(self.publisher, "read", side_effect=edit_before_cas), \
+                         self.assertRaisesRegex(ReadingError, "projection_file_changed"):
+                        self.publisher.publish_document(**dict(document, body="New preparation."))
+                self.assertEqual(target.read_bytes(), before + b"\nConcurrent personal edit.\n")
+                self.assertEqual(dict(self.publisher.record(document["object_id"])), row)
+
     def test_streamed_identity_frontmatter_matches_existing_parser(self):
         identity = "synthetic:target"
         normal = b'---\nwgo_id: "synthetic:target"\n---\n'

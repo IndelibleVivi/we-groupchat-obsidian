@@ -1903,6 +1903,22 @@ _ROOT_LOCKS: dict[str, threading.RLock] = {}
 _ROOT_LOCKS_GUARD = threading.Lock()
 
 
+def _identity_cache_stamp(observed):
+    """Reuse only native change-time evidence; other platforms parse normally."""
+    if os.name != "posix":  # Windows ctime may be creation time, not change time.
+        return None
+    try:
+        values = tuple(getattr(observed, name) for name in
+                       ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns"))
+        if (any(type(value) is not int for value in values) or values[0] < 0
+                or values[1] <= 0 or values[3] < 0 or min(values[4:]) <= 0
+                or not stat.S_ISREG(values[2])):
+            return None
+        return values
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
 class ProjectionPublisher:
     MAX_SOURCE_PAGE_CHARS = 24000
     MAX_SOURCE_PAGE_EXCERPTS = 32
@@ -1966,6 +1982,22 @@ class ProjectionPublisher:
                 finally:
                     self._lock_local.held = False
 
+    @contextmanager
+    def history_identity_cache(self):
+        """One history publication may reuse parsed IDs, never directory membership."""
+        with self.locked():
+            previous = getattr(self._lock_local, "identity_cache", None)
+            cache = {}
+            self._lock_local.identity_cache = cache
+            try:
+                yield
+            finally:
+                cache.clear()
+                if previous is None:
+                    del self._lock_local.identity_cache
+                else:
+                    self._lock_local.identity_cache = previous
+
     def read(self, path: str) -> bytes | None:
         safe = self._safe_path(path, create_parents=False)
         if not safe.exists():
@@ -2009,20 +2041,45 @@ class ProjectionPublisher:
                 os.unlink(temporary)
         return True
 
+    def _identity_unchanged(self, safe: Path, fd: int, expected: tuple) -> bool:
+        try:
+            return (_identity_cache_stamp(os.fstat(fd)) == expected
+                    and _identity_cache_stamp(safe.stat(follow_symlinks=False)) == expected)
+        except (OSError, NotImplementedError):
+            # Additional metadata is only an optimization. An unavailable
+            # observation falls back to the original strict byte parser.
+            return False
+
     def _identity(self, path: str):
         safe = self._safe_path(path, create_parents=False)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(safe, flags)
             with os.fdopen(fd, "rb") as stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                observed = os.fstat(stream.fileno())
+                if not stat.S_ISREG(observed.st_mode):
                     raise ReadingError("projection_non_regular")
+                cache = getattr(self._lock_local, "identity_cache", None)
+                before = _identity_cache_stamp(observed) if cache is not None else None
+                if cache is not None:
+                    cached = cache.get(path)
+                    if (before is not None and cached is not None and cached[0] == before
+                            and self._identity_unchanged(safe, stream.fileno(), before)):
+                        return cached[1]
+                    cache.pop(path, None)
                 try:
-                    return property_value(_identity_frontmatter(stream), "wgo_id")
+                    value = property_value(_identity_frontmatter(stream), "wgo_id")
                 except (ReadingError, UnicodeError):
                     # An unrelated user note need not be parseable. A recorded
                     # target still undergoes strict parsing during publication.
                     return None
+                # A metadata cache must not retain arbitrary user JSON or huge
+                # scalars. This only limits reuse; parsing/lookup stays exact.
+                if (cache is not None and before is not None
+                        and (value is None or isinstance(value, str) and len(value) <= 4096)
+                        and self._identity_unchanged(safe, stream.fileno(), before)):
+                    cache[path] = (before, value)
+                return value
         except OSError as exc:
             raise ReadingError("projection_read_failed") from exc
 

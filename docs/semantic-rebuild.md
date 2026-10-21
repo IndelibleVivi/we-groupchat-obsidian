@@ -301,6 +301,14 @@ provider 并发长期驻留。
 Online Backup 仍逐一核对 digest，文件备份与 freeze association 仍各自保留。
 不同 inventory ref 各自发布。缓存仅含本次调用的小型 ref/declaration；下次调用仍
 重新验证并发布一次，既有 durable success 不能跳过本轮缺失投影修复或 backup 检查。
+一次 source-first 历史导航发布可临时复用未变化文件的 parsed identity；每次查找仍
+完整遍历当前目录、查重与跟随 rename，并以新打开的 fd 和 no-follow path 的
+dev/inode/mode/size/mtime/ctime 重新核对。首次读取保持完整 strict UTF-8 与原 property
+parser；变化、不足、非 POSIX 或不支持的额外 metadata API 均走原解析。缓存只保留
+metadata 与有界 ID，不保留正文/header/artifact，正常或异常退出即清空。普通 app/resolve
+不默认缓存，target 的 machine baseline、人工冲突、annotation 与双重 full-file hash CAS
+保持原样。这减少重复 byte parsing，完整目录/metadata 工作仍随文档数与文件数相乘，
+不构成全量时长或内存上限保证。
 parallel wave 准备只读取轻量 batch metadata（`batch_id` 与 capture order），再
 逐 batch 读取 core members 计算 overlap-owner wave，不预先解出全部 capture
 receipt 或保留全部 member 副本；它仍不持有 DB 事务或 projection lock。
