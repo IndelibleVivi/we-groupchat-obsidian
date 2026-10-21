@@ -39,6 +39,13 @@ from core.source_adapter import decode_cursor_token
 PROFILE_SCHEMA = "we-groupchat-obsidian.semantic-providers.v1"
 
 
+def _within_capture(output, captured):
+    return (output.keys() == captured.keys() and all(
+        value["generation_id"] == captured[key]["generation_id"] and
+        decode_cursor_token(value["cursor_token"]) <= decode_cursor_token(captured[key]["cursor_token"])
+        for key, value in output.items()))
+
+
 def legacy_command_blocked() -> bool:
     """Reject legacy CLI work using only existing config and generation metadata.
 
@@ -265,12 +272,12 @@ class SemanticRuntime:
                 row = conn.execute("SELECT batch_id FROM processing_receipts WHERE receipt_id=?", (prior["receipt_id"],)).fetchone()
                 if row:
                     conn.execute("INSERT OR IGNORE INTO semantic_applied_batches VALUES(?,?)", (row[0], snapshot.revision))
-        batches = self._live_batches(username)
+        live_batches = self._unapplied_live_batches(username)
         previous_capture_id = (data["capture_receipt"] or {}).get("receipt_id")
-        captured = next((batch for batch in batches
-                         if batch["input_cursors"] == data["captured_cursors"]
-                         and batch["receipt_id"] != previous_capture_id
-                         and batch["receipt_id"] not in self._applied_capture_ids()), None)
+        captured_row = next((batch for batch in live_batches
+                             if batch["input_cursors"] == data["captured_cursors"]
+                             and batch["receipt_id"] != previous_capture_id), None)
+        captured = self.store.get_batch(captured_row["batch_id"]) if captured_row else None
         if captured is None:
             capture = SemanticCapture(self.store, monitor.db,
                 page_size=max(1, min(2000, int(monitor.config.get("monitor_max_messages_per_run", 200)))))
@@ -283,13 +290,10 @@ class SemanticRuntime:
             return backoff
         pending = False
         prepared_after_gap = False
-        for batch in self._live_batches(username):
-            with closing(self.store.connect()) as conn:
-                applied = conn.execute("SELECT 1 FROM semantic_applied_batches WHERE batch_id=?", (batch["batch_id"],)).fetchone()
-            if applied:
+        for candidate in self._unapplied_live_batches(username):
+            if not _within_capture(candidate["output_cursors"], snapshot.data["captured_cursors"]):
                 continue
-            if not self._within_capture(batch["output_cursors"], snapshot.data["captured_cursors"]):
-                continue
+            batch = self.store.get_batch(candidate["batch_id"])
             before_processing = self.store.read_revision()
             try:
                 self.process(batch["batch_id"])
@@ -371,21 +375,22 @@ class SemanticRuntime:
         state, receipt = MonitorReceiptBridge(self.store).initialize_from_now(snapshot, batch["batch_id"])
         monitor.state_store.install_v3(snapshot.revision, state, receipt)
 
-    @staticmethod
-    def _within_capture(output, captured):
-        return (output.keys() == captured.keys() and all(
-            value["generation_id"] == captured[key]["generation_id"] and
-            decode_cursor_token(value["cursor_token"]) <= decode_cursor_token(captured[key]["cursor_token"])
-            for key, value in output.items()))
-
-    def _live_batches(self, username):
+    def _unapplied_live_batches(self, username):
+        """Read cursor metadata only for live work that still needs attention."""
         with closing(self.store.connect()) as conn:
-            ids = [row[0] for row in conn.execute("SELECT batch_id FROM capture_batches WHERE chat_id=? AND purpose='live' ORDER BY rowid", (username,))]
-        return [self.store.get_batch(identity) for identity in ids]
-
-    def _applied_capture_ids(self):
-        with closing(self.store.connect()) as conn:
-            return {row[0] for row in conn.execute("SELECT b.receipt_id FROM capture_batches b JOIN semantic_applied_batches a USING(batch_id)")}
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            applied = ("LEFT JOIN semantic_applied_batches a USING(batch_id) "
+                       "WHERE b.chat_id=? AND b.purpose='live' AND a.batch_id IS NULL"
+                       if "semantic_applied_batches" in tables else
+                       "WHERE b.chat_id=? AND b.purpose='live'")
+            rows = conn.execute(
+                "SELECT b.batch_id,b.receipt_id,b.input_cursors_json,b.output_cursors_json "
+                "FROM capture_batches b " + applied + " ORDER BY b.rowid",
+                (username,)).fetchall()
+        return [{"batch_id": row[0], "receipt_id": row[1],
+                 "input_cursors": json.loads(row[2]), "output_cursors": json.loads(row[3])}
+                for row in rows]
 
     def _write_live_observation(self, snapshot, phase):
         with self.store.transaction() as conn:

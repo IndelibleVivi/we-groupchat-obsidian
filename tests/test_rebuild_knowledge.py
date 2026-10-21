@@ -9,19 +9,97 @@ from scripts.rebuild_knowledge import main, public_result
 
 
 class RebuildCommandTests(unittest.TestCase):
-    def invoke(self, argv, factory):
+    def invoke(self, argv, factory, configured=None):
         output = io.StringIO()
-        with redirect_stdout(output):
+        with patch("core.config.ConfigStore.inspect", return_value=configured), redirect_stdout(output):
             code = main(argv, coordinator_factory=factory)
         return code, json.loads(output.getvalue())
 
+    def test_all_commands_resolve_configured_default_and_explicit_runtime_roots(self):
+        commands = (
+            ["plan", "--provider-profile", "synthetic-profile.json", "--run-id", "run"],
+            ["execute", "run", "--allow-transient-wechat-source-read", "--allow-model-processing"],
+            ["resume", "run", "--allow-transient-wechat-source-read", "--allow-model-processing"],
+            ["status", "run"], ["verify", "run"], ["compact-journal", "run"],
+            ["restore-runtime", "run"], ["renew-plan", "run"],
+            ["rollback", "run"], ["relocate", "run", "--destination-root", "/synthetic/moved"],
+        )
+        for command in commands:
+            with self.subTest(command=command[0], source="configured"):
+                factory = Mock()
+                coordinator = factory.return_value
+                coordinator.plan.return_value = {
+                    "run_id": "run", "generation_id": "generation", "history_policy": "source-first-v1",
+                    "reading_policy": "editorial-composition-v2", "scope": {}, "provider_budget": {},
+                    "configured_admission": {}, "storage": {}}
+                coordinator.execute.return_value = {"state": "incomplete"}
+                coordinator.resume.return_value = {"state": "incomplete"}
+                coordinator.status.return_value = {"state": "incomplete"}
+                coordinator.verify.return_value = {"complete": True}
+                coordinator.compact_journal.return_value = {"state": "compact"}
+                coordinator.restore_runtime.return_value = {"state": "runtime_restore_planned"}
+                coordinator.renew_plan.return_value = {"state": "plan_renewal_planned"}
+                coordinator.rollback.return_value = {"state": "rollback_planned"}
+                coordinator.relocate.return_value = {"state": "relocation_planned"}
+                with patch("core.semantic.rebuild.read_json", return_value={}):
+                    self.invoke(command, factory, configured={"semantic_runtime_root": "/synthetic/configured"})
+                self.assertEqual(factory.call_args.args[0], "/synthetic/configured")
+            with self.subTest(command=command[0], source="default"):
+                factory = Mock()
+                coordinator = factory.return_value
+                coordinator.plan.return_value = {
+                    "run_id": "run", "generation_id": "generation", "history_policy": "source-first-v1",
+                    "reading_policy": "editorial-composition-v2", "scope": {}, "provider_budget": {},
+                    "configured_admission": {}, "storage": {}}
+                coordinator.execute.return_value = {"state": "incomplete"}
+                coordinator.resume.return_value = {"state": "incomplete"}
+                coordinator.status.return_value = {"state": "incomplete"}
+                coordinator.verify.return_value = {"complete": True}
+                coordinator.compact_journal.return_value = {"state": "compact"}
+                coordinator.restore_runtime.return_value = {"state": "runtime_restore_planned"}
+                coordinator.renew_plan.return_value = {"state": "plan_renewal_planned"}
+                coordinator.rollback.return_value = {"state": "rollback_planned"}
+                coordinator.relocate.return_value = {"state": "relocation_planned"}
+                with patch("core.config.DATA_DIR", "/synthetic/data"), \
+                     patch("core.semantic.rebuild.read_json", return_value={}):
+                    self.invoke(command, factory, configured={})
+                self.assertEqual(factory.call_args.args[0], "/synthetic/data/semantic")
+            with self.subTest(command=command[0], source="explicit"):
+                factory = Mock()
+                coordinator = factory.return_value
+                coordinator.plan.return_value = {
+                    "run_id": "run", "generation_id": "generation", "history_policy": "source-first-v1",
+                    "reading_policy": "editorial-composition-v2", "scope": {}, "provider_budget": {},
+                    "configured_admission": {}, "storage": {}}
+                coordinator.execute.return_value = {"state": "incomplete"}
+                coordinator.resume.return_value = {"state": "incomplete"}
+                coordinator.status.return_value = {"state": "incomplete"}
+                coordinator.verify.return_value = {"complete": True}
+                coordinator.compact_journal.return_value = {"state": "compact"}
+                coordinator.restore_runtime.return_value = {"state": "runtime_restore_planned"}
+                coordinator.renew_plan.return_value = {"state": "plan_renewal_planned"}
+                coordinator.rollback.return_value = {"state": "rollback_planned"}
+                coordinator.relocate.return_value = {"state": "relocation_planned"}
+                with patch("core.semantic.rebuild.read_json", return_value={}):
+                    self.invoke(["--runtime-root", "/synthetic/explicit", *command], factory,
+                                configured={"semantic_runtime_root": "/synthetic/configured"})
+                self.assertEqual(factory.call_args.args[0], "/synthetic/explicit")
+
     def test_missing_either_grant_precedes_any_constructor(self):
+        class GuardedConfig:
+            def __init__(self, *_args, **_kwargs):
+                raise AssertionError("config constructed before grants")
+
         factory = Mock(side_effect=AssertionError("constructor before grants"))
-        for command in ("execute", "resume"):
-            for flags in ([], ["--allow-transient-wechat-source-read"], ["--allow-model-processing"]):
-                code, result = self.invoke([command, "run", *flags], factory)
-                self.assertEqual(code, 2)
-                self.assertEqual(result["code"], "rebuild_explicit_grants_required")
+        with patch("core.config.ConfigStore", GuardedConfig):
+            for command in ("execute", "resume"):
+                for flags in ([], ["--allow-transient-wechat-source-read"], ["--allow-model-processing"]):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main([command, "run", *flags], coordinator_factory=factory)
+                    result = json.loads(output.getvalue())
+                    self.assertEqual(code, 2)
+                    self.assertEqual(result["code"], "rebuild_explicit_grants_required")
         factory.assert_not_called()
 
     def test_execute_and_resume_wire_both_explicit_grants(self):

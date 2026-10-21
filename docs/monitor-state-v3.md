@@ -166,6 +166,13 @@ constitute new evidence. Once the gap resolves, receipt verification and
 checkpoint CAS consume batches in source order; no new checkpoint schema or
 second progress owner is introduced.
 
+Live monitoring selects unapplied batch metadata before loading members or raw
+payloads. Already-applied batches remain durable history and do not reenter the
+work list. Crash recovery still adopts the exact captured batch, and an
+unresolved prefix does not hide later unapplied context. This changes work
+selection only; each verified empty/EOF capture still receives its own durable
+identity, and checkpoint CAS remains the progress authority.
+
 ## Explicit installation/migration receipt
 
 ```json

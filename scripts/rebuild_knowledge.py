@@ -92,13 +92,14 @@ def main(argv=None, *, coordinator_factory=None):
     try:
         from core.config import ConfigStore, DATA_DIR
         from core.semantic.rebuild import RebuildCoordinator, read_json, RebuildError
+        config = ConfigStore(args.config)
         root = args.runtime_root
-        if root is None and args.command in {"relocate", "renew-plan"}:
-            inspected = ConfigStore(args.config).inspect()
+        if root is None:
+            inspected = config.inspect()
             root = (inspected or {}).get("semantic_runtime_root") or None
         root = root or str(Path(DATA_DIR) / "semantic")
         factory = coordinator_factory or RebuildCoordinator
-        coordinator = factory(root, ConfigStore(args.config), project_dir=args.project_dir)
+        coordinator = factory(root, config, project_dir=args.project_dir)
         if args.command == "plan":
             profile = read_json(args.provider_profile)
             if profile is None:

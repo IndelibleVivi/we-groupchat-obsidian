@@ -162,10 +162,78 @@ class SemanticRuntimeTests(unittest.TestCase):
             with self.assertRaises(MonitorStateError):
                 self.monitor._check_once()
         count = len(self.source.page_calls)
-        self.assertEqual(self.monitor._check_once()["status"], "semantic_applied")
+        calls = 0
+        original = self.store.get_batch
+
+        def counted(batch_id):
+            nonlocal calls
+            calls += 1
+            return original(batch_id)
+
+        with patch.object(self.store, "get_batch", side_effect=counted):
+            self.assertEqual(self.monitor._check_once()["status"], "semantic_applied")
         self.assertEqual(len(self.source.page_calls), count)
+        self.assertLessEqual(calls, 5)
         with closing(self.store.connect()) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM capture_batches WHERE purpose='live'").fetchone()[0], 1)
+
+    def test_idle_runtime_keeps_batch_hydration_bounded_by_applied_history(self):
+        snapshot = self.state.inspect()
+        for index in range(25):
+            output = {key: dict(value, cursor_token=json.dumps([10 + index, 0]))
+                      for key, value in snapshot.data["captured_cursors"].items()}
+            batch = self.store.capture_batch(
+                "fixture-live-" + str(index), [], source_namespace=snapshot.data["source_namespace"],
+                chat_id=snapshot.data["chat_id"], inventory_digest=snapshot.data["source_inventory_digest"],
+                inventory_revision=snapshot.data["source_inventory_revision"],
+                input_cursors=output, output_cursors=output, source_eof=True)
+            with self.store.transaction() as conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS semantic_applied_batches(batch_id TEXT PRIMARY KEY,state_revision INTEGER NOT NULL)")
+                conn.execute("INSERT INTO semantic_applied_batches VALUES(?,?)", (batch["batch_id"], index))
+        with closing(self.store.connect()) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM capture_batches WHERE purpose='live'").fetchone()[0], 25)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM semantic_applied_batches").fetchone()[0], 25)
+        calls = []
+        original = self.store.get_batch
+        real_capture = self.runtime._unapplied_live_batches
+        unapplied = []
+
+        def capture_candidates(username):
+            unapplied.append(real_capture(username))
+            return unapplied[-1]
+
+        def counted(batch_id):
+            calls.append(batch_id)
+            return original(batch_id)
+
+        with patch.object(self.store, "get_batch", side_effect=counted), \
+             patch.object(self.runtime, "_unapplied_live_batches", side_effect=capture_candidates):
+            for _ in range(3):
+                self.assertEqual(self.monitor._check_once()["status"], "no_messages")
+                self.assertLessEqual(len(calls), 4 * (_ + 1))
+                self.assertEqual([len(value) for value in unapplied[2 * _:2 * (_ + 1)]], [0, 1])
+        self.assertEqual(len(calls), 12)
+
+    def test_unapplied_selection_keeps_later_deferred_context_batch(self):
+        snapshot = self.state.inspect()
+        cursors = snapshot.data["captured_cursors"]
+        first_output = {key: dict(value, cursor_token=json.dumps([20, 0]))
+                        for key, value in cursors.items()}
+        later_output = {key: dict(value, cursor_token=json.dumps([30, 0]))
+                        for key, value in cursors.items()}
+        first = self.store.capture_batch(
+            "fixture-prefix", [], source_namespace=snapshot.data["source_namespace"],
+            chat_id=snapshot.data["chat_id"], inventory_digest=snapshot.data["source_inventory_digest"],
+            inventory_revision=snapshot.data["source_inventory_revision"],
+            input_cursors=cursors, output_cursors=first_output, source_eof=False)
+        later = self.store.capture_batch(
+            "fixture-later", [], source_namespace=snapshot.data["source_namespace"],
+            chat_id=snapshot.data["chat_id"], inventory_digest=snapshot.data["source_inventory_digest"],
+            inventory_revision=snapshot.data["source_inventory_revision"],
+            input_cursors=first_output, output_cursors=later_output, source_eof=True)
+        selected = self.runtime._unapplied_live_batches(snapshot.data["chat_id"])
+        self.assertEqual([entry["batch_id"] for entry in selected],
+                         [first["batch_id"], later["batch_id"]])
 
     def test_projection_failure_does_not_replay_canonical_provider_work(self):
         self.append()

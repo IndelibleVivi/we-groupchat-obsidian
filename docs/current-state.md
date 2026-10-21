@@ -7,6 +7,10 @@ is implied by this document.
 - New installations and unmigrated state keep the legacy topic/event path.
   An accepted active-generation manifest selects the shared full-rebuild/live
   semantic engine; a half-written cutover blocks startup.
+- All rebuild subcommands now share configured runtime-root resolution after
+  their explicit grant checks. Live monitor discovery filters already-applied
+  batches in SQL before loading source text and payloads; recovery and deferred
+  prefixes remain eligible. Empty verified EOF still retains its own receipt.
 - New rebuild plans freeze `history_policy="source-first-v1"`. Semantic Items
   are reconstructed only from captured raw messages. Old summaries, pages,
   Review Queue transitions and resources remain in separately verified immutable

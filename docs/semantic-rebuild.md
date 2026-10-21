@@ -199,7 +199,10 @@ local embedding + Text decision + Vectorize 仅需后者。上述 30 分钟只�
 
 ## Plan、execute 与 status
 
-所有全局参数放在子命令前。省略 `--config` 时使用应用默认配置文件：
+所有全局参数放在子命令前。省略 `--config` 时使用应用默认配置文件。所有子命令都按
+显式 `--runtime-root`、该配置的 `semantic_runtime_root`、`DATA_DIR/semantic` 的顺序解析
+runtime root；真正执行迁移时仍要求它与配置绑定一致。source/model/runtime 的显式授权
+检查仍先于配置构造和来源访问：
 
 ```bash
 .venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \

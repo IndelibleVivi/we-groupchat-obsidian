@@ -100,7 +100,9 @@ plan as immutable evidence, and grants no source/model access.
 to another already-mounted private local root; mutation needs `--apply
 --allow-runtime-changes`, preserves the run/generation and evidence, and never
 fabricates a missing root. A source checkout does not migrate or
-activate data. Start with the [reading guide](docs/semantic-workflow.md),
+activate data. All rebuild subcommands use the configured `semantic_runtime_root`
+when `--runtime-root` is omitted; an unconfigured installation uses
+`DATA_DIR/semantic`. Start with the [reading guide](docs/semantic-workflow.md),
 [provider contract](docs/semantic-providers.md), and [candidate status](docs/current-state.md).
 Consumer-specific archive producers now belong to external adapters; generic
 resource capture, explicit context capture, CAS and mounted backup remain here.

@@ -69,7 +69,8 @@ SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务
 原件保留，升级本身不读取微信或调用模型。`scripts/rebuild_knowledge.py relocate RUN_ID
 --destination-root /PATH/TO/NEW/ROOT` 规划把未 pin、激活前的 run 迁到另一个已挂载的
 私有本地 root；改动需 `--apply --allow-runtime-changes`，保留同一 run/generation 与证据，
-且绝不代替创建缺失的 root。日常操作见[语义阅读指南](docs/semantic-workflow.md)，
+且绝不代替创建缺失的 root。所有 rebuild 子命令省略 `--runtime-root` 时都使用配置中的
+`semantic_runtime_root`；未配置才使用 `DATA_DIR/semantic`。日常操作见[语义阅读指南](docs/semantic-workflow.md)，
 数据流见[provider contract](docs/semantic-providers.md)，准确阶段见[候选状态](docs/current-state.md)。
 专用 archive producer、profile 与菜单已移至外部 adapter；公共 WGO 保留通用 source/capture、
 显式 context capture、CAS 和 mounted backup。
