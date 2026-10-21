@@ -239,6 +239,45 @@ app、生成新 DB、发布 `WGO/` 并 CAS 更新 monitor checkpoint。
 resource DB backup lock、real-path output lock、checkpoint execution locks 和
 新阅读根的 projection lock 覆盖冻结与切换。所有锁释放后才恢复 LaunchAgent。
 
+## 捕获前计划续期
+
+同一 candidate 在尚未捕获原文、尚未进行模型处理时过期，可用 `renew-plan`
+保留原 `run_id` / generation 续期。默认只预览；写入必须同时给出 `--apply`
+与 `--allow-runtime-changes`：
+
+```bash
+.venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \
+  renew-plan FIRST_MIGRATION --expires-in 86400
+.venv/bin/python scripts/rebuild_knowledge.py --config /PRIVATE/config.json \
+  renew-plan FIRST_MIGRATION --expires-in 86400 --apply --allow-runtime-changes
+```
+
+`--expires-in` 是本次操作起算的秒数，沿用既有 `0 < seconds <= 7 * 86400`
+数值边界，默认 24 小时。省略 `--runtime-root` 时读取配置中当前 root。
+这个 runtime grant 只授权本次本地 renewal journal 写入；命令不读取 credential、
+WeChat 来源或旧页面，不构造 provider，也不停止、恢复或激活 app。
+
+续期要求当前完整 config 与冻结 config 精确相等，无 active pin、任何 cutover
+或 finalized/rollback 状态。未完成 relocation、已退休的原 root，以及未精确绑定
+当前接收 root 的 relocation 均拒绝；已完成且合法绑定的接收 run 可以续期。
+canonical DB 的 `source_records`、`capture_batches`、`observations`、`items`、
+`jobs` 与 `reader_text_artifacts` 必须全空；任何 pending、running、unknown、
+accepted 或 failed job/reader 记录都不能用续期绕过。已有 `legacy_mappings`、
+历史导航与 freeze backups 可以保留。尚未执行的新计划可没有 generation DB；
+已执行的 run 若 DB 缺失或不可验证则失败关闭，不能将缺失当作空状态。
+
+apply 在 run/rebuild 双锁内重新检查上述条件，只改变 operational plan 的
+`expires_at`。原 `created_at`、contract、profile、config、paths、scope、
+checkpoints 与全部 provenance 保持原样。每次续期将此前完整 compact plan
+作为 run-bound immutable `old_plan` payload 保留，并在 `plan_renewals` 追加
+old/new expiry、old/new fingerprints 和 receipt；不覆盖既有 original-plan、
+relocation 或历史证据。旧 inline-v1 journal 需先显式 `compact-journal`，续期不会
+在拒绝不安全状态之前暗中升级它。
+
+续期仅解除有效期限制，不能解释或修复原进程退出的原因。后续 `resume` 仍须
+原 source/model 两项授权，并照常重新 freeze、验证来源与执行既有验收；它不继承
+renewal grant，不 reset cursor/job，也不把历史导航发布视作 semantic 完成。
+
 ## Journal 存储升级与内存边界
 
 Run journal v2 只保存小型状态与不可变 payload references。旧 inventory、冻结
@@ -257,6 +296,11 @@ Legacy inventory 的身份校验也按 canonical JSON chunks 计算，保持既�
 完成每个 history pass 的保全和备份核对后，coordinator 释放已 decode 的清单；
 模型处理结束、需要历史发布或 verify 时再读取同一不可变 payload，避免整个旧库随
 provider 并发长期驻留。
+同一次历史保留调用中，多个 freeze 若引用逐字相同的 run-bound immutable
+`legacy_inventory` ref，只发布一次该清单的历史导航；每个 freeze 的独立 whole-DB
+Online Backup 仍逐一核对 digest，文件备份与 freeze association 仍各自保留。
+不同 inventory ref 各自发布。缓存仅含本次调用的小型 ref/declaration；下次调用仍
+重新验证并发布一次，既有 durable success 不能跳过本轮缺失投影修复或 backup 检查。
 parallel wave 准备只读取轻量 batch metadata（`batch_id` 与 capture order），再
 逐 batch 读取 core members 计算 overlap-owner wave，不预先解出全部 capture
 receipt 或保留全部 member 副本；它仍不持有 DB 事务或 projection lock。
@@ -293,8 +337,10 @@ run 重试，不能删除原件或手改 phase。旧 writer 生成的 canonical 
 
 ## 激活前迁移到另一个本地 runtime root
 
-已 plan、尚未 activation 的重建若计划过期或需要换到另一个已挂载的本地卷，可用
+已 plan、尚未 activation 的重建若需要换到另一个已挂载的本地卷，可用
 同一 `run_id` 的显式 recovery 把该 run/generation 复制到新的私有本地 root 后继续。
+该入口仍可为过期计划重绑位置和有效期；仅需为同 root 的空 candidate 续期时，使用
+前述 `renew-plan`。
 先看 plan，再显式 apply（apply 必须同时给出两个 flag）：
 
 ```bash

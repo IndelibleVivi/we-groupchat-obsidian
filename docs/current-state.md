@@ -13,8 +13,10 @@ is implied by this document.
   history passes; they create no legacy captures, Items, model jobs or semantic
   completion claims. Plans without the field retain `legacy-semantic-v1` and
   their original fingerprint and obligations.
-- History navigation supports literal link delimiters and percent signs in
-  existing filenames through encoded Markdown internal links. Ordinary safe
+- History navigation escapes literal delimiters in existing filenames through
+  encoded Markdown internal links. Obsidian still restricts certain filename
+  characters, including `#`; encoding alone does not establish native navigation
+  for those names. See the [history boundary](semantic-legacy.md). Ordinary safe
   wikilinks retain their bytes; original pages, anchors and recovery copies
   remain unchanged. This source fix does not imply that a private migration
   has resumed or completed.
@@ -53,7 +55,16 @@ starting source/model processing; original bytes remain available for recovery.
 This is source capability, not evidence that any private run has been converted
 or activated. See the migration runbook for limits and recovery.
 
-An unpinned, pre-activation run whose plan expired or whose runtime root moved can
+An empty, pre-capture/pre-provider candidate can renew its plan expiry at the
+same root through `renew-plan`. Apply needs the explicit runtime grant, exact
+config/root binding, no active/cutover/finalized state, and both owner locks.
+Only expiry changes; old compact plans and append-only renewal receipts remain.
+Resume still requires source/model grants and a fresh freeze. Repeated exact
+inventory refs share one history publication within a call while every freeze's
+independent whole-DB backup is checked; later calls repair projections again.
+These are source capabilities, not private-run or activation claims.
+
+An unpinned, pre-activation run whose runtime root moved can
 be relocated to another already-mounted private local root by the explicit
 `relocate` recovery. It copies run/generation state (SQLite via Online Backup
 including WAL), rebinds only the operational plan, adopts `semantic_runtime_root`

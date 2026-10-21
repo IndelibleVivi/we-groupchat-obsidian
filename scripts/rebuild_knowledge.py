@@ -32,6 +32,11 @@ def parser():
     restore.add_argument("run_id")
     restore.add_argument("--apply", action="store_true")
     restore.add_argument("--allow-runtime-changes", action="store_true")
+    renew = commands.add_parser("renew-plan", help="Renew only expiry for an empty pre-capture candidate; defaults to preview")
+    renew.add_argument("run_id")
+    renew.add_argument("--expires-in", type=float, default=86400, help="New validity in seconds, greater than zero and at most seven days")
+    renew.add_argument("--apply", action="store_true")
+    renew.add_argument("--allow-runtime-changes", action="store_true")
     rollback = commands.add_parser("rollback", help="Plan retained-raw rollback; mutation requires both apply flags")
     rollback.add_argument("run_id")
     rollback.add_argument("--apply", action="store_true")
@@ -55,7 +60,8 @@ def public_result(value):
                "freeze_count", "error_codes", "issues", "counts", "provisional_failure", "configured_admission",
                "relocated", "relocation_receipt", "provider_refreshed", "provider_change_blocked",
                "job_count", "file_count", "total_bytes", "restore_code", "restore_observed_at", "reader_job_states",
-               "restore_attempt_count", "job_states", "job_error_codes", "job_blocker", "history_policy", "reading_policy"}
+               "restore_attempt_count", "job_states", "job_error_codes", "job_blocker", "history_policy", "reading_policy",
+               "renewal_count", "renewal_receipt", "old_expires_at", "new_expires_at"}
     result = {key: val for key, val in value.items() if key in allowed}
     if "live_check" in value:
         result["live_check"] = {key: val for key, val in value["live_check"].items()
@@ -80,11 +86,14 @@ def main(argv=None, *, coordinator_factory=None):
     if args.command == "restore-runtime" and args.apply and not args.allow_runtime_changes:
         print(json.dumps({"state": "blocked", "code": "rebuild_restore_grant_required"}))
         return 2
+    if args.command == "renew-plan" and args.apply and not args.allow_runtime_changes:
+        print(json.dumps({"state": "blocked", "code": "rebuild_plan_renewal_grant_required"}))
+        return 2
     try:
         from core.config import ConfigStore, DATA_DIR
         from core.semantic.rebuild import RebuildCoordinator, read_json, RebuildError
         root = args.runtime_root
-        if root is None and args.command == "relocate":
+        if root is None and args.command in {"relocate", "renew-plan"}:
             inspected = ConfigStore(args.config).inspect()
             root = (inspected or {}).get("semantic_runtime_root") or None
         root = root or str(Path(DATA_DIR) / "semantic")
@@ -117,10 +126,13 @@ def main(argv=None, *, coordinator_factory=None):
         elif args.command == "restore-runtime":
             result = coordinator.restore_runtime(args.run_id, apply=args.apply,
                                                   allow_runtime_changes=args.allow_runtime_changes)
+        elif args.command == "renew-plan":
+            result = coordinator.renew_plan(args.run_id, expires_in=args.expires_in, apply=args.apply,
+                                            allow_runtime_changes=args.allow_runtime_changes)
         else:
             result = getattr(coordinator, args.command)(args.run_id)
         print(json.dumps(public_result(result), ensure_ascii=False, sort_keys=True))
-        if args.command in {"status", "compact-journal"} or result.get("state") in {"run_complete", "rolled_back", "rollback_planned", "relocation_planned", "relocated", "runtime_restore_planned", "runtime_restored"} or result.get("complete") is True:
+        if args.command in {"status", "compact-journal"} or result.get("state") in {"run_complete", "rolled_back", "rollback_planned", "relocation_planned", "relocated", "runtime_restore_planned", "runtime_restored", "plan_renewal_planned", "plan_renewed"} or result.get("complete") is True:
             return 0
         return 1
     except Exception as exc:

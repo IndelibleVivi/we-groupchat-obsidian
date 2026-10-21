@@ -149,12 +149,18 @@ Source-first history navigation keeps existing wikilink bytes for ordinary safe
 paths and labels. A target containing link delimiters such as `[]|#^`, literal
 percent signs or URI separators instead uses a percent-encoded Markdown internal
 link, retaining the `.md` extension and vault-root folder path. For example,
-`Old/记录[原页]#1.md` becomes
-`[打开保留的原页](Old/%E8%AE%B0%E5%BD%95%5B%E5%8E%9F%E9%A1%B5%5D%231.md)`.
-Literal `%23` in a filename is encoded as `%2523`, so one URL decode returns the
-exact filename rather than creating an anchor. This follows Obsidian's
-[supported internal-link formats and URL-encoding guidance](https://help.obsidian.md/links).
-It does not rename or rewrite an original page, its anchors or recovery bytes.
+`Old/记录[原页].md` becomes
+`[打开保留的原页](Old/%E8%AE%B0%E5%BD%95%5B%E5%8E%9F%E9%A1%B5%5D.md)`.
+Literal `%23` is encoded as `%2523`, preserving the destination under a standard
+URL decode. This escaping is a syntax guarantee, not proof of native Obsidian
+navigation for arbitrary filenames. Obsidian's
+[internal-link guidance](https://help.obsidian.md/links) lists `#`, `|`, `^`,
+`:`, `%%`, `[[` and `]]` as characters that may not work in links. In particular,
+percent-encoding `#` does not establish a working link to a literal hash filename.
+Original pages, anchors and recovery bytes remain unchanged; a retained name
+with host-restricted characters may require opening the original file directly.
+The migration does not silently rename it or count syntax-only checks as native
+link acceptance.
 
 The link helper applies canonical URL redaction before escaping the displayed
 label. Labels needing literal Markdown/HTML punctuation use numeric character

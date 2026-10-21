@@ -517,6 +517,8 @@ class SourceFirstHistoryTests(unittest.TestCase):
 
 class HistoryLinkTests(unittest.TestCase):
     def test_ordinary_wikilink_bytes_and_markdown_exact_targets(self):
+        # Syntax and byte conservation only. Native host restrictions (notably
+        # literal '#' filenames) are not established by urllib's URL decoder.
         self.assertEqual(_history_link("Old/普通 一页.md", "打开原页"), "[[Old/普通 一页|打开原页]]")
         for target in ("Old/[brackets].md", "Old/pipe|name.md", "Old/hash#caret^name.md", "Old/percent%20%23.md",
                        "Old/%%comment%%.md", "Old/%2e%2e/%2f.md", "Old/a?token=literal&b=2.md", "Old/<note>.md",

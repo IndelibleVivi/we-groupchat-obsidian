@@ -68,6 +68,33 @@ class RebuildCommandTests(unittest.TestCase):
         self.assertEqual(result["code"], "rebuild_relocation_grant_required")
         factory.assert_not_called()
 
+    def test_renew_plan_requires_runtime_grant_before_constructor(self):
+        factory = Mock(side_effect=AssertionError("constructor before grants"))
+        code, result = self.invoke(["renew-plan", "run", "--apply"], factory)
+        self.assertEqual((code, result["code"]), (2, "rebuild_plan_renewal_grant_required"))
+        factory.assert_not_called()
+
+    def test_renew_plan_and_apply_wire_expiry_without_source_or_model_grants(self):
+        for flags, state in (([], "plan_renewal_planned"),
+                             (["--apply", "--allow-runtime-changes"], "plan_renewed")):
+            with self.subTest(state=state):
+                coordinator = Mock()
+                coordinator.renew_plan.return_value = {"state": state, "run_id": "run",
+                    "generation_id": "gen", "renewal_count": 1,
+                    "old_expires_at": 100, "new_expires_at": 200,
+                    "renewal_receipt": "a" * 64, "old_plan": {"private": "content"},
+                    "database": "/private/knowledge.sqlite"}
+                code, result = self.invoke(["--runtime-root", "/private/synthetic-runtime", "renew-plan", "run", "--expires-in", "604800", *flags],
+                                           Mock(return_value=coordinator))
+                self.assertEqual(code, 0)
+                coordinator.renew_plan.assert_called_once_with("run", apply=bool(flags),
+                    allow_runtime_changes=bool(flags), expires_in=604800)
+                self.assertEqual(result["renewal_count"], 1)
+                self.assertEqual((result["old_expires_at"], result["new_expires_at"]), (100, 200))
+                self.assertNotIn("private", json.dumps(result))
+                coordinator.execute.assert_not_called()
+                coordinator.resume.assert_not_called()
+
     def test_relocate_plan_and_apply_wire_arguments_and_stay_content_free(self):
         coordinator = Mock()
         coordinator.relocate.return_value = {"state": "relocation_planned", "run_id": "run",

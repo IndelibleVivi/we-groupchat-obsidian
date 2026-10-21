@@ -25,7 +25,7 @@ import uuid
 from core.app_runtime import AppInstanceLock, AppAlreadyRunning
 from core.platform import LockMode, create_platform_services
 from core.semantic.rebuild_payloads import (Payloads, STORAGE_SCHEMA, MAX_JOURNAL,
-                                           convert_inline, opened)
+                                           convert_inline, is_ref, opened)
 
 
 SCHEMA = "we-groupchat-obsidian.semantic-rebuild.v1"
@@ -33,6 +33,7 @@ ACTIVE_SCHEMA = "we-groupchat-obsidian.semantic-active.v1"
 JOURNAL_SCHEMA = "we-groupchat-obsidian.semantic-cutover.v1"
 RELOCATION_SCHEMA = "we-groupchat-obsidian.semantic-relocation.v1"
 RETIREMENT_SCHEMA = "we-groupchat-obsidian.semantic-relocation-retirement.v1"
+PLAN_RENEWAL_SCHEMA = "we-groupchat-obsidian.semantic-plan-renewal.v1"
 _RELOCATION_MARKER = ".wgo-relocation.json"
 _ID = re.compile(r"^[a-zA-Z0-9_-]{1,100}$")
 _ACTIVATION_STEPS = (
@@ -1003,6 +1004,116 @@ class RebuildCoordinator:
             return {"run_id": run_id, "generation_id": run["plan"]["generation_id"],
                     "state": "journal_ready", "phase": run["phase"]}
 
+    def _plan_renewal_guard(self, journal, run, config):
+        """Prove pre-capture/pre-provider state without initializing any owner."""
+        plan = run["plan"]
+        if (config != plan["config"] or fingerprint(config) != plan["config_fingerprint"]):
+            raise RebuildError("rebuild_config_changed")
+        generation = _identifier(plan["generation_id"])
+        if (plan.get("run_id") != journal.run_id or self._configured_root(config) != self.root
+                or plan["database"] != str(safe_path(self.root, f"generations/{generation}/knowledge.sqlite"))
+                or plan["staging_root"] != str(safe_path(self.root, f"runs/{journal.run_id}/staging/WGO"))):
+            raise RebuildError("rebuild_runtime_root_binding_mismatch")
+        if (run.get("final_receipt") is not None or run.get("rollback") is not None
+                or run.get("phase") in {"run_complete", "rolled_back"}):
+            raise RebuildError("rebuild_plan_renewal_finalized")
+        if regular_exists(journal.registry.active_path):
+            raise RebuildError("rebuild_plan_renewal_active_generation")
+        if regular_exists(journal.registry.journal_path):
+            raise RebuildError("rebuild_plan_renewal_cutover_present")
+        relocation = run.get("relocation")
+        if relocation is not None and (relocation.get("complete") is not True
+                or relocation.get("destination_root") != str(self.root)
+                or relocation.get("run_id") != journal.run_id
+                or relocation.get("generation_id") != generation):
+            raise RebuildError("rebuild_relocation_recovery_required")
+        retirement = read_json(safe_path(journal.run_root, "relocation-retired.json"))
+        if retirement is not None:
+            if retirement.get("original_root") == str(self.root):
+                raise RebuildError("rebuild_plan_renewal_root_retired")
+            if (not relocation or retirement.get("destination_root") != str(self.root)
+                    or retirement.get("run_id") != journal.run_id
+                    or retirement.get("generation_id") != generation
+                    or retirement.get("destination_receipt_id") != relocation.get("receipt_id")):
+                raise RebuildError("rebuild_relocation_recovery_required")
+        marker = read_json(safe_path(self.root, _RELOCATION_MARKER))
+        if marker is not None and marker.get("run_id") == journal.run_id and relocation is None:
+            raise RebuildError("rebuild_relocation_recovery_required")
+        if not regular_exists(plan["database"]):
+            # A never-executed plan has no generation DB yet. Missing storage
+            # after any execution is missing evidence, never proof of emptiness.
+            if (run.get("phase") != "planned" or run.get("freeze_receipts") or run.get("steps")
+                    or run.get("errors") or run.get("runtime")):
+                raise RebuildError("rebuild_plan_renewal_database_missing")
+            return
+        from .store import SCHEMA as store_schema
+        try:
+            with closing(sqlite3.connect(Path(plan["database"]).as_uri() + "?mode=ro", uri=True)) as conn:
+                conn.execute("PRAGMA query_only=ON")
+                conn.execute("BEGIN")
+                manifests = conn.execute("SELECT generation_id,schema FROM generation_manifest").fetchall()
+                if manifests != [(generation, store_schema)]:
+                    raise RebuildError("rebuild_plan_renewal_generation_mismatch")
+                for table in ("source_records", "capture_batches", "observations", "items", "jobs"):
+                    if conn.execute("SELECT 1 FROM " + table + " LIMIT 1").fetchone() is not None:
+                        raise RebuildError("rebuild_plan_renewal_pre_capture_required")
+                # The reader ledger is lazy: absence is empty, not a reason to
+                # construct a publisher or execute its schema here.
+                reader = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reader_text_artifacts'").fetchone()
+                if reader and conn.execute("SELECT 1 FROM reader_text_artifacts LIMIT 1").fetchone() is not None:
+                    raise RebuildError("rebuild_plan_renewal_pre_capture_required")
+        except sqlite3.Error as exc:
+            raise RebuildError("rebuild_plan_renewal_database_invalid") from exc
+
+    def renew_plan(self, run_id, *, expires_in=86400, apply=False, allow_runtime_changes=False):
+        """Renew only expiry for the same empty candidate; grants never carry over.
+
+        Preview is read-only. Apply holds both rebuild owners, retains the old
+        compact plan as immutable evidence, and appends its renewal in the same
+        atomic journal replacement. No source, provider, credential or app IO.
+        """
+        if type(apply) is not bool or type(allow_runtime_changes) is not bool:
+            raise RebuildError("rebuild_plan_renewal_flags_invalid")
+        if apply and allow_runtime_changes is not True:
+            raise RebuildError("rebuild_plan_renewal_grant_required")
+        if type(expires_in) not in (int, float) or not 0 < expires_in <= 7 * 86400:
+            raise RebuildError("rebuild_plan_renewal_expiry_invalid")
+        config = self._config()
+        self._admit_private_paths(config)
+        journal = RebuildJournal(self.root, run_id)
+        # Read outside the lock first: an unsafe renewal must not implicitly
+        # convert an inline-v1 journal before its guards can reject the run.
+        run = journal.read()
+        self._plan_renewal_guard(journal, run, config)
+        result = {"run_id": run_id, "generation_id": run["plan"]["generation_id"],
+                  "state": "plan_renewal_planned", "requires_runtime_grant": True,
+                  "old_expires_at": run["plan"]["expires_at"],
+                  "new_expires_at": self.clock() + expires_in,
+                  "renewal_count": len(run.get("plan_renewals", []))}
+        if not apply:
+            return result
+        with journal.locked(), create_platform_services().require("locks").acquire(
+                str(self.root / "rebuild.lock"), mode=LockMode.EXCLUSIVE, blocking=False):
+            run, config = journal.read(), self._config()
+            self._admit_private_paths(config)
+            self._plan_renewal_guard(journal, run, config)
+            now = self.clock()
+            plan = dict(run["plan"], expires_at=now + expires_in)
+            renewal = {"schema": PLAN_RENEWAL_SCHEMA, "run_id": run_id,
+                       "generation_id": plan["generation_id"], "renewed_at": now,
+                       "old_expires_at": run["plan"]["expires_at"], "new_expires_at": plan["expires_at"],
+                       "old_plan_fingerprint": run["plan_fingerprint"], "new_plan_fingerprint": fingerprint(plan),
+                       "old_plan": journal.payloads.put(run["plan"])}
+            renewal["receipt_id"] = fingerprint(renewal)
+            def record(row):
+                row["plan"] = plan
+                row["plan_fingerprint"] = renewal["new_plan_fingerprint"]
+                row.setdefault("plan_renewals", []).append(renewal)
+            updated = journal.update(record)
+            return {**result, "state": "plan_renewed", "requires_runtime_grant": False,
+                    "old_expires_at": renewal["old_expires_at"], "new_expires_at": renewal["new_expires_at"],
+                    "renewal_count": len(updated["plan_renewals"]), "renewal_receipt": renewal["receipt_id"]}
+
     # --- Pre-activation relocation to another private local runtime root ---
 
     def _configured_root(self, config):
@@ -1842,6 +1953,10 @@ class RebuildCoordinator:
         # A failure before source construction can leave a freeze that has never
         # reached preservation. Conserve every retained freeze on the next build,
         # including earlier versions of personal pages and queue append history.
+        # Cache declarations only for this invocation. Every freeze still
+        # verifies its independent DB/file backups; a later call republishes
+        # even durable successes so missing/damaged projections are repaired.
+        published = {}
         for reference in journal.read()["freeze_receipts"]:
             frozen = journal.payloads.get(reference)
             database_backup = frozen.get("databases", {}).get("knowledge", {})
@@ -1853,12 +1968,18 @@ class RebuildCoordinator:
             inventory = LegacyInventory.from_dict(journal.payloads.get(frozen["legacy_inventory"]))
             receipt = preserve_legacy_history(store, inventory, allow_preserved_refresh=True)
             record_legacy_backups(store, inventory, frozen["legacy_backups"])
-            publication = build_history_publication_plan(inventory)
-            result = publish_legacy_navigation(store, inventory, publication, publisher)
-            if result["status"] != "published":
-                raise RebuildError("rebuild_legacy_publication_pending")
-            declaration = {"receipt_id": receipt["receipt_id"], "legacy_inventory": frozen["legacy_inventory"],
-                           "publication_plan": journal.payloads.put(publication)}
+            key = canonical_json(frozen["legacy_inventory"]) if is_ref(frozen["legacy_inventory"]) else None
+            declaration = published.get(key) if key is not None else None
+            if declaration is None:
+                publication = build_history_publication_plan(inventory)
+                result = publish_legacy_navigation(store, inventory, publication, publisher)
+                if result["status"] != "published":
+                    raise RebuildError("rebuild_legacy_publication_pending")
+                declaration = {"receipt_id": receipt["receipt_id"], "legacy_inventory": frozen["legacy_inventory"],
+                               "publication_plan": journal.payloads.put(publication)}
+                if key is not None:
+                    published[key] = declaration
+                del publication, result
             def record(row):
                 preservations = row.setdefault("history_preservations", {})
                 freeze_references = list(preservations.get(receipt["manifest_id"], {}).get("freeze_receipts", ()))
@@ -1870,7 +1991,7 @@ class RebuildCoordinator:
                     order.remove(receipt["manifest_id"])
                 order.append(receipt["manifest_id"])
             journal.update(record)
-            del inventory, publication
+            del inventory
 
     def _verification_manifest(self, journal, store, roles, final, inventory, publication):
         from .legacy import history_policy, SOURCE_FIRST_POLICY

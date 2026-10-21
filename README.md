@@ -91,7 +91,11 @@ two complete source observations and a finite cutover horizon, then switches one
 generation pin and checks the restored runtime. Large journals keep immutable evidence outside
 small mutable state. `scripts/rebuild_knowledge.py compact-journal RUN_ID` upgrades
 an interrupted inline journal, preserving original bytes without starting source
-or model processing. `scripts/rebuild_knowledge.py relocate RUN_ID
+or model processing. `scripts/rebuild_knowledge.py renew-plan RUN_ID` previews
+renewing an expired plan for the same candidate before any source capture or
+model work; apply requires `--apply --allow-runtime-changes`, preserves the old
+plan as immutable evidence, and grants no source/model access.
+`scripts/rebuild_knowledge.py relocate RUN_ID
 --destination-root /PATH/TO/NEW/ROOT` plans moving an unpinned, pre-activation run
 to another already-mounted private local root; mutation needs `--apply
 --allow-runtime-changes`, preserves the run/generation and evidence, and never

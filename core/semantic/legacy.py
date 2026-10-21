@@ -923,8 +923,9 @@ def _history_link(path: str, label: str) -> str:
     target, visible = redact_urls_in_text(target), redact_urls_in_text(label)
     if (any(c in target for c in "[]|#^%:?<>&")
             or any(c in visible for c in "\\`*_{}[]#!|~^=$%<>&")):
-        # Obsidian supports URL-encoded Markdown internal links. Encode literal
-        # percent signs too: %23 in a filename must not become a heading link.
+        # Preserve literal destination bytes with Markdown URL encoding,
+        # including percent signs. Host filename restrictions still apply;
+        # encoding does not make a '#' filename an Obsidian-compatible link.
         # Entities keep the displayed label literal, including Markdown/HTML,
         # after URL redaction. Never interpolate it as executable link syntax.
         literal = "".join("&#" + str(ord(c)) + ";" if c in string.punctuation else c for c in visible)

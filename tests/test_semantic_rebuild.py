@@ -6,7 +6,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 import weakref
-from contextlib import contextmanager, closing
+from contextlib import contextmanager, closing, nullcontext
 from unittest.mock import patch
 
 from core.semantic.rebuild import (ACTIVE_SCHEMA, SCHEMA, GenerationRegistry, RebuildError,
@@ -788,6 +788,289 @@ class RebuildCoordinatorTests(unittest.TestCase):
         report = self.coordinator.verify("test-run")
         self.assertFalse(report["complete"], report)
         self.assertIn("legacy_history_database_backup_missing", {row["code"] for row in report["issues"]})
+
+    def pre_capture_history(self, *, freeze_count=1, distinct_inventory=False):
+        """Retained history with no raw capture or model work, all inside the fixture."""
+        from core.semantic.store import SemanticStore
+        with closing(sqlite3.connect(self.legacy.db)) as conn:
+            conn.execute("CREATE TABLE unknown_extension(value TEXT)")
+            conn.execute("INSERT INTO unknown_extension VALUES('freeze-1')")
+            conn.commit()
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        with patch.object(self.coordinator, "source_factory", side_effect=RebuildError("synthetic_before_source")):
+            self.assertEqual(self.execute()["code"], "synthetic_before_source")
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        with journal.locked():
+            for index in range(1, freeze_count):
+                with closing(sqlite3.connect(self.legacy.db)) as conn:
+                    conn.execute("UPDATE unknown_extension SET value=?", ("freeze-" + str(index + 1),))
+                    conn.commit()
+                if distinct_inventory:
+                    (self.legacy.tree / "second.md").write_text("# 细节\n新保留历史 " + str(index), encoding="utf-8")
+                self.coordinator._freeze(journal, self.config_store.inspect(), self.coordinator._states(self.config_store.inspect()))
+        store = SemanticStore(plan["database"], plan["generation_id"])
+        publisher = self.coordinator._runtime(store, self.roles, plan["staging_root"], self.config_store.inspect()).publisher
+        return plan, journal, store, publisher
+
+    def test_history_publication_deduplicates_exact_ref_and_rechecks_each_database_backup(self):
+        from core.semantic import legacy
+        from core.semantic.rebuild import file_fingerprint
+        plan, journal, store, publisher = self.pre_capture_history(freeze_count=4)
+        freezes = [journal.payloads.get(ref) for ref in journal.read()["freeze_receipts"]]
+        self.assertTrue(all(f["legacy_inventory"] == freezes[0]["legacy_inventory"] for f in freezes))
+        backups = [f["databases"]["knowledge"] for f in freezes]
+        self.assertEqual(len({b["sha256"] for b in backups}), 4)
+        with patch.object(legacy, "publish_legacy_navigation", wraps=legacy.publish_legacy_navigation) as publish, \
+             patch("core.semantic.rebuild.file_fingerprint", wraps=file_fingerprint) as checked:
+            with journal.locked():
+                self.coordinator._preserve_history(journal, store, publisher)
+        self.assertEqual(publish.call_count, 1)
+        self.assertTrue({b["path"] for b in backups}.issubset({str(c.args[0]) for c in checked.call_args_list}))
+        preserved = next(iter(journal.read()["history_preservations"].values()))
+        self.assertEqual(preserved["freeze_receipts"], journal.read()["freeze_receipts"])
+        # Durable success from the previous invocation never exempts a new one
+        # from checking a later freeze's independently retained whole database.
+        Path(backups[-1]["path"]).write_bytes(b"synthetic damaged fourth database backup")
+        with patch.object(legacy, "publish_legacy_navigation", wraps=legacy.publish_legacy_navigation) as publish:
+            with journal.locked(), self.assertRaisesRegex(RebuildError, "history_database_backup_invalid"):
+                self.coordinator._preserve_history(journal, store, publisher)
+        self.assertEqual(publish.call_count, 1)
+
+    def test_history_publication_different_refs_and_new_invocations_always_repair_projection(self):
+        from core.semantic import legacy
+        plan, journal, store, publisher = self.pre_capture_history(freeze_count=2, distinct_inventory=True)
+        with patch.object(legacy, "publish_legacy_navigation", wraps=legacy.publish_legacy_navigation) as publish:
+            with journal.locked():
+                self.coordinator._preserve_history(journal, store, publisher)
+        self.assertEqual(publish.call_count, 2)
+        before = journal.read()
+        self.assertEqual(len(before["history_preservations"]), 2)
+        index = Path(plan["staging_root"], "Legacy/Index.md")
+        self.assertTrue(index.is_file())
+        index.unlink()
+        with patch.object(legacy, "publish_legacy_navigation", wraps=legacy.publish_legacy_navigation) as publish:
+            with journal.locked():
+                self.coordinator._preserve_history(journal, store, publisher)
+        self.assertEqual(publish.call_count, 2)
+        self.assertTrue(index.is_file())
+        self.assertEqual(journal.read()["history_preservations"], before["history_preservations"])
+
+    def renewal_snapshot(self, journal):
+        """Compare durable bytes/contents without counting lock-file preparation."""
+        run = journal.read()
+        database = Path(run["plan"]["database"])
+        database_rows = None
+        if database.is_file():
+            with closing(sqlite3.connect(database)) as conn:
+                database_rows = list(conn.iterdump())
+        payloads = {p.name: p.read_bytes() for p in (journal.run_root / "payloads").glob("*.json")}
+        return journal.path.read_bytes(), Path(self.config_store.path).read_bytes(), database_rows, payloads
+
+    def test_expired_pre_capture_plan_renews_only_expiry_and_keeps_append_only_original_evidence(self):
+        self.coordinator.clock = lambda: 1000
+        plan, journal, store, publisher = self.pre_capture_history(freeze_count=2)
+        with journal.locked():
+            self.coordinator._preserve_history(journal, store, publisher)
+        before = journal.read()
+        frozen_history = before["history_preservations"]
+        self.coordinator.clock = lambda: plan["expires_at"] + 1
+        with self.assertRaisesRegex(RebuildError, "rebuild_plan_expired"):
+            self.execute()
+        unchanged = self.renewal_snapshot(journal)
+        with patch.object(self.coordinator, "_roles", side_effect=AssertionError("renewal constructed provider")), \
+             patch.object(self.coordinator, "source_factory", side_effect=AssertionError("renewal opened source")), \
+             patch.object(self.coordinator, "_legacy_inventory", side_effect=AssertionError("renewal read legacy pages")), \
+             patch.object(self.managed, "inspect", side_effect=AssertionError("renewal inspected app")):
+            preview = self.coordinator.renew_plan("test-run", expires_in=86400)
+            self.assertEqual(preview["state"], "plan_renewal_planned")
+            self.assertEqual(self.renewal_snapshot(journal), unchanged)
+            result = self.coordinator.renew_plan("test-run", expires_in=86400, apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "plan_renewed")
+        after = journal.read()
+        self.assertEqual(after["plan"], dict(before["plan"], expires_at=self.coordinator.clock() + 86400))
+        self.assertEqual(after["plan_fingerprint"], fingerprint(after["plan"]))
+        self.assertEqual(after["history_preservations"], frozen_history)
+        self.assertEqual(after["freeze_receipts"], before["freeze_receipts"])
+        self.assertEqual(self.renewal_snapshot(journal)[1:3], unchanged[1:3])
+        for key in before.keys() - {"revision", "updated_at", "plan", "plan_fingerprint"}:
+            self.assertEqual(after[key], before[key], key)
+        renewal = after["plan_renewals"][0]
+        self.assertEqual(journal.payloads.get(renewal["old_plan"]), before["plan"])
+        self.assertEqual(renewal["old_plan_fingerprint"], before["plan_fingerprint"])
+        self.assertEqual(renewal["new_plan_fingerprint"], after["plan_fingerprint"])
+        self.assertEqual(renewal["old_expires_at"], before["plan"]["expires_at"])
+        self.assertEqual(renewal["new_expires_at"], after["plan"]["expires_at"])
+        # A second explicit renewal appends evidence and never rewrites the first.
+        self.coordinator.clock = lambda: after["plan"]["expires_at"] + 1
+        self.coordinator.renew_plan("test-run", expires_in=86400, apply=True, allow_runtime_changes=True)
+        twice = journal.read()
+        self.assertEqual(twice["plan_renewals"][0], renewal)
+        self.assertEqual(journal.payloads.get(twice["plan_renewals"][1]["old_plan"]), after["plan"])
+        with self.assertRaisesRegex(RebuildError, "rebuild_explicit_grants_required"):
+            self.coordinator.resume("test-run")
+        resumed = self.coordinator.resume("test-run", allow_source_read=True, allow_model_processing=True)
+        self.assertIn("live_check", resumed, resumed)
+        self.assertEqual(len(journal.read()["freeze_receipts"]), 3)
+        self.assertTrue(self.coordinator.verify("test-run")["complete"])
+
+    def test_plan_renewal_grants_and_expiry_reject_before_any_config_or_write(self):
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        before = self.renewal_snapshot(journal)
+        with patch.object(self.coordinator, "_config", side_effect=AssertionError("config before admission")):
+            for kwargs, code in (({"apply": True}, "grant_required"),
+                                 ({"apply": 1, "allow_runtime_changes": True}, "flags_invalid"),
+                                 ({"apply": True, "allow_runtime_changes": 1}, "flags_invalid")):
+                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(RebuildError, code):
+                    self.coordinator.renew_plan("test-run", **kwargs)
+            for expiry in (0, -1, True, "86400", float("nan"), float("inf"), 7 * 86400 + 1):
+                with self.subTest(expiry=expiry), self.assertRaisesRegex(RebuildError, "expiry_invalid"):
+                    self.coordinator.renew_plan("test-run", expires_in=expiry, apply=True, allow_runtime_changes=True)
+        self.assertEqual(self.renewal_snapshot(journal), before)
+
+    def test_plan_renewal_accepts_existing_positive_to_seven_day_boundary_without_creating_database(self):
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        self.coordinator.clock = lambda: plan["expires_at"] + 1
+        for expiry in (0.5, 7 * 86400):
+            with self.subTest(expiry=expiry):
+                result = self.coordinator.renew_plan("test-run", expires_in=expiry,
+                                                     apply=True, allow_runtime_changes=True)
+                self.assertEqual(result["new_expires_at"], self.coordinator.clock() + expiry)
+                self.assertFalse(Path(plan["database"]).exists())
+        self.assertEqual(self.managed.events, [])
+
+    def test_plan_renewal_requires_both_owner_locks_and_revalidates_after_locking(self):
+        from core.platform import LockMode, create_platform_services
+        from core.platform.contracts import LockBusy
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        locks = create_platform_services().require("locks")
+        before = self.renewal_snapshot(journal)
+        for lock_path in (journal.run_root / "run.lock", self.runtime_root / "rebuild.lock"):
+            with self.subTest(lock=lock_path.name):
+                with locks.acquire(str(lock_path), mode=LockMode.EXCLUSIVE, blocking=False), \
+                     self.assertRaises(LockBusy):
+                    self.coordinator.renew_plan("test-run", apply=True, allow_runtime_changes=True)
+                self.assertEqual(self.renewal_snapshot(journal), before)
+        initial_config = self.config_store.inspect()
+        changed = dict(initial_config, config_revision=initial_config["config_revision"] + 1)
+        with patch.object(self.coordinator, "_config", side_effect=[initial_config, changed]), \
+             self.assertRaisesRegex(RebuildError, "rebuild_config_changed"):
+            self.coordinator.renew_plan("test-run", apply=True, allow_runtime_changes=True)
+        self.assertEqual(self.renewal_snapshot(journal), before)
+
+    def test_plan_renewal_retains_converted_inline_plan_evidence_and_requires_explicit_conversion(self):
+        plan = self.coordinator.plan(PROFILE, run_id="test-run")
+        journal = RebuildJournal(self.runtime_root, "test-run")
+        old = journal_details(self.runtime_root, "test-run")
+        old["schema"] = SCHEMA
+        old["plan_fingerprint"] = fingerprint(old["plan"])
+        write_json(journal.path, old)
+        raw = journal.path.read_bytes()
+        self.coordinator.clock = lambda: plan["expires_at"] + 1
+        with self.assertRaisesRegex(RebuildError, "rebuild_journal_upgrade_required"):
+            self.coordinator.renew_plan("test-run", apply=True, allow_runtime_changes=True)
+        self.assertEqual(journal.path.read_bytes(), raw)
+        self.assertFalse((journal.run_root / "inline-v1.json").exists())
+        self.coordinator.compact_journal("test-run")
+        converted = journal.read()
+        result = self.coordinator.renew_plan("test-run", apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "plan_renewed")
+        renewed = journal.read()
+        self.assertEqual(renewed["original_plan_fingerprint"], old["plan_fingerprint"])
+        self.assertEqual((journal.run_root / "inline-v1.json").read_bytes(), raw)
+        evidence = renewed["plan_renewals"][0]
+        self.assertEqual(evidence["old_plan_fingerprint"], converted["plan_fingerprint"])
+        self.assertEqual(journal.payloads.get(evidence["old_plan"]), converted["plan"])
+
+    def test_plan_renewal_allows_completed_relocation_at_receiver_without_overwriting_its_evidence(self):
+        plan, original_journal, store, publisher = self.pre_capture_history()
+        with original_journal.locked():
+            self.coordinator._preserve_history(original_journal, store, publisher)
+        original = original_journal.read()
+        destination = self._destination("renewal-relocated")
+        relocated = self.coordinator.relocate("test-run", destination_root=str(destination),
+                                             apply=True, allow_runtime_changes=True)
+        self.assertEqual(relocated["state"], "relocated", relocated)
+        journal = RebuildJournal(destination, "test-run")
+        before = journal.read()
+        moved = self.coordinator_at(destination, clock=lambda: before["plan"]["expires_at"] + 1)
+        receipt_files = {path: path.read_bytes() for path in (
+            journal.run_root / "relocation-receipt.json", journal.run_root / "relocation-retired.json",
+            destination / ".wgo-relocation.json")}
+        result = moved.renew_plan("test-run", apply=True, allow_runtime_changes=True)
+        self.assertEqual(result["state"], "plan_renewed")
+        after = journal.read()
+        for key in ("relocation", "relocation_files", "original_plan", "original_plan_fingerprint",
+                    "history_preservations", "freeze_receipts"):
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual({path: path.read_bytes() for path in receipt_files}, receipt_files)
+        # A retained original cannot become runnable by renewing its expiry,
+        # even if inspected against that root's historical config snapshot.
+        before_original = original_journal.path.read_bytes()
+        with patch.object(self.config_store, "inspect", return_value=original["plan"]["config"]), \
+             self.assertRaisesRegex(RebuildError, "root_retired"):
+            self.coordinator.renew_plan("test-run", apply=True, allow_runtime_changes=True)
+        self.assertEqual(original_journal.path.read_bytes(), before_original)
+
+    def test_plan_renewal_refuses_config_activation_finalization_and_incomplete_relocation_without_writes(self):
+        plan, journal, store, publisher = self.pre_capture_history()
+        self.coordinator.clock = lambda: plan["expires_at"] + 1
+        base = journal.read()
+        cases = (("config", "rebuild_config_changed"), ("active", "active_generation"),
+                 ("cutover", "cutover"), ("final", "finalized"), ("relocation", "relocation"),
+                 ("retired", "retired"))
+        for kind, error in cases:
+            with self.subTest(kind=kind):
+                config_patch = patch.object(self.config_store, "inspect", return_value={**plan["config"], "config_revision": 99}) if kind == "config" else nullcontext()
+                if kind == "active":
+                    write_json(journal.registry.active_path, {"synthetic": "present pin"})
+                elif kind == "cutover":
+                    write_json(journal.registry.journal_path, {"phase": "rolled_back", "run_id": "test-run"})
+                elif kind == "final":
+                    journal.update(lambda r: r.update(final_receipt={"state": "incomplete"}))
+                elif kind == "relocation":
+                    journal.update(lambda r: r.update(relocation={"complete": False}))
+                elif kind == "retired":
+                    write_json(journal.run_root / "relocation-retired.json", {"original_root": str(self.runtime_root)})
+                before = self.renewal_snapshot(journal)
+                with config_patch, self.assertRaisesRegex(RebuildError, error):
+                    self.coordinator.renew_plan("test-run", apply=True, allow_runtime_changes=True)
+                self.assertEqual(self.renewal_snapshot(journal), before)
+                for path in (journal.registry.active_path, journal.registry.journal_path, journal.run_root / "relocation-retired.json"):
+                    if path.exists():
+                        path.unlink()
+                write_json(journal.path, base)
+
+    def test_plan_renewal_refuses_each_nonempty_canonical_or_model_table_without_writes(self):
+        plan, journal, store, publisher = self.pre_capture_history()
+        self.coordinator.clock = lambda: plan["expires_at"] + 1
+        rows = {
+            "source_records": "INSERT INTO source_records(source_version_id,source_id,source_namespace,chat_id,logical_shard_id,physical_generation,source_cursor_token,source_sent_at,captured_at,revision,kind,provenance_grade,content_hash,text,payload_json) VALUES('v','s','n','c','l','p','t',1,1,1,'text','raw_exact','h','text','{}')",
+            "capture_batches": "INSERT INTO capture_batches VALUES('b','r','f','n','c','d',1,'{}','{}',1,'snapshot:C0',1,'{}')",
+            "observations": "INSERT INTO observations VALUES('o','accepted-job','local','title','scene',1,1,1,'unresolved','[]')",
+            "items": "INSERT INTO items VALUES('i','topic','{}','title',1,'active',1,1)",
+            "jobs": "INSERT INTO jobs(job_id,job_key,kind,inputs_json,versions_json,state,created_at,updated_at) VALUES('j','k','extract_page','{}','{}','pending',1,1)",
+            "reader_text_artifacts": "INSERT INTO reader_text_artifacts VALUES('g','k','r','route','body-plan-v15','pending','')",
+        }
+        for table, sql in rows.items():
+            states = ("pending", "unknown", "running", "accepted", "failed") if table in {"jobs", "reader_text_artifacts"} else (None,)
+            for state in states:
+                with self.subTest(table=table, state=state):
+                    with closing(sqlite3.connect(store.path)) as conn:
+                        conn.execute(sql)
+                        if state is not None:
+                            conn.execute("UPDATE " + table + " SET " + ("state" if table == "jobs" else "status") + "=?", (state,))
+                        conn.commit()
+                    before = self.renewal_snapshot(journal)
+                    with patch.object(self.coordinator, "_roles", side_effect=AssertionError("provider")), \
+                         patch.object(self.coordinator, "source_factory", side_effect=AssertionError("source")), \
+                         self.assertRaisesRegex(RebuildError, "pre_capture_required"):
+                        self.coordinator.renew_plan("test-run", apply=True, allow_runtime_changes=True)
+                    self.assertEqual(self.renewal_snapshot(journal), before)
+                    with closing(sqlite3.connect(store.path)) as conn:
+                        conn.execute("DELETE FROM " + table)
+                        conn.commit()
 
     def test_source_first_plan_cannot_rebind_existing_legacy_generation(self):
         from core.semantic.store import SemanticStore

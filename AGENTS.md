@@ -161,6 +161,14 @@
   for the retained original root. It never creates a missing destination root,
   never changes cursors/jobs/provenance evidence, and admits a changed
   TEXT/DECISION binding only while the generation has zero jobs.
+  `RebuildCoordinator.renew_plan` is the same-root expiry-only recovery for an
+  empty pre-capture/pre-provider candidate. Preview is read-only; apply requires
+  the explicit runtime grant and run/rebuild locks. The six canonical/model
+  tables must be empty, config/root binding exact, and activation/cutover,
+  finalized, retired or incomplete-relocation state absent. Retain every old
+  compact plan in immutable payloads and append renewal receipts; never replace
+  original-plan or relocation evidence. Resume still needs both source/model
+  grants and a fresh freeze. Inline journals must be explicitly compacted first.
   Initial legacy inventory admits one fully revalidated reread after transient
   file metadata change; frozen-input, backup and acceptance checks remain strict.
 - `core/semantic/store.py` owns immutable source versions, Observations, Items,
@@ -351,6 +359,11 @@
   payload refs, including a distinct verified whole-database Online Backup per
   freeze; `Legacy/Index.md` links each pass and DB-only or missing-page topics
   have explicit history entries.
+  Within one history-preservation call, exact repeated immutable inventory refs
+  share one navigation publication. Each freeze's independent whole-DB backup
+  must still be verified and associated; different refs publish separately.
+  A later call revalidates and repairs projections rather than trusting an old
+  publication receipt. Keep this cache local and declaration-only.
   Publish the fixed projection, install v3 via CAS, activate the pin, record the
   provisional receipt, release locks, restore the exact app and verify live
   incremental acceptance in that order. Failed provisional evidence remains
