@@ -347,6 +347,9 @@ gateway 或上游 model 已执行它。
 `finish_reason="stop"` 后才交付完整结果；中断的流不会变成部分成功输出。
 该字段默认不存在，加载历史 config 不改变其 fingerprint；它只改变传输方式，
 不改变 provider route、重试策略或 unknown job 的 reconciliation 规则。
+流式与非流式响应中的 `finish_reason="length"` 或 MiMo 文档规定的
+`repetition_truncation` 都归为已知输出截断，部分文本不会被接受。
+这项分类不会追溯终结历史 unknown outcome。
 
 选择 DeepSeek 且没有显式填写 `ai_model` 时，当前默认使用
 `deepseek-v4-flash`；仍可在配置中指定其他兼容 model。

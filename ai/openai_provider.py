@@ -74,7 +74,7 @@ class OpenAIProvider(AIProvider):
                             continue
                         choice = chunk.choices[0]
                         reason = getattr(choice, "finish_reason", None)
-                        if reason == "length":
+                        if reason in ("length", "repetition_truncation"):
                             raise OutputTruncatedError()
                         if reason is not None:
                             if reason != "stop":
@@ -92,7 +92,7 @@ class OpenAIProvider(AIProvider):
                 result = "".join(parts)
             else:
                 response = self.client.chat.completions.create(**request)
-                if getattr(response.choices[0], "finish_reason", None) == "length":
+                if getattr(response.choices[0], "finish_reason", None) in ("length", "repetition_truncation"):
                     raise OutputTruncatedError()
                 result = response.choices[0].message.content
             if not isinstance(result, str) or not result.strip():

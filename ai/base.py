@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 
 
 class OutputTruncatedError(RuntimeError):
-    """The provider returned a known, incomplete response at its output limit."""
+    """The provider explicitly reported an incomplete, truncated response."""
     def __init__(self):
         super().__init__("text_output_truncated")
 

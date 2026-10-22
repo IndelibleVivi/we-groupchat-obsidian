@@ -441,6 +441,10 @@ after the provider reports `finish_reason="stop"`; interrupted streams never
 become partial successful output. This option is absent by default and does
 not change historical config fingerprints. It changes transport, not the
 provider route, retry policy or unknown-job reconciliation rules.
+Both streaming and non-streaming responses with `finish_reason="length"` or
+MiMo's documented `repetition_truncation` fail as known truncated output;
+their partial text is never accepted. This classification does not reconcile
+historical unknown outcomes.
 
 When DeepSeek is selected without an explicit `ai_model`, the current default
 is `deepseek-v4-flash`; a different compatible model can still be configured.

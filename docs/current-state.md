@@ -44,6 +44,9 @@ is implied by this document.
   remain exact; every recovery child reduces core scope, and one unsplittable
   fragment stops. Rebuild drains the failed phase and continues under the same
   freeze/C0; unknown outcomes, active leases and other errors cannot enter that loop.
+  The OpenAI-compatible adapter recognizes both `length` and MiMo's documented
+  `repetition_truncation` as known truncation in streaming and non-streaming
+  responses. Historical unknown jobs retain their recorded outcomes.
 - Product-specific private adapters are outside this public repository. Generic
   resource capture, context retention by explicit injection, CAS and v3 snapshot
   transport remain supported building blocks.

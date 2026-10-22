@@ -2,7 +2,7 @@ import sys
 import types
 import unittest
 from contextlib import contextmanager
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ai.openai_provider import OpenAIProvider
 from ai.base import OutputTruncatedError
@@ -55,11 +55,29 @@ class OpenAIProviderTests(unittest.TestCase):
                 self.assertNotIn("private text", str(failure.exception))
                 self.assertTrue(captured["closed"])
 
-    def test_length_limited_stream_remains_a_known_truncated_output(self):
-        provider, captured = self.streamed([self.chunk("partial"), self.chunk(reason="length")])
-        with self.assertRaises(OutputTruncatedError):
-            provider.summarize("synthetic prompt")
-        self.assertTrue(captured["closed"])
+    def test_known_truncated_stream_never_returns_partial_output_and_closes(self):
+        for reason in ("length", "repetition_truncation"):
+            with self.subTest(reason=reason):
+                provider, captured = self.streamed([
+                    self.chunk("partial"), self.chunk("discarded tail", reason=reason)])
+                with self.assertRaises(OutputTruncatedError):
+                    provider.summarize("synthetic prompt")
+                self.assertTrue(captured["closed"])
+
+    def test_known_truncated_completion_never_returns_partial_output(self):
+        for reason in ("length", "repetition_truncation"):
+            with self.subTest(reason=reason):
+                response = types.SimpleNamespace(choices=[types.SimpleNamespace(
+                    finish_reason=reason,
+                    message=types.SimpleNamespace(content="partial private text"))])
+                provider = OpenAIProvider.__new__(OpenAIProvider)
+                provider.model = "synthetic"
+                create = Mock(return_value=response)
+                provider.client = types.SimpleNamespace(chat=types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=create)))
+                with self.assertRaises(OutputTruncatedError):
+                    provider.summarize("synthetic prompt")
+                create.assert_called_once()
 
     def test_configures_bounded_single_attempt_client_requests(self):
         captured = {}

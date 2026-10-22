@@ -102,19 +102,23 @@ class SemanticProviderTests(unittest.TestCase):
         self.assertTrue(failure.exception.outcome_unknown)
         writer.provider.summarize.assert_called_once()
 
-    def test_native_output_limit_is_known_failure_not_unknown_or_accepted_text(self):
+    def test_native_truncation_is_known_failure_not_unknown_or_accepted_text(self):
         from ai.openai_provider import OpenAIProvider
-        native = OpenAIProvider.__new__(OpenAIProvider)
-        native.model, native.max_output_tokens = "synthetic-model", 16384
-        native.client = Mock()
-        native.client.chat.completions.create.return_value = SimpleNamespace(choices=[
-            SimpleNamespace(finish_reason="length", message=SimpleNamespace(content='{ "partial":'))])
-        writer = LegacyTextProvider(native, provider_name="synthetic", model=native.model)
-        with self.assertRaises(ProviderError) as error:
-            writer.generate("synthetic input", request_id="r1")
-        self.assertEqual(error.exception.code, "text_output_truncated")
-        self.assertFalse(error.exception.outcome_unknown)
-        self.assertEqual(native.client.chat.completions.create.call_args.kwargs["max_tokens"], 16384)
+        for reason in ("length", "repetition_truncation"):
+            with self.subTest(reason=reason):
+                native = OpenAIProvider.__new__(OpenAIProvider)
+                native.model, native.max_output_tokens = "synthetic-model", 16384
+                native.client = Mock()
+                native.client.chat.completions.create.return_value = SimpleNamespace(choices=[
+                    SimpleNamespace(finish_reason=reason, message=SimpleNamespace(content='{ "partial":'))])
+                writer = LegacyTextProvider(native, provider_name="synthetic", model=native.model)
+                with self.assertRaises(ProviderError) as error:
+                    writer.generate("synthetic input", request_id="r1")
+                self.assertEqual(error.exception.code, "text_output_truncated")
+                self.assertFalse(error.exception.outcome_unknown)
+                self.assertFalse(error.exception.retryable)
+                native.client.chat.completions.create.assert_called_once()
+                self.assertEqual(native.client.chat.completions.create.call_args.kwargs["max_tokens"], 16384)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

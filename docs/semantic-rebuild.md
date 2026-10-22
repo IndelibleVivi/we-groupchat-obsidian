@@ -548,6 +548,11 @@ unknown；每个 job 最多消费一次这种授权。新表
 `job_operator_retry_authorizations` 是 additive metadata，普通初始化只创建空表，
 不自动授权或发送请求。现有 provider-proof reconciliation API 保持原合同。
 
+OpenAI-compatible adapter 将流式与非流式响应中的 `finish_reason="length"`
+及 [MiMo 文档规定的 `repetition_truncation`](https://mimo.mi.com/docs/zh-CN/api/chat/openai-api)
+归为已知 `text_output_truncated`，不交付其部分输出。没有这类明确结束证据的
+中断仍沿用 unknown 规则；本次源码分类修复不能推断历史 unknown 的失败原因。
+
 已知 `text_output_truncated` 的 modern retained-knowledge-v5/indexed-evidence-v1
 页走另一条恢复规则：保留 failed job，精确未完成 core spans 拆成更小的 coverage
 job，冻结 `recovery_of_job_id/recovery_of_attempt/recovery_scope_span_ids` 与原上下文。
