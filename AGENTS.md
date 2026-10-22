@@ -181,7 +181,16 @@
   writes. Unknown provider outcomes stay unknown; never manufacture a successful
   replay. `engine.py` shares extraction/resolution/consolidation between full
   rebuild and live work. Whole-capture membership and every unclassified page
-  must be resolved before semantic ACK. Known defer replans through immutable
+  must be resolved before semantic ACK. Modern v5/indexed extraction pages with
+  a current finished `text_output_truncated` failure, `outcome_unknown=0` and no
+  accepted artifact may continue through exact pending-span coverage splits.
+  Original failed jobs and frozen accepted pages remain unchanged. Recovery binds
+  `recovery_of_job_id`, `recovery_of_attempt` and `recovery_scope_span_ids`; each
+  child has strictly fewer core spans. A single unsplittable span stops with
+  `semantic_extraction_truncation_unsplittable`; unknown or actively leased work never enters
+  this path. Rebuild starts a fresh drained phase within the same freeze/C0 only
+  after new durable known-truncation evidence, never an identical blind retry.
+  Known defer replans through immutable
   context jobs only when Item/View dependencies change; unchanged polls make
   no provider call, and unknown outcomes never become replans. Later batches
   may commit knowledge while processing receipts/applied cursors wait at the
@@ -364,8 +373,8 @@
   history passes, with exact backups, prior navigation and resources. They are
   not semantic `legacy_import` input. Plans without the field retain
   `legacy-semantic-v1`, its original fingerprint and obligations; populated or
-  in-flight generations cannot silently switch policy. No SQL schema migration
-  is required. Every retained pass stays verifier-accountable through run-bound
+  in-flight generations cannot silently switch policy. This history-policy change
+  requires no SQL schema conversion. Every retained pass stays verifier-accountable through run-bound
   payload refs, including a distinct verified whole-database Online Backup per
   freeze; `Legacy/Index.md` links each pass and DB-only or missing-page topics
   have explicit history entries.
@@ -407,6 +416,15 @@
   restored/code/time; legacy `restored=true` followed by a restore error is
   observation-required. Never auto-reconcile unknown work or reset it. Restores
   are recorded as observations, not assumed from an older success field.
+  An explicitly scoped operator grant may separately authorize one retry per
+  exact finished unknown `extract_page` job through
+  `JobStore.authorize_unknown_retries`. Its external validator must check the
+  human grant and entire exact batch, including possible duplicate provider
+  consumption. The separate `job_operator_retry_authorizations` ledger and all
+  selected pending transitions commit atomically. Preserve original unknown
+  attempt evidence and frozen input/version bytes; this is permission, never
+  provider-outcome reconciliation. Reapplying the grant cannot reopen later work,
+  and a later unknown still blocks. No task, log or automatic policy grants it.
   Source/model grants, budget/account setup, installation and activation are
   separate from source tests; see `docs/semantic-rebuild.md`.
   Pre-capture recovery inspects both semantic jobs and reader text artifacts;

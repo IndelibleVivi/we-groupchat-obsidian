@@ -261,6 +261,33 @@ class RebuildCoordinatorTests(unittest.TestCase):
             self.coordinator._process_all(runtime, run_id="synthetic-defer")
         self.assertEqual((len(text.calls), len(decision.calls)), counts)
 
+    def test_full_rebuild_known_truncation_reuses_freeze_and_source_capture(self):
+        from ai.semantic_provider import ProviderError
+        from tests.test_monitor_source import raw_message
+        self.source.shards["shard"]["messages"] = [raw_message("g", i + 10, i, "嗯") for i in range(1, 6)]
+        generate = self.text.generate
+        scopes = []
+        def truncate(prompt, **kwargs):
+            if prompt.startswith("The following captured"):
+                payload = json.loads(prompt.rsplit("\n", 1)[-1])
+                core_count = sum(len(source["spans"]) for source in payload if source["core"])
+                scopes.append((kwargs["request_id"], core_count))
+                if core_count > 1:
+                    raise ProviderError("text_output_truncated", outcome_unknown=False)
+            return generate(prompt, **kwargs)
+        self.text.generate = truncate
+        self.managed.on_restore = self.live_increment
+        self.coordinator.plan(PROFILE, run_id="test-run")
+        result = self.execute()
+        self.assertEqual(result["state"], "run_complete", result)
+        run = journal_details(self.runtime_root, "test-run")
+        self.assertEqual(len(run["freeze_receipts"]), 1)
+        self.assertEqual(len(run["capture_attempts"]), 2)
+        self.assertEqual(len(scopes), 10)  # Nine rebuild tree nodes, one live increment.
+        self.assertEqual(len({request for request, _ in scopes}), 10)
+        self.assertEqual(self.managed.events.count("stopped"), 1)
+        self.assertEqual(self.managed.events.count("restored"), 1)
+
     def test_plan_is_source_free_and_grants_precede_config(self):
         self.config_store.update(lambda value: value.update(semantic_provider_limits={
             "text": {"max_inflight": 2, "requests_per_minute": 30}}))
@@ -1911,6 +1938,68 @@ class RebuildJournalTests(unittest.TestCase):
             with self.assertRaisesRegex(RebuildError, "not_regular"):
                 read_regular(fifo)
         self.assertTrue(opened.call_args.args[1] & os.O_NONBLOCK)
+
+
+
+
+
+class RebuildKnownTruncationTests(unittest.TestCase):
+    def test_same_captured_wave_recovers_in_fresh_drained_phases(self):
+        from tests.test_semantic_engine import KnownTruncationTests, FakeDecision, capture
+        from core.semantic.engine import SemanticEngine
+        from core.semantic.store import SemanticStore
+        from core.semantic.scheduling import ProviderScheduler, ScheduledText
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = SemanticStore(Path(temporary.name).resolve() / "knowledge.sqlite", "synthetic-generation")
+        capture(store, "batch", ["detail " + str(i) for i in range(7)])
+        raw = KnownTruncationTests().provider()
+        scheduler = ProviderScheduler()
+        engine = SemanticEngine(store, ScheduledText(raw, scheduler), FakeDecision())
+        runtime = SimpleNamespace(store=store, engine=engine, scheduler=scheduler,
+            index_all=lambda: {"complete": True}, publish_all=lambda: None)
+        with patch.object(engine, "resolve_batch", return_value={"status": "complete"}), \
+             patch.object(engine, "consolidate", return_value={"status": "unchanged"}), \
+             patch.object(engine, "reconcile_views", return_value={"status": "unchanged"}), \
+             patch.object(store, "capture_batch", side_effect=AssertionError("source must remain frozen")), \
+             patch.object(scheduler, "map", wraps=scheduler.map) as phases:
+            result = RebuildCoordinator.__new__(RebuildCoordinator)._process_all(runtime, run_id="same-run")
+        self.assertTrue(result["index"]["complete"])
+        self.assertGreater(phases.call_count, 1)
+        self.assertEqual(len(raw.scopes), 13)
+        with closing(store.connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM capture_batches").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM extraction_receipts").fetchone()[0], 1)
+
+
+    def test_unknown_or_non_truncation_provider_error_never_starts_another_phase(self):
+        from ai.semantic_provider import ProviderError
+        from tests.test_semantic_engine import FakeText, FakeDecision, capture
+        from core.semantic.engine import SemanticEngine
+        from core.semantic.store import SemanticStore
+        from core.semantic.scheduling import ProviderScheduler, ScheduledText
+        for code, unknown in (("text_output_truncated", True), ("text_provider_failed", False),
+                              ("semantic_extraction_route_mismatch", False)):
+            with self.subTest(code=code):
+                temporary = tempfile.TemporaryDirectory()
+                self.addCleanup(temporary.cleanup)
+                store = SemanticStore(Path(temporary.name).resolve() / "knowledge.sqlite", "synthetic-generation")
+                capture(store, "batch", ["a", "b"])
+                raw = FakeText()
+                calls = []
+                def fail(prompt, **kwargs):
+                    calls.append(kwargs["request_id"])
+                    raise ProviderError(code, outcome_unknown=unknown)
+                raw.generate = fail
+                scheduler = ProviderScheduler()
+                engine = SemanticEngine(store, ScheduledText(raw, scheduler), FakeDecision())
+                runtime = SimpleNamespace(store=store, engine=engine, scheduler=scheduler)
+                with patch.object(scheduler, "map", wraps=scheduler.map) as phases:
+                    with self.assertRaises(ProviderError) as error:
+                        RebuildCoordinator.__new__(RebuildCoordinator)._process_all(runtime, run_id="same-run")
+                self.assertEqual(error.exception.code, code)
+                self.assertEqual(phases.call_count, 1)
+                self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

@@ -1247,5 +1247,83 @@ class SourceFirstHistoryVerificationTests(unittest.TestCase):
         self.assertIn("legacy_history_semantic_contamination", self.codes())
 
 
+
+
+
+class ExtractionRecoveryVerificationTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_semantic_engine import KnownTruncationTests, FakeDecision, capture
+        from core.semantic.engine import SemanticEngine
+        from ai.semantic_provider import ProviderError
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = SemanticStore(Path(temporary.name).resolve() / "knowledge.sqlite", "synthetic-generation")
+        capture(self.store, "batch", ["detail " + str(i) for i in range(5)])
+        provider = KnownTruncationTests().provider()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        for _ in range(15):
+            try:
+                engine.extract_batch("batch")
+                break
+            except ProviderError:
+                pass
+        else:
+            self.fail("recovery did not finish")
+
+    def codes(self):
+        verifier = RebuildVerifier("unused", {})
+        verifier.generation = self.store.generation_id
+        with closing(self.store.connect()) as db:
+            verifier.db = db
+            verifier._verify_extraction_recoveries()
+        return {code for (_, code), count in verifier._issues.items() if count}
+
+    def test_independent_verifier_accepts_exact_recovery_tree(self):
+        self.assertEqual(self.codes(), set())
+
+    def test_unknown_reference_cannot_authorize_recovery(self):
+        with self.store.transaction() as db:
+            db.execute("UPDATE job_attempts SET outcome_unknown=1 WHERE error_code='text_output_truncated'")
+        self.assertIn("extraction_recovery_binding_invalid", self.codes())
+
+    def test_recovery_scope_and_attempt_are_exact(self):
+        with self.store.transaction() as db:
+            row = db.execute("SELECT job_id,inputs_json FROM jobs WHERE kind='extract_coverage' LIMIT 1").fetchone()
+            inputs = json.loads(row["inputs_json"])
+            inputs["recovery_of_attempt"] += 1
+            inputs["pending_span_ids"] = []
+            db.execute("UPDATE jobs SET inputs_json=? WHERE job_id=?", (json.dumps(inputs), row["job_id"]))
+        self.assertIn("extraction_recovery_scope_invalid", self.codes())
+
+    def test_missing_leaf_in_parent_is_rejected(self):
+        with self.store.transaction() as db:
+            row = db.execute("SELECT a.job_id,a.artifact_json FROM jobs j JOIN accepted_job_artifacts a USING(job_id) "
+                "WHERE j.kind='extract'").fetchone()
+            artifact = json.loads(row["artifact_json"])
+            artifact["coverage_page_job_ids"] = []
+            db.execute("UPDATE accepted_job_artifacts SET artifact_json=? WHERE job_id=?",
+                       (json.dumps(artifact), row["job_id"]))
+        self.assertIn("extraction_recovery_leaf_missing", self.codes())
+
+    def test_missing_or_duplicate_scope_is_rejected(self):
+        with self.store.transaction() as db:
+            row = db.execute("SELECT job_id,inputs_json FROM jobs WHERE kind='extract_coverage' LIMIT 1").fetchone()
+            inputs = json.loads(row["inputs_json"])
+            inputs["recovery_scope_span_ids"] = inputs["recovery_scope_span_ids"][:1]
+            db.execute("UPDATE jobs SET inputs_json=? WHERE job_id=?", (json.dumps(inputs), row["job_id"]))
+        self.assertIn("extraction_recovery_coverage_invalid", self.codes())
+
+    def test_self_consistent_frozen_job_cannot_expand_failed_scope(self):
+        with closing(self.store.connect()) as db:
+            row = db.execute("SELECT inputs_json,versions_json FROM jobs WHERE kind='extract_coverage' LIMIT 1").fetchone()
+            inputs, versions = json.loads(row[0]), json.loads(row[1])
+            original = db.execute("SELECT inputs_json FROM jobs WHERE job_id=?", (inputs["recovery_of_job_id"],)).fetchone()
+            original_inputs = json.loads(original[0])
+        inputs.update(page=999, pending_span_ids=original_inputs["span_ids"],
+                      recovery_scope_span_ids=original_inputs["span_ids"], span_ids=original_inputs["span_ids"])
+        JobStore(self.store).ensure("extract_coverage", inputs, versions)
+        self.assertIn("extraction_recovery_scope_invalid", self.codes())
+
+
 if __name__ == "__main__":
     unittest.main()

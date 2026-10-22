@@ -9,6 +9,11 @@ Unknown sent outcomes never become retryable on lease expiry. Reconciliation
 requires an exact generation/job/key/attempt/worker/provider receipt, verified
 by a caller-supplied evidence validator. Its durable evidence remains in the
 existing generation database even after a later attempt or finish.
+
+An operator may authorize one finite batch of exact unknown extract_page
+attempts to return to pending. This is a separate audit decision, not proof of
+the provider outcome. The authorization is consumed once per job; resubmission
+is idempotent and never reopens later work.
 """
 from __future__ import annotations
 
@@ -25,6 +30,10 @@ _RECONCILIATION_FIELDS = frozenset({
     "schema", "receipt_id", "generation_id", "job_id", "job_key", "attempt",
     "worker_id", "request_id", "provider_receipt_id", "outcome", "artifact_hash",
 })
+OPERATOR_RETRY_AUTHORIZATION_SCHEMA = "we-groupchat-obsidian.semantic-operator-retry-authorization.v1"
+OPERATOR_RETRY_ACTION = "operator_authorized_unknown_extract_page_retry"
+_OPERATOR_RETRY_FIELDS = frozenset({"schema", "receipt_id", "action", "generation_id", "jobs"})
+_OPERATOR_RETRY_JOB_FIELDS = frozenset({"job_id", "job_key", "attempt", "worker_id", "finished_at"})
 _STATES = frozenset({"pending", "running", "failed", "unknown", "accepted", "done"})
 
 
@@ -380,3 +389,113 @@ class JobStore:
                 conn.execute("UPDATE jobs SET state='pending',worker_id=NULL,lease_until=NULL,updated_at=? WHERE job_id=?",
                              (now, job_id))
             return self._job(conn, job_id)
+
+    @staticmethod
+    def _operator_retry_authorization(value):
+        receipt = _object(value)
+        _require(set(receipt) == _OPERATOR_RETRY_FIELDS
+                 and receipt["schema"] == OPERATOR_RETRY_AUTHORIZATION_SCHEMA
+                 and receipt["action"] == OPERATOR_RETRY_ACTION,
+                 "semantic_job_operator_authorization_invalid")
+        text(receipt["receipt_id"])
+        text(receipt["generation_id"])
+        jobs = receipt["jobs"]
+        _require(type(jobs) is list and jobs, "semantic_job_operator_authorization_invalid")
+        normalized, job_ids = [], set()
+        for entry in jobs:
+            entry = _object(entry)
+            _require(set(entry) == _OPERATOR_RETRY_JOB_FIELDS,
+                     "semantic_job_operator_authorization_invalid")
+            job_id = text(entry["job_id"])
+            _require(job_id not in job_ids, "semantic_job_operator_authorization_invalid")
+            job_ids.add(job_id)
+            normalized.append({
+                "job_id": job_id,
+                "job_key": text(entry["job_key"]),
+                "attempt": integer(entry["attempt"], 1),
+                "worker_id": text(entry["worker_id"]),
+                "finished_at": timestamp(entry["finished_at"]),
+            })
+        return {**receipt, "jobs": normalized}
+
+    def authorize_unknown_retries(self, authorization, *, validate=None):
+        """Apply one explicit operator retry authorization atomically.
+
+        Only current, finished, unknown ``extract_page`` attempts can be
+        selected. The receipt binds every exact job/attempt/worker/finished-at
+        identity. A successful apply only returns those jobs to ``pending``;
+        the normal claim path creates the next attempt. Repeating an exact
+        receipt returns current job state without reopening work.
+        """
+        receipt = self._operator_retry_authorization(authorization)
+        checked = self._validated(receipt, validate)
+        _require(dumps(checked) == dumps(receipt), "semantic_job_operator_authorization_invalid")
+        _require(receipt["generation_id"] == self.store.generation_id,
+                 "semantic_job_operator_authorization_binding_mismatch")
+        now = self._now()
+        with self.store.transaction() as conn:
+            prior = conn.execute(
+                "SELECT * FROM job_operator_retry_authorizations WHERE receipt_id=? ORDER BY ordinal",
+                (receipt["receipt_id"],),
+            ).fetchall()
+            if prior:
+                _require(
+                    len(prior) == len(receipt["jobs"])
+                    and all(
+                        row["ordinal"] == ordinal
+                        and row["generation_id"] == receipt["generation_id"]
+                        and row["action"] == receipt["action"]
+                        and row["job_id"] == entry["job_id"]
+                        and row["attempt"] == entry["attempt"]
+                        and row["worker_id"] == entry["worker_id"]
+                        and row["finished_at"] == entry["finished_at"]
+                        and row["receipt_json"] == dumps(receipt)
+                        for ordinal, (row, entry) in enumerate(zip(prior, receipt["jobs"]))
+                    ),
+                    "semantic_job_operator_authorization_conflict",
+                )
+                return tuple(self._job(conn, entry["job_id"]) for entry in receipt["jobs"])
+
+            selected = []
+            for entry in receipt["jobs"]:
+                job = self._job(conn, entry["job_id"])
+                _require(job["kind"] == "extract_page"
+                         and job["state"] == "unknown"
+                         and job["job_key"] == entry["job_key"]
+                         and job["attempt"] == entry["attempt"]
+                         and job["worker_id"] == entry["worker_id"],
+                         "semantic_job_operator_authorization_binding_mismatch")
+                _require(self._artifact(conn, job) is None,
+                         "semantic_job_operator_authorization_conflict")
+                attempt = conn.execute(
+                    "SELECT worker_id,finished_at,error_code,outcome_unknown "
+                    "FROM job_attempts WHERE job_id=? AND attempt=?",
+                    (entry["job_id"], entry["attempt"]),
+                ).fetchone()
+                _require(attempt is not None
+                         and attempt["worker_id"] == entry["worker_id"]
+                         and attempt["finished_at"] == entry["finished_at"]
+                         and attempt["error_code"] == "text_provider_failed"
+                         and attempt["outcome_unknown"] == 1,
+                         "semantic_job_operator_authorization_binding_mismatch")
+                _require(conn.execute(
+                    "SELECT 1 FROM job_operator_retry_authorizations WHERE job_id=?",
+                    (entry["job_id"],),
+                ).fetchone() is None, "semantic_job_operator_authorization_conflict")
+                selected.append(entry)
+
+            for ordinal, entry in enumerate(selected):
+                conn.execute(
+                    "INSERT INTO job_operator_retry_authorizations VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (receipt["receipt_id"], ordinal, receipt["generation_id"], receipt["action"],
+                     entry["job_id"], entry["attempt"], entry["worker_id"], entry["finished_at"],
+                     dumps(receipt), now),
+                )
+            for entry in selected:
+                changed = conn.execute(
+                    "UPDATE jobs SET state='pending',worker_id=NULL,lease_until=NULL,updated_at=? "
+                    "WHERE job_id=? AND state='unknown' AND attempt=? AND worker_id=?",
+                    (now, entry["job_id"], entry["attempt"], entry["worker_id"]),
+                ).rowcount
+                _require(changed == 1, "semantic_job_operator_authorization_binding_mismatch")
+            return tuple(self._job(conn, entry["job_id"]) for entry in selected)

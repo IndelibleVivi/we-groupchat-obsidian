@@ -402,16 +402,18 @@ class SemanticEngine:
                 parent_versions["capture_context"] = CAPTURE_CONTEXT_VERSION
         job = self.jobs.ensure("extract", frozen_inputs if frozen else parent_inputs,
                                frozen_versions if frozen else parent_versions)
-        if job["state"] == "unknown":
+        if (job["state"] == "unknown" or job["state"] == "running"
+                and (job["lease_until"] is None or job["lease_until"] > self.store.now_func())):
             raise SemanticValidationError("semantic_job_busy_or_unknown")
         connection = self.store.connect()
         try:
             # Pending work remains binding even if a known metadata disposition
             # removes the need for a new coverage pass.
-            children = list(connection.execute("SELECT j.kind,j.state,j.inputs_json,j.versions_json,a.job_id FROM jobs j "
+            children = list(connection.execute("SELECT j.kind,j.state,j.lease_until,j.inputs_json,j.versions_json,a.job_id FROM jobs j "
                 "LEFT JOIN accepted_job_artifacts a USING(job_id) WHERE j.kind IN ('extract_page','extract_coverage') "
                 "AND json_extract(j.inputs_json,'$.parent_job_id')=?", (job["job_id"],)))
-            if any(row["state"] == "unknown" for row in children):
+            if any(row["state"] == "unknown" or row["state"] == "running"
+                   and (row["lease_until"] is None or row["lease_until"] > self.store.now_func()) for row in children):
                 raise SemanticValidationError("semantic_job_busy_or_unknown")
             frozen_pages, frozen_coverage = {}, {}
             for row in children:
@@ -457,6 +459,7 @@ class SemanticEngine:
             observations, fragment_dispositions, child_ids, routes = {}, {}, [], []
             span_sources = {packet["span_id"]: packet["source_id"] for packet in packets if packet["span_id"]}
             pending_spans = set()
+            truncated_pages = []
             context_sources = tuple(_ContextSource(**{key: value for key, value in source.items() if key != "spans"},
                 source_spans=tuple(SourceSpan(**span) for span in source["spans"]))
                 for source in self.store.extraction_context_sources(job))
@@ -505,6 +508,16 @@ class SemanticEngine:
                             source for source in page_sources if source.source_id not in source_ids)
                     span_ids = tuple(child_inputs["span_ids"])
                 child = self.jobs.ensure("extract_page", child_inputs, child_versions)
+                if self._known_truncation(child):
+                    core_ids = set(child_inputs["core_source_ids"])
+                    core_spans = tuple(identity for identity in span_ids if span_sources.get(identity) in core_ids)
+                    truncated_pages.append((child, core_spans))
+                    pending_spans.update(core_spans)
+                    for identity in core_ids:
+                        fragment_dispositions.setdefault(identity, []).append(
+                            {"status": "unclassified", "reason": "known_output_truncation"})
+                    previous = page
+                    continue
                 artifact = self._accepted_extract_page(child, page_sources, span_ids, namespace, generation)
                 self._finish_artifact(child, artifact)
                 child_ids.append(child["job_id"])
@@ -529,7 +542,8 @@ class SemanticEngine:
                 observations, dispositions, coverage_job_ids = self._cover_unclassified(
                     job, input_sources, unresolved, observations, program_dispositions,
                     fragment_dispositions, cited, namespace, generation, frozen_coverage=frozen_coverage,
-                    pending_span_ids=pending_spans)
+                    pending_span_ids=pending_spans, truncated_pages=truncated_pages,
+                    recovery_context_sources=context_sources)
             result = {"observations": list(observations.values()), "dispositions": dispositions,
                       "route": routes[0] if len(routes) == 1 else None, "page_job_ids": child_ids}
             if coverage_job_ids:
@@ -558,6 +572,27 @@ class SemanticEngine:
             page.append(value)
         if page:
             yield page
+
+    def _known_truncation(self, child):
+        """Only the current finished, known failure can authorize a smaller job."""
+        if (child["versions"].get("unit_policy") != RETAINED_UNIT_POLICY
+                or child["versions"].get("evidence_contract") != INDEXED_EVIDENCE_CONTRACT):
+            return False
+        connection = self.store.connect()
+        try:
+            return connection.execute(
+                "SELECT 1 FROM jobs j JOIN job_attempts t ON t.job_id=j.job_id AND t.attempt=j.attempt "
+                "WHERE j.job_id=? AND j.attempt=? AND j.state='failed' AND t.finished_at IS NOT NULL "
+                "AND t.error_code='text_output_truncated' AND t.outcome_unknown=0 "
+                "AND NOT EXISTS(SELECT 1 FROM accepted_job_artifacts a WHERE a.job_id=j.job_id)",
+                (child["job_id"], child["attempt"])).fetchone() is not None
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _require_splittable(span_ids):
+        if len(span_ids) < 2 or len(set(span_ids)) != len(span_ids):
+            raise SemanticValidationError("semantic_extraction_truncation_unsplittable")
 
     def _accepted_extract_page(self, child, page_sources, span_ids, namespace, generation, *, coverage=False):
         """Run one bounded extraction page through the shared generation/correction path."""
@@ -694,7 +729,7 @@ class SemanticEngine:
 
     def _cover_unclassified(self, job, input_sources, unresolved, observations, program_dispositions,
                             fragment_dispositions, cited, namespace, generation, *, frozen_coverage=None,
-                            pending_span_ids=None):
+                            pending_span_ids=None, truncated_pages=(), recovery_context_sources=()):
         """Bounded adjacent-context re-read of exact pending primary fragments.
 
         Fresh core excludes terminal or already-cited fragments; neighbours
@@ -708,9 +743,55 @@ class SemanticEngine:
                    and (pending_span_ids is None or span.span_id in pending_span_ids)}
         order = list(input_sources)
         positions = {source.source_id: index for index, source in enumerate(order)}
-        by_id = {source.source_id: source for source in order}
+        by_id = {source.source_id: source for source in (*recovery_context_sources, *order)}
         coverage_dispositions, coverage_cited, coverage_covered, child_ids = {}, set(), set(), []
         attempted_spans, attempted_empty = set(), set()
+        next_page = [max(frozen_coverage or {}, default=-1) + 1]
+        recovery_children = {}
+        for inputs, versions in (frozen_coverage or {}).values():
+            if inputs.get("recovery_of_job_id"):
+                recovery_children.setdefault(inputs["recovery_of_job_id"], []).append((inputs, versions))
+
+        def recover(child, core_spans):
+            if not core_spans or any(not by_id[identity].text for identity in child["inputs"]["core_source_ids"]):
+                raise SemanticValidationError("semantic_extraction_truncation_unsplittable")
+            if not any(identity in pending for identity in core_spans):
+                return
+            self._require_splittable(core_spans)
+            inputs = child["inputs"]
+            core_ids = set(inputs["core_source_ids"])
+            available_spans = {span.span_id: span for span in prepare_spans(
+                tuple(by_id[identity] for identity in inputs["source_ids"]), namespace=namespace)}
+            context_spans = tuple(identity for identity in inputs["span_ids"]
+                                  if available_spans[identity].source_id not in core_ids)
+            context_ids = {available_spans[identity].source_id for identity in context_spans}
+            midpoint = (len(core_spans) + 1) // 2
+            scopes = tuple(scope for half in (core_spans[:midpoint], core_spans[midpoint:])
+                           if (scope := tuple(identity for identity in half if identity in pending)))
+            existing = recovery_children.get(child["job_id"], [])
+            if (any(entry[0].get("recovery_of_attempt") != child["attempt"] for entry in existing)
+                    or len(existing) > 2 or len({tuple(entry[0].get("recovery_scope_span_ids", ())) for entry in existing}) != len(existing)
+                    or any(tuple(entry[0].get("recovery_scope_span_ids", ())) not in scopes for entry in existing)):
+                raise SemanticValidationError("semantic_extraction_recovery_scope_conflict")
+            for scope in scopes:
+                frozen = next((entry for entry in existing
+                               if tuple(entry[0].get("recovery_scope_span_ids", ())) == scope), None)
+                if frozen:
+                    run_page(*frozen)
+                    continue
+                selected_core = {available_spans[identity].source_id for identity in scope}
+                recovery_inputs = {"parent_job_id": job["job_id"], "phase": COVERAGE_PHASE,
+                    "page": next_page[0], "span_ids": scope + context_spans,
+                    "source_ids": sorted(selected_core | context_ids),
+                    "core_source_ids": [source.source_id for source in order if source.source_id in selected_core],
+                    "context_span_ids": context_spans, "context_source_ids": sorted(context_ids),
+                    "pending_span_ids": scope, "recovery_of_job_id": child["job_id"],
+                    "recovery_of_attempt": child["attempt"],
+                    "recovery_scope_span_ids": scope}
+                next_page[0] += 1
+                run_page(recovery_inputs, {"prompt": COVERAGE_PROMPT_VERSION,
+                    "unit_policy": RETAINED_UNIT_POLICY, "planning": _COVERAGE_PLANNER_VERSION,
+                    "evidence_contract": INDEXED_EVIDENCE_CONTRACT})
 
         def run_page(child_inputs, child_versions):
             core_ids = child_inputs["core_source_ids"]
@@ -728,6 +809,11 @@ class SemanticEngine:
             identities += [source.source_id for source in order if source.source_id in selected and source.source_id not in identities]
             page_sources = tuple(replace(by_id[identity], core=identity in core_ids) for identity in identities)
             child = self.jobs.ensure("extract_coverage", child_inputs, child_versions)
+            if self._known_truncation(child):
+                if child_versions.get("planning") != _COVERAGE_PLANNER_VERSION:
+                    raise SemanticValidationError("semantic_extraction_recovery_scope_conflict")
+                recover(child, tuple(child_inputs["pending_span_ids"]))
+                return
             artifact = self._accepted_extract_page(child, page_sources, span_ids, namespace, generation,
                                                    coverage=True)
             self._finish_artifact(child, artifact)
@@ -747,13 +833,18 @@ class SemanticEngine:
         # historical child under its own policy. Even accepted-unclassified
         # output is binding: a new version cannot redispatch its same spans.
         for page_no in sorted(frozen_coverage or {}):
-            run_page(*frozen_coverage[page_no])
+            entry = frozen_coverage[page_no]
+            if not entry[0].get("recovery_of_job_id"):
+                run_page(*entry)
+        for child, core_spans in truncated_pages:
+            recover(child, core_spans)
         remaining = pending - attempted_spans
         packets = [asdict(span) for span in available if span.span_id in remaining]
         packets.extend({"source_id": source.source_id, "span_id": None} for source in unresolved
                        if not source.text and source.source_id not in attempted_empty)
-        next_page = max(frozen_coverage or {}, default=-1) + 1
-        for page_no, page in enumerate(self._pages(packets, max_bytes=22000, max_count=24), next_page):
+        for page in self._pages(packets, max_bytes=22000, max_count=24):
+            page_no = next_page[0]
+            next_page[0] += 1
             page_ids = {packet["source_id"] for packet in page}
             context, context_span_ids = self._coverage_context(
                 order, positions, by_id, page_ids, unresolved_ids, namespace)

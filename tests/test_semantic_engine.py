@@ -2160,5 +2160,221 @@ class EngineIntegrationTests(unittest.TestCase):
         self.assertTrue(self.store.list_items())
 
 
+
+
+
+class KnownTruncationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = SemanticStore(Path(temporary.name).resolve() / "knowledge.sqlite", "synthetic-generation")
+
+    def provider(self, maximum=1, unknown=False):
+        class TruncatedText(FakeText):
+            def __init__(provider):
+                super().__init__()
+                provider.scopes = []
+            def generate(provider, prompt, **kwargs):
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                core = [span for source in data if source["core"] for span in source["spans"]]
+                provider.scopes.append((kwargs["request_id"], len(core), data))
+                if len(core) > maximum:
+                    raise ProviderError("text_output_truncated", outcome_unknown=unknown)
+                return super().generate(prompt, **kwargs)
+        return TruncatedText()
+
+    def test_known_failure_splits_finitely_and_replays_accepted_exactly(self):
+        capture(self.store, "batch", ["detail " + str(i) for i in range(7)])
+        provider = self.provider()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        for _ in range(20):
+            try:
+                result = engine.extract_batch("batch")
+                break
+            except ProviderError as exc:
+                self.assertEqual(exc.code, "text_output_truncated")
+        else:
+            self.fail("bounded recovery did not finish")
+        self.assertEqual(len(result["observations"]), 7)
+        requests = [entry[0] for entry in provider.scopes]
+        self.assertEqual(len(requests), len(set(requests)))
+        self.assertEqual([size for _, size, _ in provider.scopes].count(1), 7)
+        with closing(self.store.connect()) as db:
+            failures = list(db.execute("SELECT j.attempt,t.error_code,t.outcome_unknown FROM jobs j "
+                "JOIN job_attempts t ON t.job_id=j.job_id AND t.attempt=j.attempt WHERE j.state='failed'"))
+            self.assertTrue(failures)
+            self.assertTrue(all(tuple(row) == (1, "text_output_truncated", 0) for row in failures))
+            before = list(db.execute("SELECT job_id,artifact_json FROM accepted_job_artifacts ORDER BY job_id"))
+        engine.extract_batch("batch")
+        self.assertEqual(requests, [entry[0] for entry in provider.scopes])
+        with closing(self.store.connect()) as db:
+            self.assertEqual([tuple(r) for r in before], [tuple(r) for r in db.execute(
+                "SELECT job_id,artifact_json FROM accepted_job_artifacts ORDER BY job_id")])
+
+    def test_single_fragment_stops_without_blind_retry(self):
+        capture(self.store, "batch", ["one detail"])
+        provider = self.provider(maximum=0)
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        with self.assertRaises(ProviderError):
+            engine.extract_batch("batch")
+        for _ in range(2):
+            with self.assertRaisesRegex(SemanticValidationError, "truncation_unsplittable"):
+                engine.extract_batch("batch")
+        self.assertEqual(len(provider.scopes), 1)
+
+    def test_unknown_and_running_children_block_all_new_calls(self):
+        for unknown in (True, False):
+            with self.subTest(unknown=unknown):
+                capture(self.store, "batch-" + str(unknown), ["a", "b"])
+                provider = self.provider(unknown=unknown)
+                engine = SemanticEngine(self.store, provider, FakeDecision())
+                with self.assertRaises(ProviderError):
+                    engine.extract_batch("batch-" + str(unknown))
+                if not unknown:
+                    with self.store.transaction() as db:
+                        db.execute("UPDATE jobs SET state='running',lease_until=9999999999 WHERE kind='extract_page' AND state='failed'")
+                with self.assertRaisesRegex(SemanticValidationError, "busy_or_unknown"):
+                    engine.extract_batch("batch-" + str(unknown))
+                self.assertEqual(len(provider.scopes), 1)
+
+    def test_multi_page_recovery_preserves_accepted_page_and_exact_context(self):
+        capture(self.store, "batch", ["detail " + str(i) for i in range(30)])
+        base = self.provider(maximum=2)
+        generate = base.generate
+        def first_page(prompt, **kwargs):
+            data = json.loads(prompt.rsplit("\n", 1)[-1])
+            if len([source for source in data if source["core"]]) == 24:
+                return FakeText.generate(base, prompt, **kwargs)
+            return generate(prompt, **kwargs)
+        base.generate = first_page
+        engine = SemanticEngine(self.store, base, FakeDecision())
+        for _ in range(15):
+            try:
+                result = engine.extract_batch("batch")
+                break
+            except ProviderError:
+                pass
+        else:
+            self.fail("multi-page recovery did not finish")
+        self.assertEqual(len(result["observations"]), 30)
+        with closing(self.store.connect()) as db:
+            primary = [json.loads(row[0]) for row in db.execute(
+                "SELECT inputs_json FROM jobs WHERE kind='extract_page' ORDER BY json_extract(inputs_json,'$.page')")]
+            expected = set(primary[1]["span_ids"]) - set(primary[0]["span_ids"])
+            leaves = [json.loads(row[0]) for row in db.execute(
+                "SELECT j.inputs_json FROM jobs j JOIN accepted_job_artifacts a USING(job_id) WHERE j.kind='extract_coverage'")]
+            self.assertEqual(set().union(*(set(leaf["pending_span_ids"]) for leaf in leaves)), expected)
+            self.assertEqual(sum(len(leaf["pending_span_ids"]) for leaf in leaves), len(expected))
+            self.assertTrue(all(set(leaf["context_span_ids"]) == set(primary[0]["span_ids"]) for leaf in leaves))
+            self.assertEqual(db.execute("SELECT attempt FROM jobs WHERE kind='extract_page' AND "
+                "json_extract(inputs_json,'$.page')=0").fetchone()[0], 1)
+
+    def test_known_coverage_truncation_recovers_without_reissuing_primary(self):
+        capture(self.store, "batch", ["detail " + str(i) for i in range(5)])
+        provider = self.provider(maximum=1)
+        generate = provider.generate
+        primary_calls = []
+        def unclassified_primary(prompt, **kwargs):
+            if "Bounded adjacent context is supplied" not in prompt:
+                primary_calls.append(kwargs["request_id"])
+                return TextResult(json.dumps({"observations": []}), provider.route)
+            return generate(prompt, **kwargs)
+        provider.generate = unclassified_primary
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        for _ in range(15):
+            try:
+                result = engine.extract_batch("batch")
+                break
+            except ProviderError:
+                pass
+        else:
+            self.fail("coverage recovery did not finish")
+        self.assertEqual(len(result["observations"]), 5)
+        self.assertEqual(len(primary_calls), 1)
+        self.assertEqual(len(provider.scopes), 9)
+
+    def test_recovery_retains_prior_capture_context_as_exact_non_core(self):
+        previous = capture(self.store, "previous", ["earlier context"])
+        capture(self.store, "batch", ["detail a", "detail b", "detail c"])
+        provider = self.provider(maximum=1)
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        for _ in range(10):
+            try:
+                result = engine.extract_batch("batch")
+                break
+            except ProviderError:
+                pass
+        else:
+            self.fail("context recovery did not finish")
+        self.assertEqual(len(result["observations"]), 3)
+        for _, _, data in provider.scopes:
+            context = [source for source in data if not source["core"]]
+            self.assertEqual(len(context), 1)
+            self.assertEqual(context[0]["spans"][0]["excerpt"], "earlier context")
+        with closing(self.store.connect()) as db:
+            core_ids = {row[0] for row in db.execute("SELECT source_version_id FROM source_core_jobs")}
+        self.assertTrue(core_ids.isdisjoint(previous["member_version_ids"]))
+
+    def test_cited_primary_context_does_not_reenter_recovery_core(self):
+        capture(self.store, "batch", ["detail " + str(i) for i in range(30)])
+        class ContextCompletes(FakeText):
+            def generate(provider, prompt, **kwargs):
+                provider.calls.append(kwargs["request_id"])
+                data = json.loads(prompt.rsplit("\n", 1)[-1])
+                if sum(source["core"] for source in data) == 24:
+                    raise ProviderError("text_output_truncated", outcome_unknown=False)
+                spans = [span for source in data for span in source["spans"]]
+                return TextResult(json.dumps({"observations": [model_observation(data,
+                    title="Exact joint context", units=[{"kind": "scene", "text": "Synthetic joint content",
+                        "span_indices": list(range(len(spans)))}])]}), provider.route)
+        provider = ContextCompletes()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        with self.assertRaises(ProviderError):
+            engine.extract_batch("batch")
+        result = engine.extract_batch("batch")
+        self.assertEqual(len(result["observations"][0]["spans"]), 30)
+        self.assertEqual(len(provider.calls), 2)
+        with closing(self.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs WHERE kind='extract_coverage'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM source_dispositions WHERE status='observed'").fetchone()[0], 30)
+
+    def test_truncated_single_recovery_leaf_stops_finitely(self):
+        capture(self.store, "batch", ["detail " + str(i) for i in range(7)])
+        provider = self.provider(maximum=0)
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        for _ in range(10):
+            try:
+                engine.extract_batch("batch")
+            except ProviderError:
+                continue
+            except SemanticValidationError as exc:
+                self.assertEqual(exc.code, "semantic_extraction_truncation_unsplittable")
+                break
+            self.fail("no fragment may be silently dropped")
+        else:
+            self.fail("recovery did not stop")
+        self.assertEqual([size for _, size, _ in provider.scopes], [7, 4, 2, 1])
+        before = len(provider.scopes)
+        with self.assertRaisesRegex(SemanticValidationError, "truncation_unsplittable"):
+            engine.extract_batch("batch")
+        self.assertEqual(len(provider.scopes), before)
+        with closing(self.store.connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM extraction_receipts").fetchone()[0], 0)
+
+    def test_fragmentless_known_truncation_has_no_new_coverage_dispatch(self):
+        capture(self.store, "batch", [""])
+        class EmptyTruncated(FakeText):
+            def generate(provider, prompt, **kwargs):
+                provider.calls.append(kwargs["request_id"])
+                raise ProviderError("text_output_truncated", outcome_unknown=False)
+        provider = EmptyTruncated()
+        engine = SemanticEngine(self.store, provider, FakeDecision())
+        with self.assertRaises(ProviderError):
+            engine.extract_batch("batch")
+        with self.assertRaisesRegex(SemanticValidationError, "truncation_unsplittable"):
+            engine.extract_batch("batch")
+        self.assertEqual(len(provider.calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,10 @@ import unittest
 from unittest.mock import patch
 
 from core.semantic.contracts import SemanticStoreError, digest
-from core.semantic.jobs import JobStore, RECONCILIATION_SCHEMA, accepted_artifact_receipt
+from core.semantic.jobs import (
+    JobStore, OPERATOR_RETRY_ACTION, OPERATOR_RETRY_AUTHORIZATION_SCHEMA,
+    RECONCILIATION_SCHEMA, accepted_artifact_receipt,
+)
 from core.semantic.store import SemanticStore
 
 
@@ -52,6 +55,46 @@ class SemanticJobsTests(unittest.TestCase):
         claim = self.jobs.claim(job["job_id"], "worker-a")
         self.jobs.fail(job["job_id"], "worker-a", "provider_timeout", unknown=True)
         return job, claim
+
+    def unknown_extract_page(self, index=0):
+        self.now += 1
+        job = self.ensure(
+            kind="extract_page",
+            inputs={"parent_job_id": "synthetic-parent", "page": index},
+            versions={"prompt": "synthetic-page-v1", "profile": "fixture"},
+        )
+        worker = f"synthetic-page-worker-{index}"
+        claim = self.jobs.claim(job["job_id"], worker)
+        self.jobs.fail(job["job_id"], worker, "text_provider_failed", unknown=True)
+        return job, claim
+
+    def authorization(self, pairs, *, receipt_id="synthetic-operator-retry"):
+        jobs = []
+        for job, claim in pairs:
+            attempt = self.attempt(job["job_id"])
+            self.assertEqual(attempt["attempt"], claim["attempt"])
+            jobs.append({
+                "job_id": job["job_id"],
+                "job_key": job["job_key"],
+                "attempt": attempt["attempt"],
+                "worker_id": attempt["worker_id"],
+                "finished_at": attempt["finished_at"],
+            })
+        return {
+            "schema": OPERATOR_RETRY_AUTHORIZATION_SCHEMA,
+            "receipt_id": receipt_id,
+            "action": OPERATOR_RETRY_ACTION,
+            "generation_id": self.store.generation_id,
+            "jobs": jobs,
+        }
+
+    def attempt(self, job_id):
+        with self.store.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM job_attempts WHERE job_id=? ORDER BY attempt DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        return dict(row)
 
     def receipt(self, job, claim, *, outcome="not_sent", artifact=None):
         return {
@@ -175,6 +218,197 @@ class SemanticJobsTests(unittest.TestCase):
         self.assertIsNone(restarted.accepted(job["job_id"]))
         self.assertEqual(self.rows("jobs")[0]["state"], "unknown")
         self.assertEqual(self.rows("job_attempts")[0]["outcome_unknown"], 1)
+
+    def test_operator_authorization_is_atomic_and_preserves_unknown_attempt_evidence(self):
+        pairs = [self.unknown_extract_page(0), self.unknown_extract_page(1)]
+        receipt = self.authorization(pairs)
+        old_jobs = {row["job_id"]: row for row in self.rows("jobs")}
+        old_attempts = {row["job_id"]: row for row in self.rows("job_attempts")}
+        original = self.store.transaction
+
+        @contextmanager
+        def interrupted():
+            with original() as conn:
+                yield conn
+                raise RuntimeError("synthetic interruption before commit")
+
+        with patch.object(self.store, "transaction", interrupted), self.assertRaises(RuntimeError):
+            self.jobs.authorize_unknown_retries(receipt, validate=self.evidence_validator(receipt))
+        self.assertEqual(self.rows("job_operator_retry_authorizations"), [])
+        self.assertEqual({row["state"] for row in self.rows("jobs")}, {"unknown"})
+
+        authorized = self.jobs.authorize_unknown_retries(
+            receipt, validate=self.evidence_validator(receipt))
+        self.assertEqual([job["state"] for job in authorized], ["pending", "pending"])
+        current_jobs = {row["job_id"]: row for row in self.rows("jobs")}
+        for job, _claim in pairs:
+            before, after = old_jobs[job["job_id"]], current_jobs[job["job_id"]]
+            self.assertEqual(after["job_id"], before["job_id"])
+            self.assertEqual(after["job_key"], before["job_key"])
+            self.assertEqual(after["inputs_json"], before["inputs_json"])
+            self.assertEqual(after["versions_json"], before["versions_json"])
+            self.assertEqual(after["attempt"], before["attempt"])
+            self.assertEqual((after["state"], after["worker_id"], after["lease_until"]),
+                             ("pending", None, None))
+            self.assertEqual(old_attempts[job["job_id"]], self.attempt(job["job_id"]))
+
+        self.assertEqual(len(self.rows("job_operator_retry_authorizations")), 2)
+        for job, _claim in pairs:
+            next_claim = self.jobs.claim(job["job_id"], "retry-worker")
+            self.assertEqual(next_claim["attempt"], 2)
+            artifact = self.jobs.accept(job["job_id"], "retry-worker", {"count": 2},
+                                        validate=validate_count)
+            receipt_id = accepted_artifact_receipt(job["job_id"], artifact)
+            self.assertEqual(self.jobs.finish(job["job_id"], receipt_id)["state"], "done")
+        self.assertEqual({row["state"] for row in self.rows("jobs")}, {"done"})
+
+    def test_operator_authorization_is_idempotent_and_future_unknown_stays_blocked(self):
+        job, claim = self.unknown_extract_page()
+        receipt = self.authorization([(job, claim)])
+        validate = self.evidence_validator(receipt)
+        repeated = self.jobs.authorize_unknown_retries(receipt, validate=validate)
+        self.assertEqual([(entry["state"], entry["attempt"]) for entry in repeated],
+                         [("pending", 1)])
+        second = self.jobs.claim(job["job_id"], "retry-worker")
+        self.assertEqual(second["attempt"], 2)
+        self.jobs.fail(job["job_id"], "retry-worker", "text_provider_failed", unknown=True)
+
+        repeated = self.jobs.authorize_unknown_retries(receipt, validate=validate)
+        self.assertEqual([(entry["state"], entry["attempt"]) for entry in repeated],
+                         [("unknown", 2)])
+        self.assertIsNone(JobStore(self.store).claim(job["job_id"], "later-worker"))
+
+        future = self.authorization(
+            [(job, self.attempt(job["job_id"]))], receipt_id="synthetic-operator-retry-2")
+        with self.assertRaisesRegex(
+                SemanticStoreError, "semantic_job_operator_authorization_conflict"):
+            self.jobs.authorize_unknown_retries(future, validate=self.evidence_validator(future))
+        self.assertEqual(self.rows("jobs")[0]["state"], "unknown")
+        self.assertEqual(self.rows("jobs")[0]["attempt"], 2)
+        self.assertEqual(len(self.rows("job_operator_retry_authorizations")), 1)
+
+    def test_operator_authorization_repeat_does_not_reopen_later_done(self):
+        job, claim = self.unknown_extract_page()
+        receipt = self.authorization([(job, claim)])
+        validate = self.evidence_validator(receipt)
+        self.jobs.authorize_unknown_retries(receipt, validate=validate)
+        self.jobs.claim(job["job_id"], "retry-worker")
+        artifact = self.jobs.accept(job["job_id"], "retry-worker", {"count": 3},
+                                    validate=validate_count)
+        self.jobs.finish(job["job_id"], accepted_artifact_receipt(job["job_id"], artifact))
+        repeated = self.jobs.authorize_unknown_retries(receipt, validate=validate)
+        self.assertEqual([(entry["state"], entry["attempt"]) for entry in repeated],
+                         [("done", 2)])
+        self.assertIsNone(self.jobs.claim(job["job_id"], "later-worker"))
+
+    def test_operator_authorization_rejects_bad_bindings_without_partial_apply(self):
+        pairs = [self.unknown_extract_page(0), self.unknown_extract_page(1)]
+        valid = self.authorization(pairs)
+        variants = []
+        for key in ("generation_id", "action", "schema"):
+            variants.append({**valid, key: "other"})
+        for entry_index in (0, 1):
+            for key in ("job_id", "job_key", "attempt", "worker_id", "finished_at"):
+                jobs = deepcopy(valid["jobs"])
+                jobs[entry_index][key] = "other" if key not in {"attempt", "finished_at"} else 2
+                variants.append({**valid, "jobs": jobs})
+        duplicate = deepcopy(valid)
+        duplicate["jobs"][1] = deepcopy(duplicate["jobs"][0])
+        variants.append(duplicate)
+        variants.append({**valid, "jobs": [*valid["jobs"], {**valid["jobs"][0], "job_key": "other"}]})
+        for receipt in variants:
+            with self.subTest(receipt=receipt), self.assertRaises(SemanticStoreError):
+                self.jobs.authorize_unknown_retries(
+                    receipt, validate=self.evidence_validator(receipt))
+        with self.assertRaisesRegex(SemanticStoreError, "semantic_job_validator_required"):
+            self.jobs.authorize_unknown_retries(valid)
+
+        def boolean_validator(_value):
+            return True
+
+        with self.assertRaisesRegex(SemanticStoreError, "semantic_job_object_required"):
+            self.jobs.authorize_unknown_retries(valid, validate=boolean_validator)
+
+        def altered_validator(value):
+            return {**value, "receipt_id": "altered"}
+
+        with self.assertRaisesRegex(SemanticStoreError,
+                                    "semantic_job_operator_authorization_invalid"):
+            self.jobs.authorize_unknown_retries(valid, validate=altered_validator)
+        self.assertEqual(self.rows("job_operator_retry_authorizations"), [])
+        self.assertEqual({row["state"] for row in self.rows("jobs")}, {"unknown"})
+
+        self.jobs.authorize_unknown_retries(valid, validate=self.evidence_validator(valid))
+        partial = {**valid, "jobs": [valid["jobs"][0]]}
+        with self.assertRaisesRegex(
+                SemanticStoreError, "semantic_job_operator_authorization_conflict"):
+            self.jobs.authorize_unknown_retries(
+                partial, validate=self.evidence_validator(partial))
+        self.assertEqual(len(self.rows("job_operator_retry_authorizations")), 2)
+        self.assertEqual(
+            next(row for row in self.rows("jobs")
+                 if row["job_id"] == valid["jobs"][1]["job_id"])["state"],
+            "pending",
+        )
+
+    def test_operator_authorization_rejects_running_known_artifact_and_scope_collisions(self):
+        running = self.ensure(
+            kind="extract_page", inputs={"parent_job_id": "running", "page": 0},
+            versions={"prompt": "synthetic-page-v1", "profile": "fixture"})
+        running_claim = self.jobs.claim(running["job_id"], "worker-running")
+
+        known = self.unknown_extract_page(1)[0]
+        with self.store.transaction() as conn:
+            conn.execute(
+                "UPDATE job_attempts SET error_code='provider_rejected',outcome_unknown=0 "
+                "WHERE job_id=?", (known["job_id"],))
+            conn.execute("UPDATE jobs SET state='failed' WHERE job_id=?", (known["job_id"],))
+
+        valid_job, _ = self.unknown_extract_page(2)
+        artifact_job, artifact_claim = self.unknown_extract_page(3)
+        artifact = {"count": 4}
+        with self.store.transaction() as conn:
+            conn.execute("INSERT INTO accepted_job_artifacts VALUES(?,?,?,?)",
+                         (artifact_job["job_id"], '{"count":4}', digest(artifact), self.now))
+
+        def entry(job, claim):
+            attempt = self.attempt(job["job_id"])
+            return {"job_id": job["job_id"], "job_key": job["job_key"],
+                    "attempt": claim["attempt"], "worker_id": attempt["worker_id"],
+                    "finished_at": attempt["finished_at"]}
+
+        for selected in (
+            entry(running, running_claim),
+            {**entry(valid_job, {"attempt": 1}), "job_id": known["job_id"],
+             "job_key": known["job_key"]},
+            {**entry(artifact_job, artifact_claim), "job_id": artifact_job["job_id"]},
+        ):
+            receipt = {**self.authorization([]), "jobs": [selected]}
+            with self.subTest(job=selected), self.assertRaises(SemanticStoreError):
+                self.jobs.authorize_unknown_retries(
+                    receipt, validate=self.evidence_validator(receipt))
+        self.assertEqual(self.rows("job_operator_retry_authorizations"), [])
+
+        valid = self.authorization([(valid_job, self.attempt(valid_job["job_id"]))])
+        self.jobs.authorize_unknown_retries(valid, validate=self.evidence_validator(valid))
+        fresh, fresh_claim = self.unknown_extract_page(4)
+        mixed = self.authorization(
+            [(valid_job, self.attempt(valid_job["job_id"])), (fresh, fresh_claim)],
+            receipt_id="synthetic-mixed")
+        with self.assertRaisesRegex(
+                SemanticStoreError,
+                "semantic_job_operator_authorization_(binding_mismatch|conflict)"):
+            self.jobs.authorize_unknown_retries(mixed, validate=self.evidence_validator(mixed))
+        self.assertEqual(len(self.rows("job_operator_retry_authorizations")), 1)
+        self.assertEqual(next(row for row in self.rows("jobs")
+                              if row["job_id"] == fresh["job_id"])["state"], "unknown")
+
+        modified = deepcopy(valid)
+        modified["jobs"][0]["worker_id"] = "other-worker"
+        with self.assertRaisesRegex(
+                SemanticStoreError, "semantic_job_operator_authorization_conflict"):
+            self.jobs.authorize_unknown_retries(
+                modified, validate=self.evidence_validator(modified))
 
     def test_exact_not_sent_reconciliation_permits_retry_and_retains_evidence(self):
         job, claim = self.unknown()

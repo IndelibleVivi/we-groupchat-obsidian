@@ -531,6 +531,33 @@ provider request ID；不输出 error body、prompt、endpoint、凭据或任意
 HTTP status 与诊断日志只帮助查找原服务记录，不能单独终结 unknown、证明完整输出
 或授权重发。logger 故障同样不改变原 job outcome 或既有 usage 账本。
 
+对无法取得原服务证据的 unknown `extract_page`，操作者可以另行明确授权一个
+有限精确批次，各开放一次新 attempt。这不是 provider-outcome reconciliation：
+原 `outcome_unknown=1`、error、时间、worker、job key、input/version bytes 全部保留。
+`JobStore.authorize_unknown_retries(authorization, validate=verify_operator_authorization)`
+要求外部 validator 核实真实人工授权及完整批次；validator 必须返回同一 validated
+对象，不能只返回 boolean。授权对象使用
+`we-groupchat-obsidian.semantic-operator-retry-authorization.v1`，含独立 `receipt_id`、
+`action="operator_authorized_unknown_extract_page_retry"`、`generation_id` 和有序
+`jobs` 列表；每项精确绑定 `job_id/job_key/attempt/worker_id/finished_at`。
+调用方必须先保全当前数据库，并确认操作者接受可能重复的模型用量。
+只有当前已 finished、没有 accepted artifact、最后错误为 `text_provider_failed`
+且 unknown 的页符合条件。授权 audit 与全批 unknown→pending 在同一事务完成；
+实际第二次 attempt 仍由正常 claim 创建。重复授权幂等，不能重开后来的 done 或
+unknown；每个 job 最多消费一次这种授权。新表
+`job_operator_retry_authorizations` 是 additive metadata，普通初始化只创建空表，
+不自动授权或发送请求。现有 provider-proof reconciliation API 保持原合同。
+
+已知 `text_output_truncated` 的 modern retained-knowledge-v5/indexed-evidence-v1
+页走另一条恢复规则：保留 failed job，精确未完成 core spans 拆成更小的 coverage
+job，冻结 `recovery_of_job_id/recovery_of_attempt/recovery_scope_span_ids` 与原上下文。
+已终结或已引用的 primary fragment 不能重新进入 core。每层严格缩小 scope，所有
+叶子接受并完成整批 coverage 前不允许 ACK；原 accepted artifacts 不重写、不重发。
+rebuild 只在新增 durable known-truncation 证据后开启 fresh bounded phase，沿用同一
+freeze/C0，不重新读取 source。unknown、有效 running lease、provider/route 错误不会触发这个
+循环。单片段仍超限时返回 `semantic_extraction_truncation_unsplittable`，需要明确的
+后续操作决策；系统不自动更换模型、关闭 thinking、提高 cap 或重复原请求。
+
 若需要只修复运行时的恢复观察、又不继续 source/model 阶段，先看计划，再显式应用：
 
 ```bash

@@ -70,6 +70,12 @@ Fresh extraction treats units as retained knowledge and connected scenes, not a
 message directory or provenance audit; older page jobs keep their frozen policy
 and results.
 
+Known modern extraction output limits preserve the failed page and continue through
+smaller exact-coverage jobs. Unknown provider outcomes still block; a separate,
+explicit operator authorization may permit one new attempt for a finite set of
+exact extraction pages, retaining the original unknown evidence and accepting
+possible duplicate model usage. See [rebuild recovery](docs/semantic-rebuild.md).
+
 SQLite remains the canonical store. Embeddings can use an explicitly configured
 loopback model service or Cloudflare BGE-M3; derived retrieval can use the local
 cosine index or Cloudflare Vectorize. Text generation and typed decisions have

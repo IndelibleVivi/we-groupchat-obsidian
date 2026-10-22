@@ -326,12 +326,96 @@ class RebuildVerifier:
                 self.issue("accepted_job_identity_mismatch")
             if job is not None and job["kind"] == "extract":
                 self._verify_extraction_inputs(job)
+        self._verify_extraction_recoveries()
         for jid, row in self.extractions.items():
             receipt = _load(row["receipt_json"])
             if (receipt.get("receipt_id") != row["receipt_id"] or receipt.get("job_id") != jid
                     or receipt.get("batch_id") != row["batch_id"] or receipt.get("generation_id") != self.generation
                     or set(receipt.get("observation_ids", ())) - self.observations.keys()):
                 self.issue("extraction_receipt_invalid")
+
+    def _verify_extraction_recoveries(self):
+        """Check recovery provenance and exact disjoint leaf conservation independently."""
+        from .engine import CapturedSource, prepare_spans
+        for reference in self.db.execute("SELECT DISTINCT json_extract(inputs_json,'$.recovery_of_job_id') "
+                "FROM jobs WHERE kind='extract_coverage' AND json_extract(inputs_json,'$.recovery_of_job_id') IS NOT NULL"):
+            original = self.db.execute("SELECT * FROM jobs WHERE job_id=?", (reference[0],)).fetchone()
+            if original is None:
+                self.issue("extraction_recovery_binding_invalid")
+                continue
+            original_inputs, original_versions = _load(original["inputs_json"]), _load(original["versions_json"])
+            parent_id = original_inputs.get("parent_job_id")
+            parent = self.db.execute("SELECT * FROM jobs WHERE job_id=? AND kind='extract'", (parent_id,)).fetchone()
+            attempt = self.db.execute("SELECT * FROM job_attempts WHERE job_id=? AND attempt=?",
+                                      (original["job_id"], original["attempt"])).fetchone()
+            if (parent is None or original["kind"] not in {"extract_page", "extract_coverage"}
+                    or original["state"] != "failed" or attempt is None or attempt["finished_at"] is None
+                    or attempt["error_code"] != "text_output_truncated" or attempt["outcome_unknown"] != 0
+                    or original_versions.get("unit_policy") != "retained-knowledge-v5"
+                    or original_versions.get("evidence_contract") != "indexed-evidence-v1"
+                    or self.db.execute("SELECT 1 FROM accepted_job_artifacts WHERE job_id=?", (original["job_id"],)).fetchone()):
+                self.issue("extraction_recovery_binding_invalid")
+                continue
+            parent_inputs = _load(parent["inputs_json"])
+            span_sources = {span.span_id: span.source_id for span in prepare_spans(
+                tuple(CapturedSource(**member) for member in parent_inputs["members"]), namespace=self.generation)}
+            span_sources.update({span["span_id"]: span["source_id"]
+                                 for span in parent_inputs.get("preceding_context", {}).get("spans", ())})
+            original_core = set(original_inputs["core_source_ids"])
+            full_scope = tuple(original_inputs["pending_span_ids"]) if original["kind"] == "extract_coverage" else tuple(
+                identity for identity in original_inputs["span_ids"] if span_sources.get(identity) in original_core)
+            cited = set()
+            for row in self.db.execute("SELECT a.artifact_json FROM jobs j JOIN accepted_job_artifacts a USING(job_id) "
+                    "WHERE j.kind='extract_page' AND json_extract(j.inputs_json,'$.parent_job_id')=?", (parent_id,)):
+                cited.update(span["span_id"] for observation in _load(row[0])["observations"] for span in observation["spans"])
+            middle = (len(full_scope) + 1) // 2
+            expected_scopes = {scope for half in (full_scope[:middle], full_scope[middle:])
+                               if (scope := tuple(identity for identity in half if identity not in cited))}
+            expected_context = tuple(identity for identity in original_inputs["span_ids"]
+                                     if span_sources.get(identity) not in original_core)
+            context_ids = {span_sources.get(identity) for identity in expected_context}
+            children = list(self.db.execute("SELECT * FROM jobs WHERE kind='extract_coverage' "
+                "AND json_extract(inputs_json,'$.recovery_of_job_id')=?", (original["job_id"],)))
+            scopes = []
+            parent_artifact_row = self.db.execute("SELECT artifact_json FROM accepted_job_artifacts WHERE job_id=?", (parent_id,)).fetchone()
+            parent_artifact = _load(parent_artifact_row[0]) if parent_artifact_row else None
+            if parent_artifact is not None and original["job_id"] in (
+                    parent_artifact.get("page_job_ids", ()) + parent_artifact.get("coverage_page_job_ids", ())):
+                self.issue("extraction_recovery_leaf_missing")
+            for child in children:
+                inputs, versions = _load(child["inputs_json"]), _load(child["versions_json"])
+                scope = tuple(inputs.get("recovery_scope_span_ids", ()))
+                scopes.append(scope)
+                core_ids = {span_sources.get(identity) for identity in scope}
+                if (len(full_scope) < 2 or not scope or len(scope) >= len(full_scope)
+                        or inputs.get("parent_job_id") != parent_id or inputs.get("recovery_of_attempt") != original["attempt"]
+                        or tuple(inputs.get("pending_span_ids", ())) != scope
+                        or tuple(inputs.get("span_ids", ())) != scope + expected_context
+                        or tuple(inputs.get("context_span_ids", ())) != expected_context
+                        or set(inputs.get("core_source_ids", ())) != core_ids
+                        or set(inputs.get("context_source_ids", ())) != context_ids
+                        or set(inputs.get("source_ids", ())) != core_ids | context_ids
+                        or versions != {"prompt": "semantic-extraction-coverage-v2", "unit_policy": "retained-knowledge-v5",
+                                        "planning": "pending-fragments-v1", "evidence_contract": "indexed-evidence-v1"}
+                        or child["job_id"] != "job_" + child["job_key"]
+                        or child["job_key"] != _hash({"generation_id": self.generation, "kind": child["kind"],
+                                                     "inputs": inputs, "versions": versions})):
+                    self.issue("extraction_recovery_scope_invalid")
+                accepted = self.db.execute("SELECT artifact_json FROM accepted_job_artifacts WHERE job_id=?", (child["job_id"],)).fetchone()
+                if parent_artifact is not None and accepted is not None:
+                    artifact = _load(accepted[0])
+                    if (child["job_id"] not in parent_artifact.get("coverage_page_job_ids", ())
+                            or any(observation not in parent_artifact["observations"] for observation in artifact["observations"])):
+                        self.issue("extraction_recovery_leaf_missing")
+                elif parent_artifact is not None and not self.db.execute("SELECT 1 FROM jobs WHERE "
+                        "json_extract(inputs_json,'$.recovery_of_job_id')=? LIMIT 1", (child["job_id"],)).fetchone():
+                    self.issue("extraction_recovery_leaf_missing")
+            if len(scopes) != len(set(scopes)) or set(scopes) != expected_scopes:
+                self.issue("extraction_recovery_coverage_invalid")
+            if (original["job_id"] != "job_" + original["job_key"]
+                    or original["job_key"] != _hash({"generation_id": self.generation, "kind": original["kind"],
+                                                    "inputs": original_inputs, "versions": original_versions})):
+                self.issue("extraction_recovery_binding_invalid")
 
     def _verify_extraction_inputs(self, job):
         inputs, versions = _load(job["inputs_json"]), _load(job["versions_json"])

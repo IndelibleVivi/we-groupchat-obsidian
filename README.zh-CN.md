@@ -77,6 +77,10 @@ SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务
 专用 archive producer、profile 与菜单已移至外部 adapter；公共 WGO 保留通用 source/capture、
 显式 context capture、CAS 和 mounted backup。
 
+当前版本的已知抽取输出超限会保留失败页，通过更小的精确 coverage jobs 继续。未知 provider
+结果仍阻断；独立、明确的人工授权可以为有限的一组精确抽取页各开放一次新 attempt，
+保留原 unknown 证据，并接受可能重复的模型用量。见[迁移恢复规则](docs/semantic-rebuild.md)。
+
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![macOS](https://img.shields.io/badge/macOS-only-lightgrey)
 ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)

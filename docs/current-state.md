@@ -35,7 +35,15 @@ is implied by this document.
   through normalized SDK exceptions. They omit error bodies, prompts, credentials,
   endpoints and arbitrary caller labels. Diagnostic failure cannot change the
   original job outcome; unknown requests still require independently verified
-  evidence before reconciliation. Historical failures gain no new evidence.
+  evidence before provider-outcome reconciliation. Historical failures gain no
+  new evidence. A separately validated, finite operator grant may authorize one
+  new attempt for exact unknown extraction pages while retaining the unknown
+  evidence; it is not an automatic retry or a claim about the old response.
+- Known output-truncated modern extraction pages retain their failed attempts
+  and continue through smaller, frozen pending-span coverage jobs. Accepted pages
+  remain exact; every recovery child reduces core scope, and one unsplittable
+  fragment stops. Rebuild drains the failed phase and continues under the same
+  freeze/C0; unknown outcomes, active leases and other errors cannot enter that loop.
 - Product-specific private adapters are outside this public repository. Generic
   resource capture, context retention by explicit injection, CAS and v3 snapshot
   transport remain supported building blocks.

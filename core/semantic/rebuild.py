@@ -1810,7 +1810,40 @@ class RebuildCoordinator:
             runtime.engine.extract_batch(batch_id)
 
         for wave in sorted(waves):
-            runtime.scheduler.map("text", waves[wave], prepare_extraction)
+            recovered_failures = set()
+            while True:
+                try:
+                    runtime.scheduler.map("text", waves[wave], prepare_extraction)
+                    break
+                except Exception as exc:
+                    if (getattr(exc, "code", None) != "text_output_truncated"
+                            or getattr(exc, "outcome_unknown", True)):
+                        raise
+                    # map has stopped and drained its phase. Only new, durable
+                    # known-size failures justify another phase of this SAME
+                    # captured wave; engine recovery strictly halves core scope.
+                    with closing(runtime.store.connect()) as conn:
+                        blocked = conn.execute("SELECT 1 FROM jobs WHERE (state='unknown' OR "
+                            "(state='running' AND (lease_until IS NULL OR lease_until>?))) "
+                            "AND kind IN ('extract','extract_page','extract_coverage') LIMIT 1",
+                            (runtime.store.now_func(),)).fetchone()
+                        other_failure = conn.execute(
+                            "SELECT 1 FROM jobs j JOIN job_attempts t ON t.job_id=j.job_id AND t.attempt=j.attempt "
+                            "WHERE j.state='failed' AND j.kind IN ('extract_page','extract_coverage') "
+                            "AND (t.error_code IS NULL OR t.error_code!='text_output_truncated' "
+                            "OR t.outcome_unknown!=0) LIMIT 1").fetchone()
+                        failures = {row[0] for row in conn.execute(
+                            "SELECT j.job_id FROM jobs j JOIN job_attempts t "
+                            "ON t.job_id=j.job_id AND t.attempt=j.attempt "
+                            "WHERE j.state='failed' AND j.kind IN ('extract_page','extract_coverage') "
+                            "AND json_extract(j.versions_json,'$.unit_policy')='retained-knowledge-v5' "
+                            "AND json_extract(j.versions_json,'$.evidence_contract')='indexed-evidence-v1' "
+                            "AND t.finished_at IS NOT NULL AND t.error_code='text_output_truncated' "
+                            "AND t.outcome_unknown=0 AND NOT EXISTS "
+                            "(SELECT 1 FROM accepted_job_artifacts a WHERE a.job_id=j.job_id)")}
+                    if blocked or other_failure or not failures - recovered_failures:
+                        raise
+                    recovered_failures.update(failures)
         index = runtime.index_all()
         if index.get("complete") is not True:
             raise RebuildError(index.get("code", "rebuild_index_pending"))
