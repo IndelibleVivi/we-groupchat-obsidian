@@ -59,6 +59,19 @@ is implied by this document.
   checks. Each file still binds a fresh descriptor to its current absolute-path
   identity. Unsupported platforms retain strict path traversal; directory
   replacement and interruptions must not yield a partial lookup or leak handles.
+  History publication additionally uses a scoped complete-root preflight,
+  individual exact body/file/annotation/ledger checks, and fresh target checks
+  plus a final complete-root scan after navigation receipts are recorded.
+  Unchanged pages reuse receipts without rewriting reader rows or files.
+  The rebuild coordinator explicitly admits snapshot-based identity lookups only
+  in its exact unpublished staging root; writes still use the canonical publisher's
+  target ownership, manual-conflict and double-CAS checks. Native metadata gaps
+  and ordinary app writes retain strict per-document lookup. Partial output stays
+  candidate evidence until the whole pass and independent verification succeed.
+  The context retains metadata and integrity bindings rather than body corpora.
+  Recreating a missing generated page retains its annotation revision; absence
+  alone is not an observed personal edit. Existing personal bytes still use the
+  ordinary annotation and manual-conflict rules.
 - Source tests, complete migration verification, application build, installation,
   activation, actual incremental acceptance and any remote publication are
   separate evidence. This file makes no claim about a particular live runtime.

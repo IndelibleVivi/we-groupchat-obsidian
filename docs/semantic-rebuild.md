@@ -313,8 +313,23 @@ metadata 与有界 ID，不保留正文/header/artifact，正常或异常退出�
 保持原样。支持相关 POSIX API 时，history lookup 使用目录相对的 no-follow open，
 按目录执行祖先检查和前后身份核验；每个文件仍独立比对新 fd 与当前 absolute path。
 不支持时保留 strict path 遍历，目录替换或中断不能返回局部结果，所有 descriptor 都需关闭。
-这减少重复 byte parsing 与逐文件重复祖先检查，完整目录/metadata 工作仍随文档数与文件数相乘，
-不构成全量时长或内存上限保证。
+未变化的历史导航另走 `publisher.history_publication` 的只读重验：先完整扫描当前
+ownership，每次只准备并核对一页正文、完整文件字节、properties、annotation、pending
+proposal 与 ledger。确认完全相同才复用 `unchanged` 回执，不改 reader row 或页面。
+该 context 必须覆盖本轮导航回执写入，退出前重读已接受的 targets/ledger，再完整扫描
+当前 root 的身份与重复项；任何中途改动均阻止本轮 publication 成功。只保留 metadata
+和精确校验绑定，不攒整批正文。普通调用的改页、缺页仍走完整逐页 identity lookup。
+重建 coordinator 的 `_preserve_history` 先核对 publisher 与本 run 的精确 staging root，
+再显式启用 `staged_history=True`：本轮预检的完整 ownership 只供这个未发布 pass 的
+canonical `publish_document` 查找使用；逐页 target ownership、manual conflict 和双重
+完整文件 hash CAS 不变。新页、改页和复用回执都须通过批末的文件/ledger 核对与全 root
+扫描。并发新增重复身份可能在批末发现；此时整轮不成功，不能写成功 declaration 或激活，
+保留的候选文件与局部回执供正常恢复。普通 app、resolve 与其他调用者不使用此暂存优化。
+完整重放和 staged 首次发布均需两次 root scan；非 POSIX、metadata 不足等场景保留原严格
+路径。此优化不改变 immutable history、jobs、游标、独立完整验收或激活条件，也不构成
+全量时长或内存上限保证。
+缺失 generated 页按现有 ledger 重建时，文件缺失本身不推进 annotation revision；
+只有实际读到的既有页面字节变化才记作 annotation 变更。人工内容和冲突仍由原路径处理。
 parallel wave 准备只读取轻量 batch metadata（`batch_id` 与 capture order），再
 逐 batch 读取 core members 计算 overlap-owner wave，不预先解出全部 capture
 receipt 或保留全部 member 副本；它仍不持有 DB 事务或 projection lock。

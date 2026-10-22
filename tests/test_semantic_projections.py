@@ -270,6 +270,188 @@ class ItemPathTests(ReadingHarness):
 
 
 class ProjectionTests(ReadingHarness):
+    def _history_documents(self, count=4):
+        documents = [dict(object_id=f"history-{index}", path=f"Legacy/{index}.md", title="History",
+                          body="Exact history body.", content_revision=1)
+                     for index in range(count)]
+        for document in documents:
+            self.publisher.publish_document(**document)
+        return documents
+
+    def test_history_revalidation_preserves_rows_bytes_mtimes_and_releases_each_body(self):
+        import weakref
+        class Body(str):
+            pass
+        documents = self._history_documents()
+        rows = [dict(self.publisher.record(d["object_id"])) for d in documents]
+        before = [(self.publisher.read(d["path"]), (self.publisher.root / d["path"]).stat().st_mtime_ns)
+                  for d in documents]
+        with patch.object(self.publisher, "_identity_paths", wraps=self.publisher._identity_paths) as scanned, \
+             patch.object(self.publisher, "atomic_write", side_effect=AssertionError("read only")):
+            with self.publisher.history_publication() as reuse:
+                for document in documents:
+                    body = Body(document["body"])
+                    held = weakref.ref(body)
+                    receipt = reuse(**{**document, "body": body})
+                    self.assertEqual(receipt.status, "unchanged")
+                    del body
+                    self.assertIsNone(held(), "publication retained a prepared body")
+            self.assertEqual(scanned.call_count, 2)
+        self.assertEqual(rows, [dict(self.publisher.record(d["object_id"])) for d in documents])
+        self.assertEqual(before, [(self.publisher.read(d["path"]),
+                         (self.publisher.root / d["path"]).stat().st_mtime_ns) for d in documents])
+        self.assertFalse(hasattr(self.publisher._lock_local, "identity_cache"))
+
+    def test_history_revalidation_falls_back_on_same_size_edit_annotation_and_pending_proposal(self):
+        documents = self._history_documents()
+        # A body edit preserves exact manual bytes and goes to the old proposal path.
+        target = self.publisher.root / documents[0]["path"]
+        original, before = target.read_bytes(), target.stat()
+        changed = original.replace(b"Exact", b"Other")
+        target.write_bytes(changed)
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with patch.object(self.publisher, "publish_document", wraps=self.publisher.publish_document) as strict:
+            with self.publisher.history_publication() as publish:
+                self.assertEqual(publish(**documents[0]).status, "conflict")
+                self.assertEqual(publish(**documents[3]).status, "unchanged")
+            self.assertEqual(strict.call_count, 1)
+        self.assertEqual(target.read_bytes(), changed)
+        # An annotation is retained while the strict publisher advances its own property.
+        target = self.publisher.root / documents[1]["path"]
+        target.write_bytes(target.read_bytes() + b"Personal annotation.\n")
+        with patch.object(self.publisher, "publish_document", wraps=self.publisher.publish_document) as strict:
+            with self.publisher.history_publication() as publish:
+                publish(**documents[1])
+            self.assertEqual(strict.call_count, 1)
+        self.assertTrue(target.read_bytes().endswith(b"Personal annotation.\n"))
+        # A pending proposal cannot qualify for reuse or successful completion.
+        target = self.publisher.root / documents[2]["path"]
+        original = target.read_bytes()
+        target.write_bytes(original.replace(b"Exact", b"Other"))
+        self.assertEqual(self.publisher.publish_document(**documents[2]).status, "conflict")
+        target.write_bytes(original)
+        with patch.object(self.publisher, "publish_document", wraps=self.publisher.publish_document) as strict:
+            with self.assertRaisesRegex(ReadingError, "projection_file_changed"):
+                with self.publisher.history_publication() as publish:
+                    publish(**documents[2])
+            self.assertEqual(strict.call_count, 1)
+        with patch.object(self.publisher, "_supports_identity_descriptors", return_value=False), \
+             patch.object(self.publisher, "publish_document", wraps=self.publisher.publish_document) as strict:
+            with self.publisher.history_publication() as publish:
+                self.assertEqual(publish(**documents[3]).status, "unchanged")
+            self.assertEqual(strict.call_count, 1)
+
+    def test_history_revalidation_rejects_late_replacement_and_late_ledger_change(self):
+        documents = self._history_documents()
+        target = self.publisher.root / documents[0]["path"]
+        original = target.read_bytes()
+        with self.assertRaisesRegex(ReadingError, "projection_file_changed"):
+            with self.publisher.history_publication() as reuse:
+                self.assertEqual(reuse(**documents[0]).status, "unchanged")
+                replacement = target.with_suffix(".replacement")
+                replacement.write_bytes(original)
+                os.replace(replacement, target)
+        self.assertEqual(target.read_bytes(), original)
+        with self.assertRaisesRegex(ReadingError, "projection_file_changed"):
+            with self.publisher.history_publication() as reuse:
+                self.assertEqual(reuse(**documents[0]).status, "unchanged")
+                with self.publisher.ledger.transaction() as conn:
+                    conn.execute("UPDATE reader_projections SET annotation_revision=annotation_revision+1 "
+                                 "WHERE object_id=?", (documents[0]["object_id"],))
+
+    def test_history_revalidation_detects_duplicate_outside_requested_subset(self):
+        documents = self._history_documents()
+        duplicate = self.publisher.root / "unrequested-duplicate.md"
+        with self.assertRaisesRegex(ReadingError, "projection_identity_collision"):
+            with self.publisher.history_publication() as reuse:
+                self.assertEqual(reuse(**documents[0]).status, "unchanged")
+                duplicate.write_bytes(self.publisher.read(documents[-1]["path"]))
+
+    def test_staged_history_cold_writes_scan_twice_and_leave_ordinary_lookup_strict(self):
+        documents = [dict(object_id=f"cold-history-{i}", path=f"Legacy/{i}.md", title="History",
+                          body=f"Exact retained history {i}.", content_revision=1) for i in range(40)]
+        with patch.object(self.publisher, "_identity_paths", wraps=self.publisher._identity_paths) as scanned:
+            with self.publisher.history_publication(staged_writes=True) as publish:
+                for document in documents:
+                    self.assertEqual(publish(**document).status, "published")
+            self.assertEqual(scanned.call_count, 2)
+        self.assertFalse(hasattr(self.publisher._lock_local, "history_lookup"))
+        with patch.object(self.publisher, "_find_id_paths", wraps=self.publisher._find_id_paths) as ordinary:
+            self.assertEqual(self.publisher.resolve(documents[-1]["object_id"]), documents[-1]["path"])
+        self.assertEqual(ordinary.call_count, 1)
+        for document in documents:
+            self.assertEqual(region_body(self.publisher.read(document["path"]).decode(), "body").strip(),
+                             document["body"])
+
+    def test_staged_history_cold_writes_block_late_duplicates_and_keep_cas(self):
+        first = dict(object_id="cold-first", path="Legacy/First.md", title="History", body="First", content_revision=1)
+        second = {**first, "object_id": "cold-second", "path": "Legacy/Second.md"}
+        duplicate = self.publisher.root / "concurrent-duplicate.md"
+        with self.assertRaisesRegex(ReadingError, "projection_identity_collision"):
+            with self.publisher.history_publication(staged_writes=True) as publish:
+                publish(**first)
+                duplicate.write_bytes(self.publisher.read(first["path"]))
+                publish(**second)
+        self.assertEqual(duplicate.read_bytes(), self.publisher.read(first["path"]))
+        self.assertFalse(hasattr(self.publisher._lock_local, "history_lookup"))
+
+    def test_staged_history_does_not_overwrite_foreign_content_created_after_preflight(self):
+        document = dict(object_id="new-history", path="New.md", title="History", body="New", content_revision=1)
+        exact = b'---\nwgo_id: "somebody-else"\n---\nPersonal bytes.\n'
+        with self.assertRaisesRegex(ReadingError, "projection_path_collision"):
+            with self.publisher.history_publication(staged_writes=True) as publish:
+                (self.publisher.root / document["path"]).write_bytes(exact)
+                publish(**document)
+        self.assertEqual(self.publisher.read(document["path"]), exact)
+        self.assertIsNone(self.publisher.record(document["object_id"]))
+        self.assertFalse(hasattr(self.publisher._lock_local, "history_lookup"))
+
+    def test_history_publication_callback_cannot_escape_scope_or_cross_threads(self):
+        import concurrent.futures
+        document = dict(object_id="scoped-history", path="Scoped.md", title="History", body="Scoped", content_revision=1)
+        with self.publisher.history_publication(staged_writes=True) as publish:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(publish, **document)
+                with self.assertRaisesRegex(ReadingError, "history_publication_thread_mismatch"):
+                    future.result(timeout=2)
+            self.assertIsNone(self.publisher.record(document["object_id"]))
+        with self.assertRaisesRegex(ReadingError, "history_publication_closed"):
+            publish(**document)
+        self.assertIsNone(self.publisher.record(document["object_id"]))
+        self.assertFalse(hasattr(self.publisher._lock_local, "identity_cache"))
+
+    def test_staged_history_without_native_identity_uses_ordinary_lookup_for_each_write(self):
+        documents = [dict(object_id=f"fallback-{i}", path=f"Fallback/{i}.md", title="History",
+                          body="Retained", content_revision=1) for i in range(3)]
+        with patch.object(self.publisher, "_supports_identity_descriptors", return_value=False), \
+             patch.object(self.publisher, "_find_id_paths", wraps=self.publisher._find_id_paths) as ordinary:
+            with self.publisher.history_publication(staged_writes=True) as publish:
+                for document in documents:
+                    self.assertEqual(publish(**document).status, "published")
+        self.assertEqual(ordinary.call_count, len(documents))
+        self.assertFalse(hasattr(self.publisher._lock_local, "history_lookup"))
+
+    def test_history_publication_does_not_retain_oversized_unrelated_identity(self):
+        unrelated = self.publisher.root / "Unrelated.md"
+        unrelated.write_text('---\nwgo_id: "' + 'x' * 5000 + '"\n---\nUnrelated bytes.\n')
+        document = dict(object_id="bounded-history", path="Bounded.md", title="History", body="Exact", content_revision=1)
+        with patch.object(self.publisher, "_find_id_descriptors", wraps=self.publisher._find_id_descriptors) as strict:
+            with self.publisher.history_publication(staged_writes=True) as publish:
+                self.assertEqual(publish(**document).status, "published")
+        self.assertEqual(strict.call_count, 1)
+        self.assertEqual(self.publisher.resolve(document["object_id"]), document["path"])
+
+    def test_missing_generated_page_repair_preserves_annotation_revision_and_exact_bytes(self):
+        document = dict(object_id="repair-history", path="Repair.md", title="History", body="Exact history", content_revision=1)
+        self.publisher.publish_document(**document)
+        before_row = dict(self.publisher.record(document["object_id"]))
+        before_bytes = self.publisher.read(document["path"])
+        # Keep the original in the private recovery area while simulating loss.
+        (self.publisher.root / document["path"]).rename(self.publisher.root / ".wgo" / "missing-original.bin")
+        self.publisher.publish_document(**document)
+        self.assertEqual(self.publisher.read(document["path"]), before_bytes)
+        self.assertEqual(dict(self.publisher.record(document["object_id"])), before_row)
+
     def test_history_identity_cache_reads_once_but_walks_on_every_unchanged_publication(self):
         import core.semantic.projections as projections
         documents = []

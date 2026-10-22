@@ -371,15 +371,27 @@
   A later call revalidates and repairs projections rather than trusting an old
   publication receipt. Keep this cache local and declaration-only.
   Source-first history publication may scope `publisher.history_identity_cache`
-  to reuse parsed IDs for unchanged native file metadata. Every lookup still
-  walks the full current root and verifies fresh fd/path identity; duplicates,
+  to reuse parsed IDs for unchanged native file metadata. Ordinary lookups still
+  walk the full current root and verify fresh fd/path identity; duplicates,
   renames, parser semantics and target/manual/CAS checks remain authoritative.
-  Supported POSIX history lookups may use directory-relative no-follow opens,
-  admitting and revalidating each directory instead of repeating ancestor
-  checks for every file. Retain current absolute-file identity checks, strict
-  fallback, complete traversal and descriptor cleanup on every exit.
-  Cache no body/header/artifact bytes, release it on exit, and fall back to the
-  original parser when native change-time evidence is unavailable.
+  Supported POSIX lookups may use directory-relative no-follow opens with
+  directory admission/revalidation. Unsupported metadata takes the strict path.
+  `publisher.history_publication` processes one body at a time and may reuse an
+  exactly unchanged receipt after checking its file, prepared body, properties,
+  annotation, proposals and ledger. It retains only identity metadata and
+  integrity bindings; no body/header/artifact corpus survives between pages.
+  Only `RebuildCoordinator._preserve_history` opts into `staged_history=True`,
+  after checking the publisher root against the exact run-bound staging root.
+  Within that unpublished pass, a complete-root preflight supplies scoped
+  identity lookups to canonical `publish_document`; target ownership, manual
+  conflicts and double file CAS remain unchanged. The context spans navigation
+  receipt writes, then rechecks every accepted target/ledger and scans the whole
+  current root for collisions, renames and replacement before publication can
+  succeed. Partial files/receipts after failure are candidate recovery evidence,
+  never a successful pass or permission to activate. Normal app publication and
+  other callers retain strict per-document lookup. Every exit releases caches
+  and descriptors, expires the callback and rejects cross-thread use. Independent
+  complete-generation verification is still required.
   Publish the fixed projection, install v3 via CAS, activate the pin, record the
   provisional receipt, release locks, restore the exact app and verify live
   incremental acceptance in that order. Failed provisional evidence remains

@@ -812,6 +812,16 @@ class RebuildCoordinatorTests(unittest.TestCase):
         publisher = self.coordinator._runtime(store, self.roles, plan["staging_root"], self.config_store.inspect()).publisher
         return plan, journal, store, publisher
 
+    def test_history_publication_rejects_a_publisher_outside_its_bound_staging_root(self):
+        from core.semantic import legacy
+        from core.semantic.projections import ProjectionPublisher
+        plan, journal, store, _publisher = self.pre_capture_history()
+        foreign = ProjectionPublisher.for_store(store, self.runtime_root / "unbound-output")
+        with patch.object(legacy, "publish_legacy_navigation") as published:
+            with journal.locked(), self.assertRaisesRegex(RebuildError, "rebuild_history_staging_mismatch"):
+                self.coordinator._preserve_history(journal, store, foreign)
+        published.assert_not_called()
+
     def test_history_publication_deduplicates_exact_ref_and_rechecks_each_database_backup(self):
         from core.semantic import legacy
         from core.semantic.rebuild import file_fingerprint
@@ -825,6 +835,7 @@ class RebuildCoordinatorTests(unittest.TestCase):
             with journal.locked():
                 self.coordinator._preserve_history(journal, store, publisher)
         self.assertEqual(publish.call_count, 1)
+        self.assertTrue(publish.call_args.kwargs["staged_history"])
         self.assertTrue({b["path"] for b in backups}.issubset({str(c.args[0]) for c in checked.call_args_list}))
         preserved = next(iter(journal.read()["history_preservations"].values()))
         self.assertEqual(preserved["freeze_receipts"], journal.read()["freeze_receipts"])

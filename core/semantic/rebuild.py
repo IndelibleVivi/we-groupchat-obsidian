@@ -1950,6 +1950,11 @@ class RebuildCoordinator:
     def _preserve_history(self, journal, store, publisher):
         from .legacy import (LegacyInventory, preserve_legacy_history, record_legacy_backups,
                              build_history_publication_plan, publish_legacy_navigation)
+        # Snapshot-admitted history writes are confined to this run's unpublished
+        # staging root. The complete pass is revalidated before its declaration;
+        # independent conservation verification still gates every cutover.
+        if publisher.root != safe_path(journal.read()["plan"]["staging_root"], ""):
+            raise RebuildError("rebuild_history_staging_mismatch")
         # A failure before source construction can leave a freeze that has never
         # reached preservation. Conserve every retained freeze on the next build,
         # including earlier versions of personal pages and queue append history.
@@ -1972,7 +1977,8 @@ class RebuildCoordinator:
             declaration = published.get(key) if key is not None else None
             if declaration is None:
                 publication = build_history_publication_plan(inventory)
-                result = publish_legacy_navigation(store, inventory, publication, publisher)
+                result = publish_legacy_navigation(store, inventory, publication, publisher,
+                                                   staged_history=True)
                 if result["status"] != "published":
                     raise RebuildError("rebuild_legacy_publication_pending")
                 declaration = {"receipt_id": receipt["receipt_id"], "legacy_inventory": frozen["legacy_inventory"],

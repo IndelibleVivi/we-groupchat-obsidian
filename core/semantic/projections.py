@@ -2002,6 +2002,189 @@ class ProjectionPublisher:
                 else:
                     self._lock_local.identity_cache = previous
 
+    def _scan_history_owners(self):
+        """Fresh complete-root ownership evidence; retain metadata, never bodies."""
+        owners = {}
+        paths = self._identity_paths()
+        try:
+            for path, absolute, directory_fd in paths:
+                value = self._identity_in_directory(path, absolute, directory_fd)
+                if value is None:
+                    continue
+                if not isinstance(value, str) or not value or len(value) > 4096:
+                    raise _IdentityDescriptorStale
+                if value in owners:
+                    raise ReadingError("projection_identity_collision")
+                observed = os.stat(absolute / Path(path).name, follow_symlinks=False)
+                stamp = _identity_cache_stamp(observed)
+                if stamp is None:
+                    raise _IdentityDescriptorStale
+                directory = os.fstat(directory_fd)
+                owners[value] = (path, stamp, (directory.st_dev, directory.st_ino))
+        finally:
+            paths.close()
+        return owners
+
+    def _read_history_revalidation_target(self, owner):
+        """Bound one no-follow read to its admitted file and current ancestors."""
+        path, stamp, directory = owner
+        safe = self._safe_path(path, create_parents=False)
+        parent = os.stat(safe.parent, follow_symlinks=False)
+        if (parent.st_dev, parent.st_ino) != directory:
+            return None
+        fd = os.open(safe, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        try:
+            observed = os.fstat(fd)
+            if _identity_cache_stamp(observed) != stamp:
+                return None
+            self._current_identity_path(safe, observed)
+            with os.fdopen(fd, "rb") as stream:
+                fd = -1
+                raw = stream.read(stamp[3] + 1)
+                if len(raw) != stamp[3] or not self._identity_unchanged(safe, stream.fileno(), stamp):
+                    return None
+                self._current_identity_path(safe, observed)
+                self._safe_path(path, create_parents=False)
+                parent = os.stat(safe.parent, follow_symlinks=False)
+                if (parent.st_dev, parent.st_ino) != directory:
+                    return None
+            return raw
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    @contextmanager
+    def history_publication(self, *, staged_writes: bool = False):
+        """Validate a whole history publication without retaining body bytes.
+
+        Unchanged pages reuse exact receipts. By default actual writes retain
+        ordinary per-document lookup. Only a rebuild's explicit staging caller
+        may admit those lookups from this context's complete-root snapshot;
+        target ownership, manual conflict and double CAS stay in publish_document.
+        Fresh target/ledger checks and complete-root identity validation after
+        the caller's receipt writes gate successful completion in either mode.
+        """
+        with self.history_identity_cache():
+            owners, reused = None, {}
+            active, owner_thread = True, threading.get_ident()
+            if self._supports_identity_descriptors():
+                try:
+                    owners = self._scan_history_owners()
+                except (OSError, _IdentityDescriptorStale):
+                    pass
+
+            def reuse(*, object_id, path, body, content_revision, semantic_at="",
+                      region="body", is_current=None):
+                if owners is None or object_id not in owners or object_id in reused:
+                    return None
+                _token(region)
+                if _machine_markers(body) or is_current is not None and not is_current():
+                    return None
+                row = self.record(object_id)
+                if (row is None or row["status"] != "ready" or row["path"] != path
+                        or row["content_revision"] != content_revision
+                        or row["semantic_at"] != semantic_at or row["region"] != region
+                        or owners[object_id][0] != path):
+                    return None
+                if self.ledger.one("SELECT 1 FROM reader_proposals WHERE generation_id=? "
+                                   "AND object_id=? AND status='pending' LIMIT 1",
+                                   (self.ledger.generation_id, object_id)):
+                    return None
+                prepared = "\n" + redact_urls_in_text(body).strip("\n") + "\n"
+                if prepared != row["machine_body"] or fingerprint(prepared) != row["machine_hash"]:
+                    return None
+                try:
+                    raw = self._read_history_revalidation_target(owners[object_id])
+                    if raw is None:
+                        return None
+                    text = raw.decode("utf-8")
+                    updated = patch_region(patch_properties(text, {
+                        "wgo_id": object_id, "wgo_generation": self.ledger.generation_id,
+                        "wgo_content_revision": content_revision,
+                        "wgo_render_revision": row["render_revision"],
+                        "wgo_annotation_revision": row["annotation_revision"],
+                        "wgo_semantic_at": semantic_at,
+                    }), region, prepared)
+                    if (updated != text or fingerprint(raw) != row["file_hash"]
+                            or annotation_fingerprint(text, region) != row["annotation_hash"]):
+                        return None
+                except (OSError, _IdentityDescriptorStale, ReadingError, UnicodeError):
+                    return None
+                reused[object_id] = (owners[object_id], fingerprint(json_text(dict(row))),
+                                     row["file_hash"], is_current)
+                return ProjectionReceipt(object_id, content_revision, "unchanged", path,
+                                         row["file_hash"], render_revision=row["render_revision"])
+
+            def publish(**kwargs):
+                if not active:
+                    raise ReadingError("history_publication_closed")
+                if threading.get_ident() != owner_thread:
+                    raise ReadingError("history_publication_thread_mismatch")
+                if set(kwargs) - {"object_id", "path", "title", "body", "content_revision",
+                                  "semantic_at", "region", "is_current"}:
+                    raise ReadingError("history_publication_arguments_invalid")
+                candidate = {name: kwargs[name] for name in (
+                    "object_id", "path", "body", "content_revision", "semantic_at", "region", "is_current")
+                    if name in kwargs}
+                receipt = reuse(**candidate)
+                if receipt is not None:
+                    return receipt
+                local = self._lock_local
+                previous = getattr(local, "history_lookup", None)
+                if staged_writes and owners is not None:
+                    owner = owners.get(kwargs["object_id"])
+                    local.history_lookup = (kwargs["object_id"], owner[0] if owner else None)
+                try:
+                    receipt = self.publish_document(**kwargs)
+                finally:
+                    if previous is None:
+                        if hasattr(local, "history_lookup"):
+                            del local.history_lookup
+                    else:
+                        local.history_lookup = previous
+                if owners is not None and receipt.status in {"published", "unchanged"}:
+                    row = self.record(receipt.object_id)
+                    if (row is None or row["path"] != receipt.path
+                            or row["file_hash"] != receipt.file_hash):
+                        raise ReadingError("projection_file_changed")
+                    safe = self._safe_path(receipt.path, create_parents=False)
+                    stamp = _identity_cache_stamp(os.stat(safe, follow_symlinks=False))
+                    parent = os.stat(safe.parent, follow_symlinks=False)
+                    if stamp is None:
+                        raise ReadingError("projection_file_changed")
+                    owner = (receipt.path, stamp, (parent.st_dev, parent.st_ino))
+                    owners[receipt.object_id] = owner
+                    reused[receipt.object_id] = (owner, fingerprint(json_text(dict(row))),
+                                                receipt.file_hash, kwargs.get("is_current"))
+                return receipt
+
+            try:
+                yield publish
+                if owners is None or not reused and not staged_writes:
+                    return
+                try:
+                    for object_id, (owner, row_hash, file_hash, is_current) in reused.items():
+                        raw = self._read_history_revalidation_target(owner)
+                        row = self.record(object_id)
+                        if (raw is None or fingerprint(raw) != file_hash or row is None
+                                or fingerprint(json_text(dict(row))) != row_hash
+                                or is_current is not None and not is_current()
+                                or self.ledger.one("SELECT 1 FROM reader_proposals WHERE generation_id=? "
+                                                   "AND object_id=? AND status='pending' LIMIT 1",
+                                                   (self.ledger.generation_id, object_id))):
+                            raise ReadingError("projection_file_changed")
+                    latest = self._scan_history_owners()
+                    if any(latest.get(object_id) != data[0] for object_id, data in reused.items()):
+                        raise ReadingError("projection_file_changed")
+                except (OSError, _IdentityDescriptorStale) as exc:
+                    raise ReadingError("projection_file_changed") from exc
+
+            finally:
+                active = False
+                reused.clear()
+                if owners is not None:
+                    owners.clear()
+
     def read(self, path: str) -> bytes | None:
         safe = self._safe_path(path, create_parents=False)
         if not safe.exists():
@@ -2246,6 +2429,12 @@ class ProjectionPublisher:
         return matches
 
     def _find_id(self, object_id: str) -> str | None:
+        staged = getattr(self._lock_local, "history_lookup", None)
+        if staged is not None and staged[0] == object_id:
+            # Scoped to one canonical write inside an unpublished rebuild pass.
+            # The owner performs complete preflight and final validation; this
+            # is never available to ordinary resolve/app publication calls.
+            return staged[1]
         if (getattr(self._lock_local, "identity_cache", None) is not None
                 and self._supports_identity_descriptors()):
             try:
@@ -2415,7 +2604,7 @@ class ProjectionPublisher:
                 text += _personal_append
             annotation_hash = annotation_fingerprint(text, region)
             annotation_revision = (row["annotation_revision"] if row else 0) + int(
-                row is not None and annotation_hash != row["annotation_hash"])
+                row is not None and raw is not None and annotation_hash != row["annotation_hash"])
             updated = patch_properties(text, {
                 "wgo_id": object_id, "wgo_generation": self.ledger.generation_id,
                 "wgo_content_revision": content_revision, "wgo_render_revision": render_revision,

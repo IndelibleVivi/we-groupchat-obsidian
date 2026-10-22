@@ -1207,7 +1207,7 @@ def _record_history_backup(conn, manifest, manifest_id, role, path, backup_path,
                        "preserved_in_place", metadata)
 
 
-def _publish_history_navigation(store, manifest, supplied, publisher):
+def _publish_history_navigation(store, manifest, supplied, publisher, *, staged_history=False):
     from .projections import ReadingError
 
     if supplied != build_history_publication_plan(manifest):
@@ -1243,39 +1243,41 @@ def _publish_history_navigation(store, manifest, supplied, publisher):
                 previous = publisher.read(page["history_backup_path"])
                 if previous is not None and previous != raw:
                     raise LegacyError("legacy_history_copy_collision")
-                publisher.atomic_write(page["history_backup_path"], raw,
-                    expected=_digest(previous) if previous is not None else None)
+                if previous != raw:
+                    publisher.atomic_write(page["history_backup_path"], raw,
+                        expected=_digest(previous) if previous is not None else None)
                 if publisher.read(page["history_backup_path"]) != raw:
                     raise LegacyError("legacy_history_copy_failed")
                 histories.append({"old_path": file.relative_path, "path": page["history_backup_path"],
                                   "sha256": file.sha256, "byte_length": file.byte_length})
-            for document in supplied["documents"]:
-                body = history_document_body(manifest, supplied, document)
-                receipt = publisher.publish_document(object_id=document["object_id"], path=document["path"],
-                    title="历史资料", body=body, content_revision=revision,
-                    is_current=lambda: max(1, store.read_revision()) == revision)
+            with publisher.history_publication(staged_writes=staged_history) as publish:
+                for document in supplied["documents"]:
+                    body = history_document_body(manifest, supplied, document)
+                    receipt = publish(object_id=document["object_id"], path=document["path"],
+                        title="历史资料", body=body, content_revision=revision,
+                        is_current=lambda: max(1, store.read_revision()) == revision)
+                    receipts.append(asdict(receipt))
+                    with store.transaction() as conn:
+                        conn.execute("INSERT INTO legacy_mappings VALUES(?,?,?,?,?,?) ON CONFLICT(kind,legacy_id,target_type,target_id) "
+                            "DO UPDATE SET disposition=excluded.disposition,metadata_json=excluded.metadata_json",
+                            ("history_navigation", manifest_id, "projection", document["object_id"], receipt.status,
+                             _json({"manifest_id": manifest_id, "document": document,
+                                    "body_sha256": _digest(body), "receipt": asdict(receipt)})))
+                with closing(store.connect()) as conn:
+                    manifest_ids = [row[0] for row in conn.execute("SELECT legacy_id FROM legacy_mappings "
+                        "WHERE kind='history_pass' AND json_extract(metadata_json,'$.namespace')=? ORDER BY legacy_id",
+                        (manifest.namespace,))]
+                root = supplied["root_navigation"]
+                body = history_root_body(manifest_ids)
+                receipt = publish(object_id=root["object_id"], path=root["path"], title="历史资料索引",
+                    body=body, content_revision=revision, is_current=lambda: max(1, store.read_revision()) == revision)
                 receipts.append(asdict(receipt))
                 with store.transaction() as conn:
                     conn.execute("INSERT INTO legacy_mappings VALUES(?,?,?,?,?,?) ON CONFLICT(kind,legacy_id,target_type,target_id) "
                         "DO UPDATE SET disposition=excluded.disposition,metadata_json=excluded.metadata_json",
-                        ("history_navigation", manifest_id, "projection", document["object_id"], receipt.status,
-                         _json({"manifest_id": manifest_id, "document": document,
+                        ("history_root_navigation", manifest.namespace, "projection", root["object_id"], receipt.status,
+                         _json({"manifest_ids": manifest_ids, "root_navigation": root,
                                 "body_sha256": _digest(body), "receipt": asdict(receipt)})))
-            with closing(store.connect()) as conn:
-                manifest_ids = [row[0] for row in conn.execute("SELECT legacy_id FROM legacy_mappings "
-                    "WHERE kind='history_pass' AND json_extract(metadata_json,'$.namespace')=? ORDER BY legacy_id",
-                    (manifest.namespace,))]
-            root = supplied["root_navigation"]
-            body = history_root_body(manifest_ids)
-            receipt = publisher.publish_document(object_id=root["object_id"], path=root["path"], title="历史资料索引",
-                body=body, content_revision=revision, is_current=lambda: max(1, store.read_revision()) == revision)
-            receipts.append(asdict(receipt))
-            with store.transaction() as conn:
-                conn.execute("INSERT INTO legacy_mappings VALUES(?,?,?,?,?,?) ON CONFLICT(kind,legacy_id,target_type,target_id) "
-                    "DO UPDATE SET disposition=excluded.disposition,metadata_json=excluded.metadata_json",
-                    ("history_root_navigation", manifest.namespace, "projection", root["object_id"], receipt.status,
-                     _json({"manifest_ids": manifest_ids, "root_navigation": root,
-                            "body_sha256": _digest(body), "receipt": asdict(receipt)})))
     except ReadingError as exc:
         raise LegacyError("legacy_publication_conflict") from exc
     return {"manifest_id": manifest_id, "history_policy": SOURCE_FIRST_POLICY,
@@ -1284,7 +1286,7 @@ def _publish_history_navigation(store, manifest, supplied, publisher):
 
 
 def publish_legacy_navigation(store, manifest: LegacyInventory, publication_plan: Mapping[str, Any],
-                              publisher) -> dict[str, Any]:
+                              publisher, *, staged_history=False) -> dict[str, Any]:
     """Publish replayable navigation and private byte copies after exact backups.
 
     Original pages are never edited. Byte copies are private recovery objects,
@@ -1302,7 +1304,8 @@ def publish_legacy_navigation(store, manifest: LegacyInventory, publication_plan
         if database is None or _checked_path(database) != _checked_path(store.path):
             raise LegacyError("legacy_publisher_store_mismatch")
     if publication_plan.get("schema") == HISTORY_PUBLICATION_SCHEMA:
-        return _publish_history_navigation(store, manifest, dict(publication_plan), publisher)
+        return _publish_history_navigation(store, manifest, dict(publication_plan), publisher,
+                                           staged_history=staged_history)
     with closing(store.connect()) as conn:
         _require_history_policy(conn, LEGACY_SEMANTIC_POLICY)
     try:

@@ -349,7 +349,7 @@ class SourceFirstHistoryTests(unittest.TestCase):
         self.publisher = ProjectionPublisher(ReadingLedger(self.store.connect, self.store.generation_id), self.projections,
             current_revision=CanonicalReadingAdapter(self.store).current_revision)
 
-    def test_history_replay_scopes_identity_byte_reuse_to_one_invocation_and_walks_each_document(self):
+    def test_history_replay_revalidates_unchanged_pages_with_two_root_scans(self):
         from core.semantic import projections
         inventory = self.fixture.plan()
         plan, _backups = preserve_history_fixture(self.store, inventory, self.fixture.root / "cache-backups", self.publisher)
@@ -362,7 +362,7 @@ class SourceFirstHistoryTests(unittest.TestCase):
             for invocation in (1, 2):
                 replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
                 self.assertTrue(all(r["status"] == "unchanged" for r in replay["receipts"]))
-                self.assertEqual(walked.call_count, invocation * count)
+                self.assertEqual(walked.call_count, invocation * 2)
                 self.assertEqual(parsed.call_count, invocation * len(expected))
             with patch.object(projections.os, "walk", wraps=os.walk) as ordinary:
                 self.publisher.resolve(plan["documents"][0]["object_id"])
@@ -374,15 +374,15 @@ class SourceFirstHistoryTests(unittest.TestCase):
         inventory = self.fixture.plan()
         plan, _backups = preserve_history_fixture(self.store, inventory, self.fixture.root / "interrupted-cache", self.publisher)
         count = len(plan["documents"]) + 1
-        original, calls = self.publisher.publish_document, []
-        def interrupted(**kwargs):
-            calls.append(kwargs["object_id"])
+        original, calls = self.publisher._read_history_revalidation_target, []
+        def interrupted(*args):
+            calls.append(True)
             if len(calls) == 2:
-                raise projections.ReadingError("synthetic_publication_interruption")
-            return original(**kwargs)
+                raise RuntimeError("synthetic_publication_interruption")
+            return original(*args)
         with patch.object(projections, "_identity_frontmatter", wraps=projections._identity_frontmatter) as parsed:
-            with patch.object(self.publisher, "publish_document", side_effect=interrupted), \
-                 self.assertRaisesRegex(LegacyError, "legacy_publication_conflict"):
+            with patch.object(self.publisher, "_read_history_revalidation_target", side_effect=interrupted), \
+                 self.assertRaisesRegex(RuntimeError, "synthetic_publication_interruption"):
                 publish_legacy_navigation(self.store, inventory, plan, self.publisher)
             self.assertEqual(parsed.call_count, count)
             self.publisher.resolve(plan["documents"][0]["object_id"])
@@ -390,6 +390,42 @@ class SourceFirstHistoryTests(unittest.TestCase):
             replay = publish_legacy_navigation(self.store, inventory, plan, self.publisher)
             self.assertTrue(all(r["status"] == "unchanged" for r in replay["receipts"]))
             self.assertEqual(parsed.call_count, 3 * count)
+
+    def test_history_replay_rejects_duplicate_created_while_recording_receipts(self):
+        from core.semantic import legacy
+        inventory = self.fixture.plan()
+        plan, _ = preserve_history_fixture(self.store, inventory, self.fixture.root / "late-duplicate", self.publisher)
+        target = self.projections / plan["documents"][1]["path"]
+        duplicate = self.projections / "concurrent-duplicate.md"
+        original_json, changed = legacy._json, []
+        def during_receipt(value):
+            if isinstance(value, dict) and "document" in value and not changed:
+                duplicate.write_bytes(target.read_bytes())
+                changed.append(True)
+            return original_json(value)
+        with patch.object(legacy, "_json", side_effect=during_receipt), \
+             self.assertRaisesRegex(LegacyError, "legacy_publication_conflict"):
+            publish_legacy_navigation(self.store, inventory, plan, self.publisher, staged_history=True)
+        self.assertTrue(changed)
+        self.assertEqual(duplicate.read_bytes(), target.read_bytes())
+
+    def test_history_replay_rejects_manual_edit_after_its_receipt_without_overwrite(self):
+        from core.semantic import legacy
+        inventory = self.fixture.plan()
+        plan, _ = preserve_history_fixture(self.store, inventory, self.fixture.root / "late-annotation", self.publisher)
+        target = self.projections / plan["documents"][0]["path"]
+        exact = target.read_bytes() + b"\nPersonal annotation during publication.\n"
+        original_json, changed = legacy._json, []
+        def during_receipt(value):
+            if isinstance(value, dict) and "document" in value and not changed:
+                target.write_bytes(exact)
+                changed.append(True)
+            return original_json(value)
+        with patch.object(legacy, "_json", side_effect=during_receipt), \
+             self.assertRaisesRegex(LegacyError, "legacy_publication_conflict"):
+            publish_legacy_navigation(self.store, inventory, plan, self.publisher, staged_history=True)
+        self.assertTrue(changed)
+        self.assertEqual(target.read_bytes(), exact)
 
     def test_history_receipts_preserve_exact_rows_resources_and_do_not_create_semantic_work(self):
         inventory = self.fixture.plan()
