@@ -56,6 +56,12 @@ context-only 尾段不再承担独立成文或 home，显式原文继续走 acce
 或应用已有设置界面修改，不能在执行中替换配置快照。
 显式 root 必须存在且可用；外部卷未挂载时 app、monitor、health 与旧命令都
 失败关闭为 `semantic_runtime_root_unavailable`，不会自动创建替代目录或回落到旧版。
+旧 managed tree、Review Queue 和需保全的附件必须有可完整读取的本地字节。
+iCloud 占位文件虽然出现在目录中、也有文件大小，读取时仍可能返回 `EAGAIN`
+并报 `legacy_read_failed`。先核对实际下载状态；云端占位文件可按
+[Apple 的下载说明](https://support.apple.com/en-gb/guide/mac-help/-mchl1a02d711/mac)
+在 Finder 使用 Download Now，或为迁移期间需保留的目录选择 Keep Downloaded。
+确认完整读取后再 `resume`；目录存在或已提交下载请求都不能证明备份完整。
 初次生成 legacy inventory 时，单文件 metadata 在读取期间变化可重新读取一次；
 每次都重新验证路径、fd/live identity、大小与完整稳定读取。持续变化仍停止。
 已经冻结的 inventory、备份和验收校验保持严格，不采用新的变化替换封存证据。
