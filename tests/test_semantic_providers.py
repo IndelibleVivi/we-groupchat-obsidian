@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from ai.cloudflare_provider import CloudflareClient, CloudflareDecisionProvider, CloudflareEmbeddingProvider, HTTPResponse
 from ai.semantic_provider import (
@@ -48,6 +48,60 @@ def decision_body():
 
 
 class SemanticProviderTests(unittest.TestCase):
+    def test_native_failure_logs_request_binding_and_safe_sdk_evidence(self):
+        from ai.openai_provider import OpenAIProvider
+        native = OpenAIProvider.__new__(OpenAIProvider)
+        native.model, native.client = "synthetic-model", Mock()
+        error = type("RateLimitError", (RuntimeError,), {})(
+            'private error body sk-secret https://private.example/?token=secret')
+        error.status_code, error.request_id = 429, "req_synthetic-provider-1"
+        error.body = {"private": "message"}
+        native.client.chat.completions.create.side_effect = error
+        writer = LegacyTextProvider(native, provider_name="synthetic", model=native.model)
+        request_id, generation_id = "job_" + "a" * 64 + ":text", "b" * 32
+        with self.assertLogs("ai.semantic_provider", level="WARNING") as logs:
+            with self.assertRaises(ProviderError) as failure:
+                writer.generate("private prompt", request_id=request_id, generation_id=generation_id)
+        self.assertEqual(failure.exception.code, "text_provider_failed")
+        self.assertTrue(failure.exception.outcome_unknown)
+        self.assertTrue(failure.exception.retryable)
+        record = json.loads(logs.records[0].getMessage())
+        self.assertEqual(record, {
+            "event": "semantic_text_provider_failure", "request_id": request_id,
+            "generation_id": generation_id, "http_status": 429,
+            "provider_request_id": "req_synthetic-provider-1",
+        })
+        for private in ("private", "sk-secret", "token=secret", "prompt", "body"):
+            self.assertNotIn(private, json.dumps(record))
+        native.client.chat.completions.create.assert_called_once()
+
+    def test_failure_log_omits_untrusted_fields_and_stops_at_a_context_cycle(self):
+        error = RuntimeError("private response")
+        error.__context__ = error
+        error.status_code = True
+        writer = LegacyTextProvider(Mock(), provider_name="synthetic", model="synthetic")
+        writer.provider.summarize.side_effect = error
+        for value in ("https://private.example/?token=secret", "sk-secret", "req_bad\nheader", "req_" + "a" * 200):
+            with self.subTest(value=value):
+                error.request_id = value
+                with self.assertLogs("ai.semantic_provider", level="WARNING") as logs:
+                    with self.assertRaises(ProviderError) as failure:
+                        writer.generate("private prompt", request_id=value, generation_id=value)
+                self.assertTrue(failure.exception.outcome_unknown)
+                self.assertEqual(json.loads(logs.records[0].getMessage()), {
+                    "event": "semantic_text_provider_failure"})
+
+    def test_broken_diagnostic_sink_cannot_change_unknown_failure(self):
+        writer = LegacyTextProvider(Mock(), provider_name="synthetic", model="synthetic")
+        writer.provider.summarize.side_effect = ConnectionError("private disconnect")
+        with patch("ai.semantic_provider.logging.getLogger") as get_logger:
+            get_logger.return_value.warning.side_effect = RuntimeError("broken diagnostic sink")
+            with self.assertRaises(ProviderError) as failure:
+                writer.generate("private prompt", request_id="job_" + "a" * 64 + ":text")
+        self.assertEqual(failure.exception.code, "text_provider_failed")
+        self.assertTrue(failure.exception.outcome_unknown)
+        writer.provider.summarize.assert_called_once()
+
     def test_native_output_limit_is_known_failure_not_unknown_or_accepted_text(self):
         from ai.openai_provider import OpenAIProvider
         native = OpenAIProvider.__new__(OpenAIProvider)

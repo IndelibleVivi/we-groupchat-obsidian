@@ -523,6 +523,14 @@ observed restore 与 live 验收，不再读取 source 或调用 model。CLI 仍
 normal resume 会在没有 source/model work 的 finalization 阶段重新观察 exact
 runtime；unknown provider outcome 也不存在自动 reconciliation 或 reset。
 
+新的 semantic text 失败会通过 `ai.semantic_provider` 的标准 WARNING logger 输出
+`semantic_text_provider_failure` JSON。它只关联合规的 canonical job request ID、
+generation ID、SDK exception chain 中可用的 HTTP status 与受限格式的 opaque
+provider request ID；不输出 error body、prompt、endpoint、凭据或任意调用方标签。
+若日志缺少某字段，不能据此认定请求未发送；旧失败也不会被追补出原请求回执。
+HTTP status 与诊断日志只帮助查找原服务记录，不能单独终结 unknown、证明完整输出
+或授权重发。logger 故障同样不改变原 job outcome 或既有 usage 账本。
+
 若需要只修复运行时的恢复观察、又不继续 source/model 阶段，先看计划，再显式应用：
 
 ```bash

@@ -30,6 +30,12 @@ is implied by this document.
   with tables/lists/quotations, Obsidian reading controls, briefing editions,
   delivery evidence and v3 checkpoints. Provider preparation is bounded and
   parallel; canonical identity decisions and publication remain serialized.
+- Semantic text failures emit bounded local diagnostics binding canonical job
+  request IDs to available HTTP status and admitted provider request IDs, including
+  through normalized SDK exceptions. They omit error bodies, prompts, credentials,
+  endpoints and arbitrary caller labels. Diagnostic failure cannot change the
+  original job outcome; unknown requests still require independently verified
+  evidence before reconciliation. Historical failures gain no new evidence.
 - Product-specific private adapters are outside this public repository. Generic
   resource capture, context retention by explicit injection, CAS and v3 snapshot
   transport remain supported building blocks.

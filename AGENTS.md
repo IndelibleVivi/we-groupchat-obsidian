@@ -100,7 +100,11 @@
   `link_preview_disabled` with zero network requests. Legacy mounted
   `link_export_mode=full` migrates to `redacted`; only `redacted|off` may be
   selected. Do not add a crawler or another local redaction implementation.
-- `ai/` owns provider adapters; `ui/` owns reusable UI components.
+- `ai/` owns provider adapters; `ui/` owns reusable UI components. Semantic text
+  failure diagnostics may log only bounded job/generation bindings, integer HTTP
+  status and admitted opaque provider request IDs. Never log the exception text,
+  body, prompt, endpoint, credentials or arbitrary caller labels. Diagnostics do
+  not reconcile unknown work, classify dispatch outcomes or authorize retries.
 - `core/key_extractor.py` owns WeChat build-profile selection, page-one key
   verification and cumulative atomic key-cache publication;
   `c_src/find_keys_macos.c` owns the read-only task-memory scan. Protected-key

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
+import logging
 import math
 import re
 from string import Formatter
@@ -24,6 +25,37 @@ class ProviderError(RuntimeError):
         self.retryable = retryable
         self.outcome_unknown = outcome_unknown
         super().__init__(code)
+
+
+def _log_text_failure(error, request_id, generation_id):
+    """Keep bounded HTTP correlation evidence without reading error messages."""
+    try:
+        record = {"event": "semantic_text_provider_failure"}
+        if isinstance(request_id, str) and re.fullmatch(
+                r"job_[0-9a-f]{64}:text(?::attempt-[1-9][0-9]{0,8})?", request_id):
+            record["request_id"] = request_id
+        if isinstance(generation_id, str) and re.fullmatch(r"[0-9a-f]{32}", generation_id):
+            record["generation_id"] = generation_id
+        seen = set()
+        for _ in range(8):
+            if error is None or id(error) in seen:
+                break
+            seen.add(id(error))
+            fields = vars(error)
+            status, remote_id = fields.get("status_code"), fields.get("request_id")
+            if type(status) is int and 100 <= status <= 599:
+                record["http_status"] = status
+            if isinstance(remote_id, str) and re.fullmatch(
+                    r"(?:req[_-][A-Za-z0-9_-]{1,96}|[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})",
+                    remote_id):
+                record["provider_request_id"] = remote_id
+            if "http_status" in record or "provider_request_id" in record:
+                break
+            error = error.__cause__ or error.__context__
+        logging.getLogger(__name__).warning("%s", json.dumps(record, sort_keys=True))
+    except Exception:
+        # A diagnostic sink must never change the original unknown outcome.
+        pass
 
 
 def json_bytes(value):
@@ -148,7 +180,8 @@ class LegacyTextProvider:
                 self.usage_store.settle(request_id, actual_units=self.upper_bound_units,
                     receipt_id="text:" + hashlib.sha256(request_id.encode()).hexdigest())
             raise ProviderError("text_output_truncated") from None
-        except Exception:
+        except Exception as exc:
+            _log_text_failure(exc, request_id, generation_id)
             if self._accounted:
                 try:
                     self.usage_store.mark_unknown(request_id)
