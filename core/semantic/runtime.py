@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -31,6 +31,8 @@ from .controls import ReaderControls, CoreSearchAdapter
 from .briefing import BriefChange, BriefingService
 from .delivery import DeliveryService
 from .reading_home import ReadingHome
+from .reading_changes import ReadingChanges
+from .view_controls import ViewControls
 from .rebuild import GenerationRegistry, RebuildError
 from .store import SemanticStore
 from .source import SemanticCapture, MonitorReceiptBridge
@@ -210,6 +212,7 @@ class SemanticRuntime:
         resource_roots = [self.config["attachment_archive_root"]] if self.config.get("attachment_archive_root") else []
         self.publisher = ProjectionPublisher.for_store(store, projection_root, resource_roots=resource_roots)
         self.controls = ReaderControls(self.ledger, self.publisher, search=CoreSearchAdapter(store, self.retrieval))
+        self.view_controls = ViewControls(store, self.publisher)
         self.body_writer = BodyPlanWriter(roles.text, store.generation_id)
         self.briefing = BriefingService(self.ledger, self.publisher, self.controls, roles.text,
                                        timezone=self.config.get("daily_digest_timezone", "Asia/Shanghai"))
@@ -434,7 +437,7 @@ class SemanticRuntime:
         # Targets precede redirect/hub publication so every stable old link works.
         items = self.store.list_items(include_retired=True)
         items.sort(key=lambda item: item["lifecycle"] != "active")
-        failures, provider_stopped, unprocessed = [], None, 0
+        failures, provider_stopped, unprocessed, changes_report = [], None, 0, None
 
         def observe(receipt):
             nonlocal published, conflicts
@@ -502,16 +505,38 @@ class SemanticRuntime:
         for item in items:
             def register_actions():
                 if item["lifecycle"] == "active" and self.publisher.ready(item["item_id"], item["content_revision"]):
+                    self.controls.register_item_properties(item["item_id"],
+                        properties=self.config.get("semantic_reader_properties", {}))
                     self.controls.register_item_actions(item["item_id"], item["content_revision"])
             attempt(register_actions, "semantic_reader_actions_failed")
         attempt(self.controls.refresh_management, "semantic_reader_management_failed")
+        attempt(self.view_controls.refresh_management, "semantic_view_controls_failed")
+        def publish_changes():
+            nonlocal published, conflicts, changes_report
+            # Daily turns stay bounded. Full rebuild drains finite pages through
+            # the same owner before claiming complete publication.
+            rounds = max(1, (len(items) + 19) // 20) if strict else 1
+            changes = ReadingChanges.for_runtime(self)
+            for _ in range(rounds):
+                report = changes.publish()
+                changes_report = asdict(report)
+                published += report.published + report.unchanged
+                conflicts += report.conflicts
+                if report.failed or report.conflicts or (not strict and not report.remaining):
+                    break
+            if report.failed or report.remaining:
+                failures.append("semantic_reading_changes_pending")
+            for code in report.code.split(","):
+                if _MAINTENANCE_CODE.fullmatch(code):
+                    failures.append(code)
+        attempt(publish_changes, "semantic_reading_changes_failed")
         attempt(lambda: ReadingHome.for_runtime(self).publish(), "semantic_reading_home_failed")
         codes = self._maintenance_counts(failures)
         return {"receipt_id": str(uuid.uuid4()), "published": published, "conflicts": conflicts,
                 "complete": conflicts == 0 and not failures and provider_stopped is None,
                 "failed": len(failures), "unprocessed": unprocessed, "codes": codes,
                 "blocked": provider_stopped is not None or any(code in _MAINTENANCE_BLOCKED_CODES for code in failures),
-                "provider_stopped": provider_stopped}
+                "provider_stopped": provider_stopped, "changes": changes_report}
 
     @staticmethod
     def _maintenance_counts(values):
@@ -575,7 +600,11 @@ class SemanticRuntime:
         return {"state": state, "complete": complete, "published": result["published"],
                 "ready": ready, "total": len(items), "pending_outbox": pending_outbox,
                 "conflicts": max(conflicts, result["conflicts"]), "failed": result["failed"] + len(probes),
-                "unprocessed": result["unprocessed"], "codes": codes}
+                "unprocessed": result["unprocessed"], "codes": codes, "changes": result.get("changes")}
+
+    def maintain_views(self, *, max_pages=1):
+        """Canonical navigation work, separate from derived output repair."""
+        return self.engine.maintain_views(max_pages=max_pages)
 
     def maintain_derived(self, *, max_rounds=1):
         """Attempt source-free projections and indexing independently."""

@@ -138,6 +138,7 @@ class CoreSearchAdapter:
 
 
 class ReaderControls:
+    ACTION_KINDS = frozenset({"known", "follow", "mute", "wait", "adopt", "move_notes", "keep_personal"})
     QUERY_ID = "control:query"
     MANAGEMENT_ID = "control:management"
     DEFAULT_PROPERTIES = {"follow": "阅读关注", "mute": "阅读静音", "wait": "阅读等待", "query": "查询"}
@@ -226,7 +227,9 @@ class ReaderControls:
 
     def register_property(self, object_id: str, role: str, key: str, *, initial=None):
         """Reserve one input property. Existing unregistered user keys fail closed."""
-        if (role not in {"follow", "mute", "wait", "query"} or key.startswith("wgo_")
+        if (role not in {"follow", "mute", "wait", "query", "view_definition", "view_member"}
+                or (role == "view_definition" and not object_id.startswith("view:"))
+                or (role == "view_member" and object_id != "control:views") or key.startswith("wgo_")
                 or not re.fullmatch(r"[\w-]+", key)):
             raise ReadingError("invalid_control_property_mapping")
         with self.publisher.locked():
@@ -248,6 +251,13 @@ class ReaderControls:
                 conn.execute("INSERT INTO reader_property_maps VALUES (?,?,?,?)",
                              (self.ledger.generation_id, object_id, role, key))
                 self.publisher.atomic_write(path, updated.encode("utf-8"), expected=fingerprint(raw))
+
+    def register_item_properties(self, item_id: str, *, properties=None):
+        """Prepare editable inputs before an action freezes the Item's file hash."""
+        mapping = self.property_mapping(properties)
+        pref = self.preference(item_id)
+        for role in ("follow", "mute", "wait"):
+            self.register_property(item_id, role, mapping[role], initial=getattr(pref, role))
 
     def sync_properties(self, item_id: str) -> ReaderPreference:
         mappings = self.ledger.all("SELECT role,property_key FROM reader_property_maps WHERE generation_id=? AND object_id=?",
@@ -354,25 +364,34 @@ class ReaderControls:
 
     def register_action(self, kind: str, item_id: str, *, displayed_revision: int,
                         expected_file_hash: str, label: str, value=None, proposal_id: str = "") -> str:
-        if kind not in {"known", "follow", "mute", "wait", "adopt", "move_notes", "keep_personal"}:
+        if kind not in ReaderControls.ACTION_KINDS:
             raise ReadingError("invalid_control_action")
+        preference = self.preference(item_id)
+        return self._register_record(kind, item_id, displayed_revision, preference.revision,
+                                     expected_file_hash, label, value, proposal_id)
+
+    def _register_record(self, kind, item_id, displayed_revision, preference_revision,
+                         expected_file_hash, label, value=None, proposal_id=""):
         if "\n" in label or "<!--" in label:
             raise ReadingError("invalid_control_label")
-        preference = self.preference(item_id)
         payload = json_text(value)
         existing = self.ledger.one("""SELECT action_id FROM reader_actions WHERE generation_id=? AND kind=? AND item_id=?
             AND content_revision=? AND preference_revision=? AND file_hash=? AND value_json=?
             AND proposal_id=? AND status='registered'""", (self.ledger.generation_id, kind, item_id,
-                displayed_revision, preference.revision, expected_file_hash, payload, proposal_id))
+                displayed_revision, preference_revision, expected_file_hash, payload, proposal_id))
         if existing:
             return existing[0]
         action_id = uuid.uuid4().hex
         with self.ledger.transaction() as conn:
             conn.execute("INSERT INTO reader_actions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                          (action_id, self.ledger.generation_id, kind, item_id, displayed_revision,
-                          preference.revision, expected_file_hash, payload, proposal_id,
+                          preference_revision, expected_file_hash, payload, proposal_id,
                           redact_urls_in_text(label), "registered"))
         return action_id
+
+    @staticmethod
+    def _action_label(action):
+        return f"{action['label']}（内容 v{action['content_revision']}，偏好 v{action['preference_revision']}）"
 
     def register_item_actions(self, item_id: str, displayed_revision: int):
         file_hash = self.publisher.file_hash(item_id)
@@ -401,7 +420,7 @@ class ReaderControls:
         for label, id_ in checks:
             action = self.ledger.one("SELECT * FROM reader_actions WHERE action_id=? AND generation_id=?",
                                      (id_, self.ledger.generation_id))
-            if action is None or f"{action['label']}（内容 v{action['content_revision']}，偏好 v{action['preference_revision']}）" != label:
+            if action is None or action["kind"] not in self.ACTION_KINDS or self._action_label(action) != label:
                 raise ReadingError("unregistered_control_action")
             ids.append(id_)
         return fingerprint(raw), ids
@@ -423,8 +442,10 @@ class ReaderControls:
                 self.register_action(kind, proposal["object_id"], displayed_revision=proposal["content_revision"],
                                      expected_file_hash=proposal["file_hash"], label=label,
                                      proposal_id=proposal["proposal_id"])
-        actions = self.ledger.all("SELECT * FROM reader_actions WHERE generation_id=? AND status='registered' ORDER BY rowid",
-                                  (self.ledger.generation_id,))
+        kinds = sorted(ReaderControls.ACTION_KINDS)
+        actions = self.ledger.all("SELECT * FROM reader_actions WHERE generation_id=? AND status='registered' "
+                                  "AND kind IN (" + ",".join("?" for _ in kinds) + ") ORDER BY rowid",
+                                  (self.ledger.generation_id, *kinds))
         lines = ["只有本页登记的操作生效；来源中的复选框不会执行。"]
         current_targets = {}
         for action in actions:
@@ -446,7 +467,7 @@ class ReaderControls:
             path = self.publisher.resolve(action["item_id"])
             target = wikilink("WGO/" + path, action["item_id"]) if path else action["item_id"]
             mark = "x" if action["action_id"] in checked else " "
-            lines.extend(["\n" + target, f"- [{mark}] {action['label']}（内容 v{action['content_revision']}，偏好 v{action['preference_revision']}） "
+            lines.extend(["\n" + target, f"- [{mark}] {self._action_label(action)} "
                           f"<!-- wgo-action:{action['action_id']} -->"])
         revision = len(self.ledger.all("SELECT action_id FROM reader_actions WHERE generation_id=?",
                                        (self.ledger.generation_id,)))

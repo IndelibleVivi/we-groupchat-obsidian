@@ -5,10 +5,26 @@ October Ops source line. Package metadata remains `v0.1.0-alpha.1`; no new relea
 is implied by this document.
 
 The [development programme](development-programme.md) records the mature product
-goal and continuous construction order. Current gaps include live View induction
-(currently run during rebuild), evidence synthesis beyond query hit excerpts,
-and detailed comparisons between reading versions. Structural tests do not establish real
+goal and continuous construction order. The source now connects daily View induction,
+explicit View controls and known-version change pages to the reader. Current gaps
+include evidence synthesis beyond query hit excerpts, large-catalog navigation,
+automatic removal/reclassification of old memberships, and real reading acceptance.
+Structural tests do not establish real
 editorial quality or native reading acceptance.
+
+Live View v2 uses metadata pages of at most 16 Items, one page per reader turn.
+Complete View context is bounded at 60 KB; oversized context stops explicitly.
+Accepted TEXT/CHOICE artifacts precede a short fresh-CAS canonical transaction;
+program jobs, membership changes and receipts commit together. Idle/deferred
+unchanged scopes make no new calls; unknown work blocks new contexts. Frozen
+rebuild v1 remains unchanged, including historical stale-action limitations.
+`主题管理.md` registers explicit definition and existing-member pin/exclude intent;
+View changes and action consumption share a transaction. Automated induction adds
+memberships and does not delete old ones when a definition changes.
+`变化.md` and per-Item pages compare current canonical snapshots with explicit
+known revisions, preserving opened/known independence, conflict guards and identity
+renames. They add no model calls. Their previews and selection are bounded and
+disclose omitted material. Source support is separate from installed/live acceptance.
 
 Active semantic health now observes local reader delivery status counts without
 opening event payloads or initializing tables. Unknown/sending receipts prevent

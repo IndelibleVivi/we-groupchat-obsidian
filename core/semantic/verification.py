@@ -23,6 +23,7 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from core.url_safety import redact_urls_in_text
+from .contracts import SemanticStoreError
 from .attribution import EXTRACTION_PROMPT_VERSION, captured_source_metadata, source_attribution
 from .store import (CAPTURE_CONTEXT_VERSION, CAPTURE_CONTEXT_MAX_BYTES, CAPTURE_CONTEXT_MAX_PACKETS,
                     context_source_tail)
@@ -727,6 +728,7 @@ class RebuildVerifier:
         return valid
 
     def _verify_actions(self):
+        self._verify_live_views()
         decisions = RowMap(self.db, "SELECT * FROM decision_log", "job_id")
         jobs = RowMap(self.db, "SELECT * FROM jobs", "job_id")
         for job in jobs.values():
@@ -785,6 +787,185 @@ class RebuildVerifier:
             if not self.db.execute("SELECT 1 FROM item_revisions WHERE item_id=? AND revision=?",
                                    (item["item_id"], item["content_revision"])).fetchone():
                 self.issue("item_current_revision_missing")
+
+    def _verify_live_views(self):
+        """Reconstruct live program projection; completion labels grant no proof."""
+        from .live_views import CONTRACT, MEMBERS, validate_plan, projected_groups, projected_actions
+        jobs = RowMap(self.db, "SELECT * FROM jobs WHERE kind LIKE 'live_view_%' OR json_extract(versions_json,'$.contract')=?", "job_id", (MEMBERS,))
+        if not jobs:
+            return
+        def artifact(identity):
+            row = self.accepted.get(identity)
+            if row is None:
+                raise ValueError
+            return _load(row["artifact_json"])
+        def inputs(identity):
+            return _load(jobs[identity]["inputs_json"])
+        for job in jobs.values():
+            if job["kind"] in {"live_view_induction", "live_view_choice"} and job["state"] in {"unknown", "running"}:
+                self.issue("live_view_provider_pending", "semantic_pending")
+            if job["kind"] == "live_view_run" and job["state"] != "done":
+                self.issue("live_view_maintenance_pending", "semantic_pending")
+        verified = ScratchMap(self.scratch, "live_view_verified")
+        for identity, job in jobs.items():
+            if job["kind"] != "propose" or _load(job["versions_json"]).get("contract") != MEMBERS:
+                continue
+            try:
+                value, binding = artifact(identity), inputs(identity)
+                plan_id, choice_id = binding["source_plan_job_id"], binding["source_choice_job_id"]
+                plan, choice, state = artifact(plan_id), artifact(choice_id), inputs(plan_id)["state"]
+                if jobs[plan_id]["kind"] != "live_view_induction" or jobs[choice_id]["kind"] != "live_view_choice":
+                    raise ValueError
+                validate_plan({key: plan[key] for key in ("groups", "unassigned")}, state)
+                if (inputs(choice_id) != {"proposal_job_id": plan_id, "proposal": plan} or choice["choice"] != "apply"
+                        or plan.get("route") != _load(jobs[plan_id]["versions_json"])["text_route"]
+                        or choice.get("route") != _load(jobs[plan_id]["versions_json"])["decision_route"]
+                        or _load(jobs[choice_id]["versions_json"]) != {"contract": "semantic-choice-v1",
+                            "route": _load(jobs[plan_id]["versions_json"])["decision_route"]}):
+                    raise ValueError
+                groups = projected_groups(self.generation, plan_id, plan)
+                actions = projected_actions(plan_id, groups)
+                if not actions or value != {"actions": actions, "read_set": binding["state"]["read_set"],
+                        "source_plan_job_id": plan_id, "source_choice_job_id": choice_id}:
+                    raise ValueError
+                member = binding["state"]
+                if (set(member["items"]) != set(state["items"]) or member["observations"] or member["new_item_ids"]
+                        or set(member["read_set"]["items"]) != set(member["items"])
+                        or set(member["views"]) != {group["view_id"] for group in groups}
+                        or set(member["read_set"]["views"]) != set(member["views"])):
+                    raise ValueError
+                for iid, source_scope in state["items"].items():
+                    actual = member["items"][iid]
+                    if any(actual[key] != source_scope[key] for key in ("item_id", "kind", "title", "identity_scope")):
+                        raise ValueError
+                    revision = member["read_set"]["items"][iid]
+                    prior = self.db.execute("SELECT snapshot_json FROM item_revisions WHERE item_id=? AND revision=?", (iid, revision)).fetchone()
+                    if prior is None or any(_load(prior[0])[key] != actual[key] for key in actual):
+                        raise ValueError
+                for group in groups:
+                    vid = group["view_id"]
+                    expected = state["views"].get(vid, {"view_id": vid, "title": group["title"], "definition": group["definition"],
+                        "definition_revision": 1, "override_revision": 0, "origin": "model"})
+                    if member["views"][vid] != expected or member["read_set"]["views"][vid] != {
+                            key: expected[key] for key in ("definition_revision", "override_revision")}:
+                        raise ValueError
+                decision = self.db.execute("SELECT * FROM decision_log WHERE job_id=?", (identity,)).fetchone()
+                if decision is None or _load(decision["decision_json"]) != choice or _load(decision["read_set_json"]) != member["read_set"]:
+                    raise ValueError
+                receipt = _load(decision["receipt_json"])
+                tx = decision["transaction_id"]
+                transaction = self.transactions[tx]
+                if (transaction["job_id"] != identity or _load(transaction["actions_json"]) != actions
+                        or type(member["read_set"].get("store_revision")) is not int):
+                    raise ValueError
+                expected_receipt = {"receipt_id": tx, "transaction_id": tx, "outbox_id": tx,
+                    "outbox_ids": _load(transaction["outbox_ids_json"]), "job_id": identity,
+                    "affected_item_ids": [row[0] for row in self.db.execute(
+                        "SELECT item_id FROM item_revisions WHERE transaction_id=? ORDER BY item_id", (tx,))],
+                    "store_revision": member["read_set"]["store_revision"] + 1,
+                    "input_fingerprint": _hash([actions, member["read_set"], choice]), "generation_id": self.generation}
+                if receipt != expected_receipt or any(_load(self.actions[action["action_key"]]["receipt_json"]) != expected_receipt for action in actions):
+                    raise ValueError
+                if job["state"] != "done" or job["receipt_id"] != receipt["receipt_id"] or job["attempt"] != 0:
+                    raise ValueError
+                choices = [candidate for candidate in jobs.values() if candidate["kind"] == "decision"
+                           and inputs(candidate["job_id"]).get("proposal_job_id") == identity]
+                if len(choices) != 1:
+                    raise ValueError
+                projected_choice = choices[0]
+                if (inputs(projected_choice["job_id"]) != {"proposal_job_id": identity, "proposal": value,
+                        "source_plan_job_id": plan_id, "source_choice_job_id": choice_id}
+                        or artifact(projected_choice["job_id"]) != choice or projected_choice["state"] != "done"
+                        or projected_choice["receipt_id"] != receipt["receipt_id"] or projected_choice["attempt"] != 0
+                        or _load(projected_choice["versions_json"]) != {"contract": MEMBERS}):
+                    raise ValueError
+                pair_key = _json([plan_id, choice_id])
+                if pair_key in verified:
+                    raise ValueError
+                verified[pair_key] = receipt
+            except (ValueError, KeyError, TypeError, IndexError, AttributeError, SemanticStoreError):
+                self.issue("live_view_program_projection_invalid")
+        outcomes = ScratchMap(self.scratch, "live_view_outcomes")
+        for identity, job in jobs.items():
+            if job["kind"] != "live_view_outcome" or identity not in self.accepted:
+                continue
+            try:
+                value, binding = artifact(identity), inputs(identity)
+                scope_id, context_id = binding["scope_job_id"], binding["context_job_id"]
+                state = artifact(context_id)
+                scope = inputs(scope_id)
+                if (inputs(context_id)["scope_job_id"] != scope_id or _hash(state) != inputs(context_id)["state_signature"]
+                        or state["target_item_ids"] != scope["item_ids"]
+                        or value["scope_job_id"] != scope_id or value["context_job_id"] != context_id
+                        or value["item_ids"] != scope["item_ids"] or value["retired_item_ids"] != sorted(state["retired_items"])
+                        or set(state["items"]) | set(state["retired_items"]) != set(scope["item_ids"])
+                        or set(state["items"]) & set(state["retired_items"])):
+                    raise ValueError
+                for iid, retired in state["retired_items"].items():
+                    historical = self.db.execute("SELECT snapshot_json FROM item_revisions WHERE item_id=? AND revision=?",
+                        (iid, retired["retirement_revision"])).fetchone()
+                    if historical is None or retired["lifecycle"] == "active" or any(
+                            _load(historical[0])[key] != retired[key] for key in ("item_id", "title", "kind", "identity_scope", "lifecycle")):
+                        raise ValueError
+                plan_id, choice_id = binding["plan_job_id"], binding["choice_job_id"]
+                if (value["plan_job_id"], value["choice_job_id"]) != (plan_id, choice_id):
+                    raise ValueError
+                if state["items"]:
+                    plan, choice = artifact(plan_id), artifact(choice_id)
+                    if (inputs(plan_id)["state"] != state or inputs(choice_id) != {"proposal_job_id": plan_id, "proposal": plan}
+                            or _load(jobs[plan_id]["versions_json"]).get("contract") != CONTRACT
+                            or plan.get("route") != _load(jobs[plan_id]["versions_json"])["text_route"]
+                            or choice.get("route") != _load(jobs[plan_id]["versions_json"])["decision_route"]
+                            or choice.get("choice") not in {"apply", "defer"}
+                            or _load(jobs[choice_id]["versions_json"]) != {"contract": "semantic-choice-v1",
+                                "route": _load(jobs[plan_id]["versions_json"])["decision_route"]}):
+                        raise ValueError
+                    validate_plan({key: plan[key] for key in ("groups", "unassigned")}, state)
+                    if choice["choice"] == "defer":
+                        if value["status"] != "deferred" or value["receipt"] is not None or value["view_ids"]:
+                            raise ValueError
+                    elif value["status"] != "complete":
+                        raise ValueError
+                    elif plan["groups"]:
+                        if (value["receipt"] != verified.get(_json([plan_id, choice_id])) or value["receipt"] is None
+                                or value["view_ids"] != [g["view_id"] for g in projected_groups(self.generation, plan_id, plan)]):
+                            raise ValueError
+                    elif value["receipt"] is not None or value["view_ids"]:
+                        raise ValueError
+                elif plan_id is not None or choice_id is not None or value["receipt"] is not None or value["view_ids"] or value["status"] != "complete":
+                    raise ValueError
+                outcomes[scope_id] = value
+            except (ValueError, KeyError, TypeError, IndexError, AttributeError, SemanticStoreError):
+                self.issue("live_view_outcome_invalid")
+        for run in jobs.values().where("kind='live_view_run' AND state='done'"):
+            if not self.db.execute("SELECT 1 FROM jobs j JOIN accepted_job_artifacts a USING(job_id) "
+                    "WHERE j.kind='live_view_checkpoint' AND json_extract(j.inputs_json,'$.run_job_id')=?", (run["job_id"],)).fetchone():
+                self.issue("live_view_checkpoint_invalid")
+        latest_checkpoint = self.db.execute("SELECT job_id FROM jobs WHERE kind='live_view_checkpoint' AND job_id IN (SELECT job_id FROM accepted_job_artifacts) ORDER BY rowid DESC LIMIT 1").fetchone()
+        for identity, job in jobs.items():
+            if job["kind"] != "live_view_checkpoint" or identity not in self.accepted:
+                continue
+            try:
+                checkpoint = artifact(identity)
+                if latest_checkpoint is not None and identity == latest_checkpoint[0]:
+                    if checkpoint["status"] == "deferred":
+                        self.issue("live_view_deferred", "semantic_pending")
+                    from .live_views import catalog
+                    if catalog(self.db)["signature"] != checkpoint["signature"]:
+                        self.issue("live_view_dependencies_pending", "semantic_pending")
+                run_id = inputs(identity)["run_job_id"]
+                frozen = artifact(run_id)
+                scopes = [candidate for candidate in jobs.values() if candidate["kind"] == "live_view_scope"
+                          and inputs(candidate["job_id"])["run_job_id"] == run_id]
+                scopes.sort(key=lambda candidate: inputs(candidate["job_id"])["page"])
+                if (checkpoint["scope_job_ids"] != [candidate["job_id"] for candidate in scopes]
+                        or [iid for candidate in scopes for iid in inputs(candidate["job_id"])["item_ids"]] != frozen["item_ids"]
+                        or any(candidate["job_id"] not in outcomes for candidate in scopes)
+                        or checkpoint["status"] != ("deferred" if any(outcomes[candidate["job_id"]]["status"] == "deferred" for candidate in scopes) else "complete")
+                        or jobs[run_id]["state"] != "done"):
+                    raise ValueError
+            except (ValueError, KeyError, TypeError, IndexError, AttributeError, SemanticStoreError):
+                self.issue("live_view_checkpoint_invalid")
 
     def _verify_transactions(self):
         for outbox in self.outboxes.values():

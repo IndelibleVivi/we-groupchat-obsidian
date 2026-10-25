@@ -39,14 +39,20 @@ WGO 要让群聊里发生的事情、形成的经验与提出的方案，在一�
 | 不丢失群聊材料 | 完整 inventory、分 shard cursor、不可变 source、captured/applied、durable artifacts 与首次迁移 conservation | 完整私有迁移、真实增量和长期故障恢复的独立运行验收 |
 | 读一件持续发展的事 | Item、稳定正文 home、条件与反证、原文嵌入、人工冲突与重命名保护 | 实际模型的连贯、完整、自然表达，以及 native Obsidian 阅读验收 |
 | 持续收到可读产物 | canonical outbox、独立 index/projection 维护、局部发布隔离、维护状态与统一首页 | 真实长期运行与 provider/native 阅读验收仍单独完成 |
-| 按主题探索 | View store、重建阶段归纳、既有 View membership 与投影 | 日常新主题的归纳维护、用户经营 View 的入口；当前生产 View 使用全 Item 嵌入 |
+| 按主题探索 | 重建与日常 View 归纳、每轮有界依赖维护、主题说明与现有成员 pin/exclude、稳定投影 | 当前自动归纳只补充归属；复杂重新归类、完整目录超出 60 KB 后的分层方案和真实归纳质量仍需推进 |
 | 带着问题找依据 | lexical/dense/structural hybrid search、canonical tail、覆盖说明与持久 query | 当前输出是检索片段；跨 Item 的有证据综合回答尚未实现 |
-| 管理阅读与后续 | 首页连接阅读入口和当前/打开/已知版本；follow/mute/wait、typed Watch/Episode、变化简报与独立 delivery receipt | 进一步解释各版本具体改变了什么；打开记录不推定理解或已知 |
+| 管理阅读与后续 | 首页连接当前/打开/已知版本、以明确已知为基线的具体变化页；follow/mute/wait、typed Watch/Episode、简报与独立 delivery receipt | 有界差异预览还需真实阅读检验；打开记录不推定理解或已知 |
 | 保留和交付资源 | 独立 occurrence/selection、附件同意、CAS、mounted handoff 与独立 Direct Drive 确认 | 实际目标的交付与远端确认分别验收；不能从本地 COMPLETE 推出云端已同步 |
 | 长期演进 | 唯一 active generation、冻结 policy/artifacts、首次迁移与 rollback | 已 active generation 的后续升级尚不支持；reader 意图、identity 与历史不能通过清库重建丢弃 |
 
 这里的“已接入”表示源码与调用路径存在。合成测试可以拒绝结构、状态、证据和恢复错误，
 不能证明自然语言质量、实际用户理解、安装、真实来源与账户侧结果。
+
+当前可重复的贯通场景见
+[`test_semantic_programme_integration.py`](../tests/test_semantic_programme_integration.py)：
+真实临时 capture/engine/store/publisher 进入 reader poll，覆盖日常目录、用户批量设置、
+后续新增、更正到具体变化页、unknown 与手写冲突隔离，以及重启后的空轮询。
+TEXT/CHOICE/embedding 使用合成 provider，不能据此声称真实模型或 native Obsidian 已验收。
 
 ## 连续 programme
 
@@ -62,12 +68,18 @@ WGO 要让群聊里发生的事情、形成的经验与提出的方案，在一�
 
 ### 2. 让已有知识每天都能生长成可使用的目录
 
-将重建阶段已有的 View 归纳与日常增量连接起来，以真实 Item/View 依赖变化驱动有界维护，
+源码已经将重建阶段已有的 View 归纳与日常增量连接起来，以真实 Item/View 依赖变化驱动有界维护，
 保留用户定义、pin/exclusion 和稳定正文位置。不能在每个空 poll 全库调用模型，也不能
 为创建目录擅自合并 Item。全 Item、链接和段落嵌入根据阅读目的选择。
 
 验收从日常新增主题、晚到材料、更正和用户组织出发：无需再次 rebuild 就有合理去向；
 不重复建目录；无变化不重复 provider；失败后复用原产物；手写和用户 override 继续有效。
+
+当前 live v2 每轮处理最多 16 个 Item，仅在 provider 工作完成后进入短 canonical 事务，
+fresh CAS、确定性 program proposal、正常 membership apply 与 receipt 一起提交。
+用户说明与现有成员设置使用独立注册动作，同事务消费。旧 frozen v1 保持原行为，历史
+stale action 不自动修复。自动归纳现在只补充 membership；改变说明不会删除原成员。
+下一步需验证真实目录质量，并在相同完整性标准下设计大目录分层和明确可恢复的重新归类。
 
 这一阶段还要验证增长成本。目前 resolver 为避免把未检查的歧义当作不存在，会逐页检查
 整个 Item catalog；现有合成证据在 4,000 个 Item 上需要 167 次 coarse scan 调用，
@@ -80,6 +92,10 @@ WGO 要让群聊里发生的事情、形成的经验与提出的方案，在一�
 在现有 query、Item、Brief 与 reader ledger 上继续建设。首先让人看清找到哪些依据、
 覆盖有什么限制、读过哪个版本、明确已知哪个版本、后来改变了什么以及正在等待什么。
 打开、理解、已知、关注和静音继续是不同事实。
+
+源码已有以明确已知版本为基线的内容、claim 状态/条件与关系比较，连接变化索引和首页。
+它使用 canonical snapshots，不让比较页产生新事实；尚未确认已知时展示当前保留内容。
+接下来应把有证据的问题综合与具体变化接入同一阅读过程，而不是增加独立问答数据库。
 
 进一步建设综合回答时，复用原 canonical revision、检索、条件/反证、source anchors 和
 durable model artifacts。回答保留案例差异与未知范围；TopK 未命中不能变成不存在。

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from core.url_safety import redact_urls_in_text
 from .controls import ReaderControls
+from .reading_changes import ReadingChanges
 from .projections import ProjectionReceipt, ReadingError, wikilink
 
 
@@ -145,6 +146,8 @@ class ReadingHome:
             lines = ["从这里继续阅读，查找问题的依据，或跟进你关心的事情。", "## 阅读入口"]
             for object_id, label in ((ReaderControls.QUERY_ID, "检索"),
                                      (ReaderControls.MANAGEMENT_ID, "阅读管理"),
+                                     ("control:views", "主题管理"),
+                                     (ReadingChanges.INDEX_ID, "阅读变化"),
                                      ("control:reader-status", "阅读状态")):
                 lines.append("- " + target(object_id, label))
             brief = metadata["brief"]
@@ -175,6 +178,9 @@ class ReadingHome:
                         states.append("已静音")
                     title = "标题较长的条目（打开查看完整标题）" if item["title_truncated"] else item["title"]
                     line = "- " + target(item["item_id"], title, current) + " — " + "；".join(states)
+                    if current > known:
+                        line += "。" + target(ReadingChanges.object_id(item["item_id"]), "查看具体变化",
+                                              ReadingChanges._page_revision(known, current))
                     if item["has_wait"]:
                         if item["wait_truncated"]:
                             line += "。等待条件较长，完整条件见条目属性。"

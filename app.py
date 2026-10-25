@@ -2335,7 +2335,7 @@ class WeGroupchatObsidianApp(rumps.App):
             if runtime is None:
                 return
             reader = self._semantic_reader(runtime)
-            reader.poll(maintain_derived=True)
+            reader.poll(maintain_derived=True, maintain_views=True)
         except Exception as exc:
             print("[semantic] reader deferred:", getattr(exc, "code", "semantic_reader_unavailable"))
         finally:

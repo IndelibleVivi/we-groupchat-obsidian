@@ -383,6 +383,22 @@ jobs=None, worker_id=None, view_ids=())` exposes these synchronous operations:
 | `process_batch(batch_id, plan_revision=1)` | Extract, then resolve through the same APIs. |
 | `consolidate(run_id)` | Global identity review proposing explicit merge, split, relation, or no change; lineage is conserved. |
 | `reconcile_views(run_id)` | Paginated View induction, reuse of existing definitions, and revision-bound membership writes. |
+| `maintain_views(max_pages=1)` | Source-free daily View v2; one scope of at most 16 Item metadata records per reader turn. |
+
+Live View v2 freezes catalog identity, per-page metadata context and exact TEXT/
+CHOICE routes in existing durable jobs. Complete View definitions plus one Item
+page must fit 60 KB; overflow is `semantic_view_context_too_large`, never top-k
+absence. Dependencies use Item title/kind/scope/lifecycle, View definitions and
+explicit overrides; membership-only Item revision changes do not create an idle
+loop. A completed checkpoint avoids catalog work at an unchanged store revision.
+Known deferred states replay without calls until true dependencies change;
+unknown outcomes and unexpired leases block before a new context. Provider work
+precedes the Store's atomic fresh-CAS program commit. A crash after commit reuses
+the exact operation receipt before considering a changed context. Returns expose
+`status`, `pages_processed`, page receipts and bounded codes. This is additive
+navigation, with existing memberships retained and user overrides protected.
+It neither reads source nor merges Items. Frozen `reconcile_views` v1 is retained
+for rebuild replay, including its historical stale accepted-action limitation.
 
 An offline rebuild can extract every captured batch, prepare their embeddings,
 then resolve each batch against that globally visible evidence. After resolving,

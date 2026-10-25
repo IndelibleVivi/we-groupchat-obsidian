@@ -12,6 +12,7 @@ flowchart TD
     CAPTURE --> MODEL[模型：抽取经历、方案、观点与更正]
     MODEL --> STORE[(SQLite：知识条目、归属、关系与处理凭据)]
     STORE --> MAINT[来源无关维护：正文与索引独立恢复]
+    STORE --> VIEWS[日常主题归纳：有界 metadata + 原子 membership]
     MAINT --> BODY[Obsidian：完整 Markdown 正文与来源]
     MAINT --> SEARCH[检索：全文、向量和关系候选]
     STORE --> BRIEF[简报与后续变化]
@@ -20,6 +21,12 @@ flowchart TD
     BRIEF --> HOME
     BODY --> CONTROL[阅读、关注、静音、等待与标记已知]
     CONTROL --> BRIEF
+    CONTROL --> VIEWCONTROL[明确经营目录：说明、固定与排除]
+    VIEWCONTROL --> VIEWS
+    VIEWS --> HOME
+    STORE --> CHANGES[明确已知 → 当前：具体内容与条件变化]
+    CONTROL --> CHANGES
+    CHANGES --> HOME
     CAPTURE -. 来源不完整时停止 .-> STOP[保留进度，修复后继续]
     MODEL -. 失败或结果未知时停止 .-> STOP
     LEGACY_INPUT[旧摘要、旧页、队列和资料] --> HISTORY[独立历史保全]
@@ -44,6 +51,9 @@ Review Queue、selection 和 resource envelope 作为 immutable history passes �
 目录都可以链接到它的正文或具体段落。正文仍只有一个维护位置。View 在 Obsidian 的
 `WGO/视图/` 下，不需要独立应用、网站或操作入口；实现是
 [`ProjectionPublisher.publish_view`](../../core/semantic/projections.py)。
+日常 `SemanticEngine.maintain_views` 每轮最多处理 16 个 Item 的 metadata，完整 View
+上下文有 60 KB 上限；TEXT/CHOICE 完成后才短事务提交新归属与 receipt。它保留旧成员，
+用户可在 `主题管理.md` 明确编辑说明、固定或排除现有成员；用户动作消费与设置一起提交。
 
 **向量帮助找回材料。** Embedding 把检索文本转成向量，index 保存可重建的检索数据；
 两者可分别选本地或 Cloudflare。模型与 canonical store 负责知识内容和合并决定。
@@ -67,6 +77,9 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 正文与索引分别尝试，复用原 outbox、artifact 与 publisher。`ReadingHome` 从有界 metadata
 生成统一首页，只连接已就绪目标；实际打开版本、明确已知版本和当前内容版本保持独立。
 这些路径不重新读取微信或重新抽取知识，首次重建继续使用严格完整 publication。
+`ReadingChanges` 从当前/明确已知 snapshots 派生具体变化页，保留新增、移除、claim
+状态/条件与关系的差异；只打开页面不改变比较基线。它与首页共用 publisher、身份、
+手写保护和 CAS，没有另一套事实库或额外模型。
 
 <details>
 <summary>展开完整技术 Mermaid、状态归属与源码表</summary>
@@ -126,10 +139,10 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 | `SOURCE` | `WeChatDB` / `SourceInventoryStore` / 进程内 gate | `WECHATDB` `SRC_INV` `ADAPTER` `GATE` `CAPLOCK` `DECRYPT` `GUARD` | 只读来源；期望分片集合；generation/key/decrypt/snapshot/page 边界 |
 | `CAPTURE` | `core/semantic/source.py`、`MonitorStateStore` | `RUNTIME_ACTIVE` `SEM_CAP` `BRIDGE` `MS` `MS_CAP` `MS_APP` | monitor 检查点 v3：captured 与 applied 两条向量（唯一写入者 `MS`） |
 | `WORK` | `JobStore` / `ProviderScheduler` | `JOBS` `SCHED` `ROLES` `TEXT_PROV` `DEC_SEL` `CF_DEC` | 已验证 artifact 先落盘；进程内 admission；不持有 DB 事务/provider |
-| `ENGINE` | `SemanticEngine` / `WatchService` / `attribution` | `ATTR` `EXTRACT` `RESOLVE` `CONSOL` `VIEWS` `WATCH` | 抽取/解析/合并/watch 计算；canonical 写入仍走 `STORE` |
+| `ENGINE` | `SemanticEngine` / `WatchService` / `attribution` | `ATTR` `EXTRACT` `RESOLVE` `CONSOL` `VIEWS` `LIVE_VIEWS` `WATCH` | 抽取/解析/合并、日常目录与 watch；canonical 写入仍走 `STORE` |
 | `CANON` | `SemanticStore`（generation SQLite） | `STORE` `TABLES` `PROOF` | canonical 事务、revision CAS、不可变对象、独立 processing 证明 |
 | `DERIVED` | `HybridRetriever` / `ai.*` adapter | `RETRIEVAL` `EMB_SEL` `IDX_SEL` `LOCAL_IDX` `LOCAL_EMB` `CF_EMB` `CF_VEC` `USAGE` `HTTP` | 可重建索引与向量；不决定 merge |
-| `READING` | `projections/controls/briefing/delivery/reader_runtime` | `LEDGER` `BODY_PLAN` `BODY_PAGE` `PUB` `CONTROLS` `BRIEF_ACCEPT` `BRIEF_FILE` `DELIV` `READER_RT` `INBOX` `WGO` | `reader_*` durable 消费状态；Markdown 投影；交付 receipt |
+| `READING` | `projections/controls/view_controls/reading_changes/briefing/delivery/reader_runtime` | `LEDGER` `BODY_PLAN` `BODY_PAGE` `PUB` `CONTROLS` `VIEW_CONTROL` `CHANGES` `BRIEF_ACCEPT` `BRIEF_FILE` `DELIV` `READER_RT` `INBOX` `WGO` | `reader_*` durable 消费状态；Markdown 投影；交付 receipt |
 | `RES` | `resource_capture` / `resource_backup` / Drive | `RES_CAP` `RES_DB` `RES_BACK` `CAS` `MOUNTED` `OBSIDX` `DRIVE` `DRIVE_DB` `REMOTE` `EXT` `LINKS` | occurrence 身份、CAS v3 snapshot、独立投影状态、link 惰性面 |
 | `REBUILD` | `RebuildCoordinator` / `GenerationRegistry` | `COORD` `MANAGED` `JOURNAL` `PIN` `CUT` `VERIF` `COORD_V3`…`COORD_LIVE` `COORD_ROLLBACK` `RELOC` | 冻结计划、切换 journal、active pin、独立 verifier、分步切换/回滚 |
 | `LEGACY` | legacy topic/event、`semantic/legacy.py` | `LEG_PATH` `LEG_INVENTORY` `HISTORY_STORE` `HISTORY_PUB` `LEG_NAV` `LEG_BLOCK` `LEG_DB` | 未 pin 前的真实兼容路径；source-first 旧历史只读保全；旧 DB 不改写 |
@@ -234,6 +247,7 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 | `TEXT_PROV` / `DEC_SEL` / `CF_DEC` | node | `ai/semantic_provider.py :: LegacyTextProvider`、`TextDecisionProvider`；`ai/cloudflare_provider.py :: CloudflareDecisionProvider`；`ai/factory.py :: create_provider` |
 | `ATTR` | node | `core/semantic/attribution.py :: source_attribution`、`captured_source_metadata` |
 | `EXTRACT` / `RESOLVE` / `CONSOL` / `VIEWS` | node | `core/semantic/engine.py :: SemanticEngine.extract_batch/resolve_batch/consolidate/reconcile_views` |
+| `LIVE_VIEWS` | node | `core/semantic/engine.py :: maintain_views`；`live_views.py` 有界 metadata；`store.py :: commit_live_view_plan`；`verification.py :: _verify_live_views` |
 | `WATCH` | node | `core/semantic/watches.py :: WatchService.create_watch/evaluate/sync_reader_watch/open_episode/sync_episodes` |
 | `STORE` / `TABLES` | node | `core/semantic/store.py :: SemanticStore.capture_batch/commit_extraction/apply_proposal/create_view/update_view/record_claim_relation/restore_identity_operation` |
 | `PROOF` | node | `core/semantic/store.py :: verify_processing_receipt`、`complete_batch`、`record_migration_receipt` |
@@ -249,6 +263,7 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 | `DELIV` / `NOTIF` | node | `core/semantic/delivery.py :: DeliveryService.register/deliver/reconcile/resolve_click`；`app.py :: _SemanticNotifier` |
 | `READER_RT` / `INBOX` | node | `core/semantic/reader_runtime.py :: ReaderRuntime.poll/deliver_changes/deliver_brief`；`integrations/obsidian/` |
 | `MAINT` / `HOME` | node | `core/semantic/runtime.py :: SemanticRuntime.maintain_derived`；`core/semantic/reading_home.py :: ReadingHome.publish` |
+| `VIEW_CONTROL` / `CHANGES` | node | `core/semantic/view_controls.py :: ViewControls.process_management/refresh_management`；`store.py :: _update_view_controls`；`reading_changes.py :: ReadingChanges.publish/publish_item` |
 | `WGO` | node | `core/semantic/projections.py :: ProjectionPublisher`（managed root） |
 | `RES_CAP` / `RES_DB` | node | `core/resource_capture.py :: SelectedResourceCapture`、`resource_capture_operation_lock`、`_captures_contexts` |
 | `RES_BACK` / `CAS` / `MOUNTED` / `OBSIDX` | node | `core/resource_backup.py :: MountedResourceBackup.run/_run_owned/_run_locked/status` |

@@ -72,9 +72,7 @@ class ReaderRuntime:
         count = 0
         for item in items:
             try:
-                pref = self.controls.preference(item["item_id"])
-                for role in ("follow", "mute", "wait"):
-                    self.controls.register_property(item["item_id"], role, self.properties[role], initial=getattr(pref, role))
+                self.controls.register_item_properties(item["item_id"], properties=self.properties)
                 self.controls.sync_properties(item["item_id"])
                 count += 1
             except Exception as exc:
@@ -400,7 +398,7 @@ class ReaderRuntime:
                 receipt.edition_id, receipt.revision, plan.title or "今日简报", body, "brief",
                 tuple(bindings.values()), tuple(EvidenceTarget(*pair) for pair in sorted(evidence))))
 
-    def _status_page(self, statuses, codes, derived=None):
+    def _status_page(self, statuses, codes, derived=None, views=None):
         lines = []
         labels = {"met": "已满足", "unmet": "尚未满足", "unknown": "尚不确定", "contested": "存在相反证据", "stopped": "已停止"}
         for result in statuses:
@@ -421,6 +419,11 @@ class ReaderRuntime:
             lines.append("阅读事件未确认（原文件保留）：" + "；".join(row["code"] + " × " + str(row["n"]) for row in failures))
         if codes:
             lines.append("待处理状态：" + "、".join(sorted(codes)[:20]))
+        if views:
+            names = {"unchanged": "无需更新", "pending": "继续整理中", "complete": "本轮完成",
+                     "deferred": "等待更多依据", "blocked": "受阻"}
+            lines.append("目录整理：" + names.get(views.get("status"), "尚未确认")
+                         + "；本轮处理 " + str(views.get("pages_processed", 0)) + " 页。")
         if derived:
             labels = {"ready": "就绪", "pending": "等待", "blocked": "受阻"}
             index, projection = derived["index"], derived["projection"]
@@ -443,6 +446,12 @@ class ReaderRuntime:
                 projection_detail += "；" + "；".join(
                     code + " × " + str(count) for code, count in sorted(projection["codes"].items()))
             lines.append(projection_detail)
+            changes = projection.get("changes")
+            if changes is not None:
+                lines.append("变化页维护：本轮选择 " + str(changes["selected"])
+                    + "，仍待处理 " + str(changes["remaining"])
+                    + "，失败 " + str(changes["failed"])
+                    + "，冲突 " + str(changes["conflicts"]) + "。")
         body = "\n\n".join(lines)
         signature = fingerprint(body)
         old = self.ledger.one("SELECT * FROM reader_runtime_status WHERE generation_id=?", (self.store.generation_id,))
@@ -453,7 +462,7 @@ class ReaderRuntime:
             with self.ledger.transaction() as conn:
                 conn.execute("INSERT OR REPLACE INTO reader_runtime_status VALUES(?,?,?)", (self.store.generation_id, signature, revision))
 
-    def poll(self, *, maintain_derived=False):
+    def poll(self, *, maintain_derived=False, maintain_views=False):
         with self._lock:
             codes, statuses, actions, attention = set(), [], [], []
             items = self.store.list_items()
@@ -463,6 +472,14 @@ class ReaderRuntime:
                     self.controls.refresh_management()
                 actions = self.controls.process_management(acted_at=datetime.now(timezone.utc).isoformat())
                 self._reflect_actions(actions, codes)
+            except Exception as exc:
+                codes.add(self._code(exc))
+            view_actions, views = [], None
+            try:
+                view_actions = self.runtime.view_controls.process_management()
+                for receipt in view_actions:
+                    if receipt.code:
+                        codes.add(self._code(ReadingError(receipt.code)))
             except Exception as exc:
                 codes.add(self._code(exc))
             query, opened = "deferred", 0
@@ -489,6 +506,14 @@ class ReaderRuntime:
                 attention = self.deliver_changes()
             except Exception as exc:
                 codes.add(self._code(exc))
+            if maintain_views:
+                try:
+                    views = self.runtime.maintain_views(max_pages=1)
+                    if views.get("code"):
+                        codes.add(self._code(ReadingError(views["code"])))
+                except Exception as exc:
+                    codes.add(self._code(exc))
+                    views = {"status": "blocked", "pages_processed": 0}
             derived = None
             if maintain_derived:
                 try:
@@ -512,10 +537,13 @@ class ReaderRuntime:
             except Exception as exc:
                 codes.add(self._code(exc))
             try:
-                self._status_page(statuses, codes, derived)
+                self._status_page(statuses, codes, derived, views)
             except Exception as exc:
                 codes.add(self._code(exc))
-            return {"properties": properties, "actions": len(actions), "query": query, "open_events": opened,
+            return {"properties": properties, "actions": len(actions), "view_actions": len(view_actions),
+                    "view_action_states": {state: sum(r.status == state for r in view_actions)
+                                           for state in sorted({r.status for r in view_actions})},
+                    "views": views, "query": query, "open_events": opened,
                     "watch_states": {key: sum(s["status"] == key for s in statuses) for key in sorted({s["status"] for s in statuses})},
                     "attention": {key: sum(r.status == key for r in attention) for key in sorted({r.status for r in attention})},
                     "derived": derived,

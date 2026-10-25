@@ -267,6 +267,35 @@
   Strict rebuild `publish_all` retains full verification semantics through the
   same publication owner. Item, View, control and home receipts must all contribute
   to completion; maintenance observations do not own ACKs or retries.
+- `engine.py::maintain_views` and `live_views.py` own daily metadata-only View v2
+  preparation (one scope of at most 16 Items). Complete View context is bounded
+  at 60 KB and fails closed on overflow. Item semantic scope, View definitions
+  and explicit overrides drive work; membership-only revisions do not loop.
+  Unknown work blocks new contexts; unchanged known defer makes no new calls.
+  Store `commit_live_view_plan` reuses exact committed receipts before checking
+  fresh dependencies and atomically commits deterministic program jobs, normal
+  ADD_MEMBERSHIP changes and receipt. No provider/projection IO inside that
+  transaction. Independent verification reconstructs the accepted lineage.
+  Frozen rebuild v1 remains exact; historical stale v1 actions are not reset.
+  Induction adds membership and does not automatically remove old members.
+- `view_controls.py::ViewControls` owns `control:views` and distinct registered
+  View actions. Only explicit checked intent adopts edited definitions or changes
+  existing-member pin/exclusion. Store's same-connection control CAS and action
+  consumption commit together. Preserve both flags, origin/placement/reason and
+  Item content revision. Base Item controls must not consume View actions.
+  Default definitions are redacted display, never private URL values; personal
+  property collisions are isolated per View. Unchecked off-selection actions are
+  superseded, while checked intent retains explicit success/rejection.
+- `reading_changes.py::ReadingChanges` owns derived `changes:<item_id>` and
+  `control:changes` pages. Compare exact current/explicit-known snapshots;
+  visible-open is never the baseline. Missing/mismatched history fails closed,
+  bounded previews disclose omissions, and stale known/current conflict drafts
+  cannot be adopted. No model, source, reader-fact write or other outbox ACK.
+  Settled known/current page bindings leave the backlog independently of reader
+  confirmation. Bounded process-local rotation is a disposable scheduling hint;
+  it must not become source progress or a new durable cursor authority. Spare
+  capacity checks settled files through publisher readiness before reusing them.
+  Comparison drafts use known/current guards, independent of notification mute.
 - `core/semantic/reading_home.py::ReadingHome` owns the bounded metadata-only
   `control:home` projection, initially `首页.md`. It reuses publisher identity,
   readiness, manual-conflict and CAS checks and keeps current/opened/known

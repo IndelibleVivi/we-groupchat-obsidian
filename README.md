@@ -68,6 +68,23 @@ follow identity. A filename that cannot be represented safely as an Obsidian lin
 is shown without a link, and an overlong title/wait label is replaced with a short
 notice rather than truncating a potentially sensitive URL.
 
+Daily reader turns also grow topic navigation without another rebuild. A turn
+considers at most 16 Item scopes, reuses durable model decisions, and makes no
+new call for unchanged or unchanged deferred work. Views can overlap. Existing
+memberships are retained; induction adds useful links rather than removing old
+members automatically. In `主题管理.md`, edit a View's `主题说明`, then confirm its
+registered action; existing members can be pinned or excluded in the same way.
+Definition and member changes commit atomically with their action receipts.
+User definitions, pins and exclusions remain authoritative. Complete View context
+has a 60 KB admission limit; oversized context stops with an explicit status.
+
+`变化.md` and per-Item change pages compare the current revision with your
+explicit known revision: added/removed content, claim withdrawals or changed
+conditions, and relation changes remain inspectable with source links. A visible
+open never chooses that baseline. Never-known Items show current retained content;
+bounded previews disclose omitted detail and link to the complete current Item.
+Changes use canonical snapshots and require no additional model calls.
+
 Source-free maintenance handles reading controls first and repairs projections
 independently of indexing. Local page failures retain their work while other
 independent pages continue; provider stops, unknown outcomes and manual conflicts

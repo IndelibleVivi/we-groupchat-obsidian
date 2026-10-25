@@ -534,8 +534,10 @@ sources, publish Item bodies, build an index or build a brief. Those remain
 separate runtime jobs, so no new source message is needed for a query, preference
 edit, explicit known action or visible-open receipt to take effect.
 
-The app selects `poll(maintain_derived=True)`: after controls and reading facts,
-it invokes `SemanticRuntime.maintain_derived(max_rounds=1)` and then publishes
+The app selects `poll(maintain_derived=True, maintain_views=True)`: after controls and reading facts,
+it advances one metadata-only live View scope through `maintain_views(max_pages=1)`,
+then independently invokes `SemanticRuntime.maintain_derived(max_rounds=1)`. View
+provider failure does not gate unrelated projection/index work. It then publishes
 the current maintenance facets in `阅读状态.md`. Plain `poll()` retains the
 reader-only boundary above. Monitor downstream consumes the same source-free
 maintenance composition after canonical progress. Index and projection failures
@@ -545,12 +547,69 @@ unknown work, manual conflicts and exact ACK authority remain unchanged.
 `publish_all()` is still the strict rebuild entry, sharing the publication owner
 with live maintenance. Every Item/View/control/home receipt contributes to its
 completion result; a conflicted navigation page cannot establish complete output.
+Daily change publication selects at most 20 Items and reports backlog/failure/
+conflict counts in reader status. Strict rebuild drains finite change pages
+through the same owner before claiming complete publication.
+
+### View intent and concrete changes
+
+`ViewControls(store, publisher)` reuses registered property/action validation but
+owns `control:views`, initially `主题管理.md`, and only the three `view_*` action
+kinds. Base Item controls never consume them. Existing View pages receive a
+registered scalar `主题说明` with canonical URL-redacted default display. Only an
+explicit registered checkbox adopts edited text (1–2000 characters). A preexisting
+unregistered field is preserved and reported without blocking other Views.
+Oversized canonical definitions do not hydrate into this editable field; member
+controls remain available. Titles have SQL admission before hydration.
+
+Pin/exclusion applies only to existing active memberships. Actions bind View
+definition/override revisions, target file bytes and member Item revisions. Each
+View's selected batch uses the Store's same-connection control mutation and action
+consumption in one transaction. A stale group commits no partial change. Origin,
+placement/reason and Item content revisions stay unchanged. Both desired flags
+are explicit at the Store boundary. Default lists are 20 Views/20 members with an
+API maximum of 50; explicit `目录`/`条目` wikilink properties select other objects.
+Unchecked off-selection actions are superseded; checked intent survives refresh
+and receives an explicit success/rejection. Unsupported filenames have safe labels.
+The management page retains the latest ten applied/rejected action labels as
+visible feedback. Reader status also retains bounded failure codes; rejection
+never implies that a setting was applied.
+
+`ReadingChanges.for_runtime(runtime).publish(limit=20)` publishes bounded change
+pages `changes:<item_id>` under `变化/` and `control:changes` at `变化.md`.
+`publish_item(item_id)` compares exact `item_revisions` snapshots at current and
+maximum explicit known revision. It never treats visible-open as known, and a
+never-known Item presents current retained content without manufacturing revision 0.
+Added/removed units, typed claim state/condition changes and relations are distinct
+from provenance/navigation-only revisions. Previews disclose display limits and
+link to the ready current Item and independently available source anchors.
+Only the selected Item's two snapshots are loaded at once; no model or source IO,
+preference writes or unrelated outbox ACK belongs to this projection.
+
+Change proposals bind current revision and explicit known revision through
+`revisions` and `known_revisions` guards. Muting affects attention, not permission
+to read or adopt a concrete comparison; preference changes alone do not invalidate it.
+The publisher admits `changes:` as a derived object identity while still checking
+these guards before adopting a conflict draft. A known confirmation or canonical
+change invalidates an older draft. Missing/mismatched snapshots fail closed;
+manual bytes, ordinary identity renames and the canonical URL authority remain intact.
+Settled page bindings leave the work backlog even when the reader has never marked
+an Item known. Each turn handles at most 20 pending pages; spare capacity rotates
+through settled files via publisher readiness, repairing missing files or surfacing
+manual conflicts without hydrating healthy snapshots. A bounded process-local
+cursor cache holds only scheduling hints across reconstructed app runtime objects.
+Restart or eviction safely rescans metadata; page/known/canonical authority remains
+durable in existing tables. No new cursor table is installed. Counts report backlog
+at entry, selected outcomes and remaining backlog; completion does not mean the
+reader has confirmed all content or that every file was probed in one bounded turn.
 
 `semantic_reader_properties` may be empty or contain overrides for `follow`,
 `mute`, `wait` and `query`; omitted roles use `阅读关注`, `阅读静音`, `阅读等待`
 and `查询`. Final keys must be distinct, supported non-`wgo_*` scalar keys.
 `ReaderControls.property_mapping` normalizes these defaults for both first
-publication and subsequent `ReaderRuntime` polling. A custom query key is
+publication and subsequent `ReaderRuntime` polling. Item follow/mute/wait fields are prepared before
+registered actions freeze the target file hash, so the next poll cannot invalidate
+a newly checked action by initializing its own fields. A custom query key is
 registered on first publication; changing an already registered mapping fails
 explicitly instead of silently adopting another field. Unregistered existing
 fields are never adopted. Applied management preference

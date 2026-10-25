@@ -70,6 +70,7 @@ flowchart TB
     RESOLVE["SemanticEngine.resolve_batch<br/>候选 + typed decision → canonical commit"]
     CONSOL["SemanticEngine.consolidate<br/>merge/split/relation"]
     VIEWS["SemanticEngine.reconcile_views<br/>view 定义与 membership"]
+    LIVE_VIEWS["SemanticEngine.maintain_views v2<br/>16 Item metadata / turn 完整目录 60 KB<br/>artifact 后短事务 fresh CAS"]
     WATCH["(C) core/semantic/watches.py :: WatchService<br/>精确 temporal witness/Episode"]:::canon
   end
 
@@ -98,6 +99,8 @@ flowchart TB
     BODY_PAGE["(D) Markdown 正文 表格/列表/带归属引用 单一 detail home"]:::derived
     PUB["(D) ProjectionPublisher publish_item/publish_view<br/>冲突=exact bytes+draft"]:::derived
     CONTROLS["(C) ReaderControls<br/>属性/action/revision 手动 known/open"]:::canon
+    VIEW_CONTROL["ViewControls 主题管理<br/>明确说明/pin/exclude + action 同事务"]
+    CHANGES["(D) ReadingChanges<br/>明确已知 → 当前 snapshot 具体变化<br/>无模型 / 有界预览"]:::derived
     BRIEF_ACCEPT["(C) 已接受 BriefPlan/edition receipt durable"]:::canon
     BRIEF_FILE["(D) 冻结 edition 文本 不改写历史期"]:::derived
     DELIV["(C) DeliveryService 交付 receipt durable<br/>unknown 需 reconcile"]:::canon
@@ -257,6 +260,8 @@ flowchart TB
   RESOLVE -->|apply_proposal actions+decision| STORE
   CONSOL -->|merge/split/relation 保留 lineage| STORE
   VIEWS -->|view 定义 + membership| STORE
+  LIVE_VIEWS -->|已接受 TEXT/CHOICE| JOBS
+  LIVE_VIEWS -->|program membership + receipt 原子提交| STORE
   WATCH -->|witness/Episode 表| STORE
   WATCH -->|reader wait 归一| ROLES
   ATTR -.->|不建立 identity| INV_ATTR
@@ -314,6 +319,9 @@ flowchart TB
   DELIV -.->|acceptance 不等于 read/known| INV_SEP
   DELIV -.->|delivery 证据 durable| LEDGER
   READER_RT -->|属性同步/动作| CONTROLS
+  READER_RT -->|明确目录意图| VIEW_CONTROL
+  VIEW_CONTROL -->|同 conn CAS + action consumption| STORE
+  READER_RT -->|独立 canonical 导航维护| LIVE_VIEWS
   READER_RT -->|watch 同步| WATCH
   READER_RT -->|attention 桥接| DELIV
   READER_RT -->|visible-open inbox| INBOX
@@ -324,6 +332,11 @@ flowchart TB
   PUB -->|发布阅读导航| HOME
   LEDGER -->|只读版本/偏好 metadata| HOME
   STORE -->|只读条目/视图 metadata| HOME
+  STORE -->|只读当前/known snapshots| CHANGES
+  LEDGER -->|明确 known baseline| CHANGES
+  MAINT -->|有界变化维护| CHANGES
+  CHANGES -->|identity / 手写保护 / CAS| PUB
+  CHANGES -->|就绪入口| HOME
   HOME -->|仅链接就绪目标| WGO
   DELIV -->|resolve_click logical id| PUB
   CONTROLS -->|查询回调| RETRIEVAL

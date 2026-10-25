@@ -96,7 +96,7 @@ class AppMonitorResilienceTests(unittest.TestCase):
         with patch("core.semantic.runtime.SemanticRuntime.active", return_value=runtime) as active:
             app._run_semantic_reader()
         active.assert_called_once_with(app.config)
-        reader.poll.assert_called_once_with(maintain_derived=True)
+        reader.poll.assert_called_once_with(maintain_derived=True, maintain_views=True)
         runtime.index_all.assert_not_called()
         runtime.publish_all.assert_not_called()
         self.assertFalse(app._semantic_reader_lock.locked())

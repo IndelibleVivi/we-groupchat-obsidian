@@ -117,19 +117,59 @@ class JobStore:
             raise SemanticStoreError("semantic_job_artifact_corrupt") from exc
 
     def ensure(self, kind, inputs, versions):
+        with self.store.transaction() as conn:
+            return self._ensure(conn, kind, inputs, versions)
+
+    def _ensure(self, conn, kind, inputs, versions):
         kind, inputs, versions = text(kind), _object(inputs), _object(versions)
         key = self._key(kind, inputs, versions)
         identity, now = "job_" + key, self._now()
-        with self.store.transaction() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO jobs(job_id,job_key,kind,inputs_json,versions_json,state,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,'pending',?,?)",
-                (identity, key, kind, dumps(inputs), dumps(versions), now, now),
-            )
-            job = self._job(conn, identity)
-            _require(job["kind"] == kind and dumps(job["inputs"]) == dumps(inputs)
-                     and dumps(job["versions"]) == dumps(versions), "semantic_job_key_conflict")
+        conn.execute(
+            "INSERT OR IGNORE INTO jobs(job_id,job_key,kind,inputs_json,versions_json,state,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,'pending',?,?)",
+            (identity, key, kind, dumps(inputs), dumps(versions), now, now))
+        job = self._job(conn, identity)
+        _require(job["kind"] == kind and dumps(job["inputs"]) == dumps(inputs)
+                 and dumps(job["versions"]) == dumps(versions), "semantic_job_key_conflict")
+        return job
+
+    def _accept_view_projection(self, conn, kind, inputs, artifact):
+        """Store-only, unsent deterministic projection inside its canonical commit.
+
+        No claim/lease or provider attempt is manufactured. A caller must retain
+        this transaction through canonical apply and finish; rollback is atomic.
+        """
+        from .live_views import MEMBERS
+        _require(conn.in_transaction and kind in {"propose", "decision"}, "semantic_program_projection_invalid")
+        plan = self._job(conn, inputs["source_plan_job_id"])
+        choice = self._job(conn, inputs["source_choice_job_id"])
+        accepted_choice = self._artifact(conn, choice)
+        _require(plan["kind"] == "live_view_induction" and choice["kind"] == "live_view_choice"
+                 and choice["inputs"].get("proposal_job_id") == plan["job_id"]
+                 and self._artifact(conn, plan) is not None
+                 and accepted_choice is not None and accepted_choice.get("choice") == "apply", "semantic_program_projection_invalid")
+        job = self._ensure(conn, kind, inputs, {"contract": MEMBERS})
+        value = _object(artifact)
+        accepted = self._artifact(conn, job)
+        if accepted is not None:
+            _require(accepted == value, "semantic_job_artifact_conflict")
             return job
+        _require(job["state"] == "pending" and job["attempt"] == 0, "semantic_program_projection_invalid")
+        self._publish_artifact(conn, job["job_id"], value, self._now())
+        return self._job(conn, job["job_id"])
+
+    def _finish_in_transaction(self, conn, job_id, receipt_id):
+        _require(conn.in_transaction, "semantic_program_projection_invalid")
+        job = self._job(conn, job_id)
+        artifact = self._artifact(conn, job)
+        _require(artifact is not None, "semantic_job_artifact_required")
+        if job["state"] == "done":
+            _require(job["receipt_id"] == receipt_id, "semantic_job_finish_receipt_conflict")
+            return job
+        self._finish_proof(conn, job, artifact, receipt_id)
+        conn.execute("UPDATE jobs SET state='done',receipt_id=?,updated_at=? WHERE job_id=?",
+                     (receipt_id, self._now(), job_id))
+        return self._job(conn, job_id)
 
     def claim(self, job_id, worker_id, lease_seconds=300):
         job_id, worker_id = text(job_id), text(worker_id)

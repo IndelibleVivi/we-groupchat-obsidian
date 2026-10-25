@@ -831,6 +831,159 @@ class SemanticStore:
             conn.execute("UPDATE generation_manifest SET revision=revision+1")
         return self.get_view(view_id)
 
+    def update_view_controls(self, view_id, expected_definition_revision, expected_override_revision, *,
+                             definition=None, memberships=None, expected_item_revisions=None, include_memberships=True):
+        with self.transaction() as conn:
+            return self._update_view_controls(conn, view_id, expected_definition_revision,
+                expected_override_revision, definition=definition, memberships=memberships,
+                expected_item_revisions=expected_item_revisions, include_memberships=include_memberships)
+
+    def _update_view_controls(self, conn, view_id, expected_definition_revision, expected_override_revision, *,
+                              definition=None, memberships=None, expected_item_revisions=None, include_memberships=True):
+        """Explicit user-control CAS, also composable with reader action consumption.
+
+        Overrides have their own revision; no source, knowledge, reader facts or
+        historical Item revision is rewritten. Membership ownership is retained.
+        """
+        from .live_views import require
+        require(conn.in_transaction, "semantic_view_control_transaction_required")
+        text(view_id)
+        require(type(include_memberships) is bool, "semantic_view_control_invalid")
+        for value in (expected_definition_revision, expected_override_revision):
+            require(type(value) is int and value >= 0, "semantic_stale_read_set")
+        memberships = {} if memberships is None else memberships
+        expected_item_revisions = {} if expected_item_revisions is None else expected_item_revisions
+        require(isinstance(memberships, dict) and isinstance(expected_item_revisions, dict)
+                and set(memberships) == set(expected_item_revisions), "semantic_view_control_invalid")
+        if definition is not None:
+            definition = text(definition)
+        view = conn.execute("SELECT view_id,definition_revision,override_revision, "
+            "CASE WHEN ? IS NULL THEN 1 ELSE definition=? END AS definition_same FROM views WHERE view_id=?",
+            (definition, definition, view_id)).fetchone()
+        require(view is not None and view["definition_revision"] == expected_definition_revision
+                and view["override_revision"] == expected_override_revision, "semantic_stale_read_set")
+        prepared = []
+        for identity, flags in memberships.items():
+            text(identity)
+            require(isinstance(flags, dict) and set(flags) == {"pinned", "excluded"}
+                    and all(type(value) is bool for value in flags.values()), "semantic_view_control_invalid")
+            revision = expected_item_revisions[identity]
+            require(type(revision) is int and revision >= 1, "semantic_stale_read_set")
+            item = conn.execute("SELECT lifecycle,content_revision FROM items WHERE item_id=?", (identity,)).fetchone()
+            member = conn.execute("SELECT pinned,excluded FROM view_memberships WHERE view_id=? AND item_id=?", (view_id, identity)).fetchone()
+            require(item is not None and item["lifecycle"] == "active" and item["content_revision"] == revision
+                    and member is not None, "semantic_stale_read_set")
+            prepared.append((identity, flags, member))
+        definition_changed = definition is not None and not view["definition_same"]
+        override_changed = any(member["pinned"] != int(flags["pinned"]) or member["excluded"] != int(flags["excluded"])
+                               for _identity, flags, member in prepared)
+        if definition_changed:
+            conn.execute("UPDATE views SET definition=?,definition_revision=definition_revision+1 WHERE view_id=?", (definition, view_id))
+        for identity, flags, member in prepared:
+            if member["pinned"] != int(flags["pinned"]) or member["excluded"] != int(flags["excluded"]):
+                conn.execute("UPDATE view_memberships SET pinned=?,excluded=? WHERE view_id=? AND item_id=?",
+                             (int(flags["pinned"]), int(flags["excluded"]), view_id, identity))
+        if override_changed:
+            conn.execute("UPDATE views SET override_revision=override_revision+1 WHERE view_id=?", (view_id,))
+        if definition_changed or override_changed:
+            conn.execute("UPDATE generation_manifest SET revision=revision+1")
+        if include_memberships:
+            result = dict(conn.execute("SELECT * FROM views WHERE view_id=?", (view_id,)).fetchone())
+            result["memberships"] = [dict(row) for row in conn.execute("SELECT * FROM view_memberships WHERE view_id=? ORDER BY item_id", (view_id,))]
+            return result
+        return dict(conn.execute("SELECT view_id,definition_revision,override_revision,origin FROM views WHERE view_id=?", (view_id,)).fetchone())
+
+    def live_view_catalog(self):
+        from .live_views import catalog
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN")
+            result = catalog(conn)
+            result["observed_store_revision"] = conn.execute("SELECT revision FROM generation_manifest").fetchone()[0]
+            return result
+
+    def live_view_page(self, item_ids):
+        from .live_views import page_state
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN")
+            return page_state(conn, item_ids)
+
+    def commit_live_view_plan(self, plan_job_id, choice_job_id):
+        """Atomically accept deterministic actions and apply an accepted live plan.
+
+        Provider artifacts precede this method. A stale dependency leaves no
+        accepted action, newly created View or canonical side effect behind.
+        """
+        from .jobs import JobStore
+        from .live_views import (MEMBERS, require, page_state, validate_plan,
+                                 projected_groups, projected_actions)
+        jobs = JobStore(self)
+        with self.transaction() as conn:
+            plan_job, choice_job = [jobs._job(conn, identity) for identity in (plan_job_id, choice_job_id)]
+            require(plan_job["kind"] == "live_view_induction" and choice_job["kind"] == "live_view_choice"
+                    and choice_job["inputs"].get("proposal_job_id") == plan_job_id)
+            plan, choice = jobs._artifact(conn, plan_job), jobs._artifact(conn, choice_job)
+            require(plan is not None and choice is not None and choice.get("choice") == "apply")
+            require(choice_job["inputs"].get("proposal") == plan)
+            from .live_views import CONTRACT
+            require(plan_job["versions"].get("contract") == CONTRACT
+                    and plan.get("route") == plan_job["versions"].get("text_route")
+                    and choice.get("route") == plan_job["versions"].get("decision_route")
+                    and choice_job["versions"] == {"contract": "semantic-choice-v1", "route": plan_job["versions"]["decision_route"]})
+            state = plan_job["inputs"]["state"]
+            validate_plan({key: plan[key] for key in ("groups", "unassigned")}, state)
+            # Replay precedes current dependency checks: our own first commit
+            # changed revisions/catalog, and an ACK crash must not commit twice.
+            committed = conn.execute("SELECT t.transaction_id,t.job_id FROM canonical_transactions t JOIN jobs j ON j.job_id=t.job_id "
+                "WHERE j.kind='propose' AND json_extract(j.versions_json,'$.contract')=? "
+                "AND json_extract(j.inputs_json,'$.source_plan_job_id')=? "
+                "AND json_extract(j.inputs_json,'$.source_choice_job_id')=?", (MEMBERS, plan_job_id, choice_job_id)).fetchall()
+            require(len(committed) <= 1)
+            if committed:
+                proposal = jobs._job(conn, committed[0]["job_id"])
+                accepted = jobs._artifact(conn, proposal)
+                expected_actions = projected_actions(plan_job_id, projected_groups(self.generation_id, plan_job_id, plan))
+                require(accepted is not None and accepted.get("actions") == expected_actions
+                        and accepted.get("source_plan_job_id") == plan_job_id
+                        and accepted.get("source_choice_job_id") == choice_job_id
+                        and accepted.get("read_set") == proposal["inputs"].get("state", {}).get("read_set"))
+                receipt = self._verified_proposal_receipt(conn, proposal["job_id"], expected_actions,
+                                                         accepted["read_set"], choice)
+                require(proposal["state"] == "done" and proposal["receipt_id"] == receipt["receipt_id"])
+                return {"status": "complete", "view_ids": [g["view_id"] for g in projected_groups(self.generation_id, plan_job_id, plan)],
+                        "receipt": receipt, "replayed": True}
+            if page_state(conn, state["target_item_ids"]) != state:
+                return {"status": "stale", "view_ids": [], "receipt": None, "replayed": False}
+            groups = projected_groups(self.generation_id, plan_job_id, plan)
+            for group in groups:
+                row = conn.execute("SELECT * FROM views WHERE view_id=?", (group["view_id"],)).fetchone()
+                if row is None:
+                    conn.execute("INSERT INTO views VALUES(?,?,?,?,?,?)", (group["view_id"], group["title"], group["definition"], 1, 0, "model"))
+                    conn.execute("UPDATE generation_manifest SET revision=revision+1")
+                elif group["view_id"] not in state["views"]:
+                    require(row["title"] == group["title"] and row["definition"] == group["definition"] and row["origin"] == "model")
+            actions = projected_actions(plan_job_id, groups)
+            if not actions:
+                return {"status": "complete", "view_ids": [], "receipt": None, "replayed": False}
+            items = {}
+            for identity in state["items"]:
+                row = conn.execute("SELECT item_id,title,kind,identity_scope_json,content_revision FROM items WHERE item_id=?", (identity,)).fetchone()
+                items[identity] = {"item_id": identity, "title": row["title"], "kind": row["kind"],
+                                   "identity_scope": json.loads(row["identity_scope_json"]), "content_revision": row["content_revision"]}
+            views = {g["view_id"]: dict(conn.execute("SELECT * FROM views WHERE view_id=?", (g["view_id"],)).fetchone()) for g in groups}
+            read_set = {"store_revision": conn.execute("SELECT revision FROM generation_manifest").fetchone()[0],
+                        "items": {key: value["content_revision"] for key, value in items.items()},
+                        "views": {key: {field: value[field] for field in ("definition_revision", "override_revision")} for key, value in views.items()}}
+            member_state = {"items": items, "views": views, "observations": [], "new_item_ids": [], "read_set": read_set}
+            base = {"source_plan_job_id": plan_job_id, "source_choice_job_id": choice_job_id}
+            artifact = {"actions": actions, "read_set": read_set, **base}
+            proposal = jobs._accept_view_projection(conn, "propose", {"state": member_state, **base}, artifact)
+            decision = jobs._accept_view_projection(conn, "decision", {"proposal_job_id": proposal["job_id"], "proposal": artifact, **base}, choice)
+            receipt = self._apply_proposal(conn, proposal["job_id"], actions, read_set, choice,
+                                           timestamp(self.now_func()), str(uuid.uuid4()))
+            jobs._finish_in_transaction(conn, proposal["job_id"], receipt["receipt_id"])
+            jobs._finish_in_transaction(conn, decision["job_id"], receipt["receipt_id"])
+            return {"status": "complete", "view_ids": [g["view_id"] for g in groups], "receipt": receipt, "replayed": False}
+
     def _attach(self, conn, item_id, observation_ids, action_key, *, role="supports"):
         changed = False
         for oid in ids(observation_ids):
@@ -1249,136 +1402,142 @@ class SemanticStore:
         for action in actions:
             validate_action(action)
         ids([a["action_key"] for a in actions])
-        signature = digest([actions, read_set, decision])
         now, tx = timestamp(self.now_func()), str(uuid.uuid4())
         with self.transaction() as conn:
-            accepted = self._accepted(conn, job_id)
-            accepted_actions = accepted.get("actions", (accepted.get("proposal") or {}).get("actions"))
-            if accepted_actions != actions:
-                raise SemanticStoreError("decision_artifact_mismatch")
-            previous = conn.execute("SELECT * FROM decision_log WHERE job_id=?", (job_id,)).fetchone()
-            if previous:
-                receipt = json.loads(previous["receipt_json"])
-                if receipt["input_fingerprint"] != signature:
-                    raise SemanticStoreError("semantic_action_replay_conflict")
-                return receipt
-            revision = self._check_read_set(conn, read_set)
-            self._proposal_inputs(conn, job_id, accepted, actions, read_set, decision)
-            item_reads, view_reads = read_set["items"], read_set["views"]
-            proposed_ids = [a["item_id"] for a in actions if a["type"] == "CREATE_ITEM"]
-            proposed_ids += [o["item_id"] for a in actions if a["type"] == "SPLIT_ITEM" for o in a["outputs"]]
-            ids(proposed_ids, empty=True)
-            created, effects = set(), {}
+            return self._apply_proposal(conn, job_id, actions, read_set, decision, now, tx)
 
-            def affect(iid, effect="none"):
-                if iid not in effects or effect != "none":
-                    effects[iid] = effect
-
-            def require(iid):
-                row = conn.execute("SELECT * FROM items WHERE item_id=?", (iid,)).fetchone()
-                if row is None:
-                    raise SemanticStoreError("semantic_item_missing")
-                if iid not in created and iid not in item_reads:
-                    raise SemanticStoreError("semantic_item_read_required")
-                if row["lifecycle"] != "active":
-                    raise SemanticStoreError("semantic_item_retired")
-                return row
-
-            def create(value, action_key, roles=None):
-                iid = value["item_id"]
-                if conn.execute("SELECT 1 FROM items WHERE item_id=?", (iid,)).fetchone():
-                    raise SemanticStoreError("semantic_item_identity_conflict")
-                conn.execute("INSERT INTO items VALUES(?,?,?,?,?,?,?,?)", (iid, value["kind"], dumps(value["identity_scope"]), value["title"], 0, "active", now, now))
-                for oid in value["observation_ids"]:
-                    self._attach(conn, iid, [oid], action_key, role=(roles or {}).get(oid, "supports"))
-                created.add(iid); affect(iid, "detail_added")
-
-            for action in actions:
-                kind, key = action["type"], action["action_key"]
-                if conn.execute("SELECT 1 FROM action_receipts WHERE action_key=?", (key,)).fetchone():
-                    raise SemanticStoreError("semantic_action_key_conflict")
-                if kind == "CREATE_ITEM":
-                    create(action, key)
-                elif kind == "MERGE_INTO_ITEM":
-                    iid, effect = action["item_id"], action["semantic_effect"]
-                    require(iid)
-                    changed = self._attach(conn, iid, action["observation_ids"], key, role="evidence_only" if effect == "none" else "supports")
-                    if action.get("title") and effect != "none":
-                        conn.execute("UPDATE items SET title=? WHERE item_id=?", (text(action["title"]), iid))
-                    if changed or effect != "none":
-                        affect(iid, effect)
-                elif kind == "RELATE_ITEMS":
-                    left, right = require(action["from_item_id"]), require(action["to_item_id"])
-                    if left["item_id"] == right["item_id"]:
-                        raise SemanticStoreError("semantic_self_relation")
-                    for identity in action["evidence_ids"]:
-                        if not any(conn.execute(f"SELECT 1 FROM {table} WHERE {column}=?", (identity,)).fetchone()
-                                   for table, column in (("observations", "observation_id"), ("claims", "claim_id"), ("source_spans", "span_id"), ("source_records", "source_version_id"))):
-                            raise SemanticStoreError("semantic_relation_evidence_missing")
-                    conn.execute("INSERT INTO item_relations VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(from_item_id,to_item_id,relation) DO UPDATE SET direction=excluded.direction,reason=excluded.reason,evidence_json=excluded.evidence_json,receipt_id=excluded.receipt_id,read_revisions_json=excluded.read_revisions_json", (str(uuid.uuid4()), action["from_item_id"], action["to_item_id"], action["relation"], action["direction"], action["reason"], dumps(action["evidence_ids"]), dumps(item_reads), tx))
-                    affect(left["item_id"]); affect(right["item_id"])
-                elif kind == "ADD_MEMBERSHIP":
-                    require(action["item_id"])
-                    if action["view_id"] not in view_reads:
-                        raise SemanticStoreError("semantic_view_read_required")
-                    old = conn.execute("SELECT * FROM view_memberships WHERE view_id=? AND item_id=?", (action["view_id"], action["item_id"])).fetchone()
-                    if not (old and (old["pinned"] or old["excluded"] or old["origin"] == "user") and action["origin"] != "user"):
-                        values = (action["view_id"], action["item_id"], action.get("placement", ""), action["origin"], action.get("reason", ""), int(action.get("pinned", False)), int(action.get("excluded", False)))
-                        if old is None or tuple(old) != values:
-                            conn.execute("INSERT INTO view_memberships VALUES(?,?,?,?,?,?,?) ON CONFLICT(view_id,item_id) DO UPDATE SET placement=excluded.placement,origin=excluded.origin,reason=excluded.reason,pinned=excluded.pinned,excluded=excluded.excluded", values)
-                            if action["origin"] == "user":
-                                conn.execute("UPDATE views SET override_revision=override_revision+1 WHERE view_id=?", (action["view_id"],))
-                            affect(action["item_id"])
-                elif kind == "MERGE_ITEMS":
-                    for iid in action["item_ids"]:
-                        require(iid)
-                    target = action["target_item_id"]
-                    before = self._identity_snapshot(conn, action["item_ids"])
-                    conn.execute("INSERT INTO identity_operations VALUES(?,?,?,?,?,?,?)", (key, kind, dumps(action["item_ids"]), dumps([target]), action["reason"], dumps({"before": before}), tx))
-                    for iid in action["item_ids"]:
-                        if iid == target:
-                            continue
-                        for member in conn.execute("SELECT observation_id,role FROM item_observations WHERE item_id=?", (iid,)).fetchall():
-                            self._attach(conn, target, [member[0]], key, role=member[1])
-                        self._copy_identity_edges(conn, iid, target, key, tx, view_reads)
-                        self._alias(conn, iid, target, key)
-                        conn.execute("UPDATE items SET lifecycle='merged' WHERE item_id=?", (iid,))
-                        affect(iid)
-                    affect(target, "evidence_changed")
-                    after = self._identity_snapshot(conn, action["item_ids"])
-                    conn.execute("UPDATE identity_operations SET before_json=? WHERE operation_id=?", (dumps({"before": before, "after": after, "after_fingerprint": self._identity_fingerprint(after)}), key))
-                elif kind == "SPLIT_ITEM":
-                    old_id = action["item_id"]
-                    require(old_id)
-                    roles = dict(conn.execute("SELECT observation_id,role FROM item_observations WHERE item_id=?", (old_id,)).fetchall())
-                    assigned = set().union(*(set(output["observation_ids"]) for output in action["outputs"]))
-                    outputs = [output["item_id"] for output in action["outputs"]]
-                    if set(roles) != assigned or old_id in outputs:
-                        raise SemanticStoreError("semantic_split_conservation_failed")
-                    before = self._identity_snapshot(conn, [old_id])
-                    conn.execute("INSERT INTO identity_operations VALUES(?,?,?,?,?,?,?)", (key, kind, dumps([old_id]), dumps(outputs), action["reason"], dumps({"before": before}), tx))
-                    for output in action["outputs"]:
-                        create(output, key, roles)
-                        self._copy_identity_edges(conn, old_id, output["item_id"], key, tx, view_reads)
-                        self._alias(conn, old_id, output["item_id"], key)
-                    conn.execute("UPDATE items SET lifecycle='split' WHERE item_id=?", (old_id,))
-                    affect(old_id)
-                    after = self._identity_snapshot(conn, [old_id, *outputs])
-                    conn.execute("UPDATE identity_operations SET before_json=? WHERE operation_id=?", (dumps({"before": before, "after": after, "after_fingerprint": self._identity_fingerprint(after)}), key))
-                for relation in action.get("claim_relations", []):
-                    for iid, effect in self._claim_relation(conn, relation, revision + 1).items():
-                        affect(iid, effect)
-            affected, outboxes = self._publish_items(conn, effects, tx, now)
-            conn.execute("UPDATE generation_manifest SET revision=revision+1")
-            receipt = {"receipt_id": tx, "transaction_id": tx, "outbox_id": tx, "outbox_ids": outboxes, "job_id": job_id,
-                       "affected_item_ids": affected, "store_revision": revision + 1,
-                       "input_fingerprint": signature, "generation_id": self.generation_id}
-            conn.execute("INSERT INTO canonical_transactions VALUES(?,?,?,?,?)", (tx, job_id, dumps(actions), dumps(outboxes), now))
-            conn.execute("INSERT INTO decision_log VALUES(?,?,?,?,?)", (job_id, tx, dumps(decision or {}), dumps(read_set), dumps(receipt)))
-            for action in actions:
-                conn.execute("INSERT INTO action_receipts VALUES(?,?,?,?,?,?)", (action["action_key"], job_id, tx, digest(action), dumps(action), dumps(receipt)))
-            self._record_proposal_supersessions(conn, job_id, now)
+    def _apply_proposal(self, conn, job_id, actions, read_set, decision, now, tx):
+        """One canonical implementation; callers explicitly own the transaction."""
+        signature = digest([actions, read_set, decision])
+        for action in actions:
+            validate_action(action)
+        accepted = self._accepted(conn, job_id)
+        accepted_actions = accepted.get("actions", (accepted.get("proposal") or {}).get("actions"))
+        if accepted_actions != actions:
+            raise SemanticStoreError("decision_artifact_mismatch")
+        previous = conn.execute("SELECT * FROM decision_log WHERE job_id=?", (job_id,)).fetchone()
+        if previous:
+            receipt = json.loads(previous["receipt_json"])
+            if receipt["input_fingerprint"] != signature:
+                raise SemanticStoreError("semantic_action_replay_conflict")
             return receipt
+        revision = self._check_read_set(conn, read_set)
+        self._proposal_inputs(conn, job_id, accepted, actions, read_set, decision)
+        item_reads, view_reads = read_set["items"], read_set["views"]
+        proposed_ids = [a["item_id"] for a in actions if a["type"] == "CREATE_ITEM"]
+        proposed_ids += [o["item_id"] for a in actions if a["type"] == "SPLIT_ITEM" for o in a["outputs"]]
+        ids(proposed_ids, empty=True)
+        created, effects = set(), {}
+
+        def affect(iid, effect="none"):
+            if iid not in effects or effect != "none":
+                effects[iid] = effect
+
+        def require(iid):
+            row = conn.execute("SELECT * FROM items WHERE item_id=?", (iid,)).fetchone()
+            if row is None:
+                raise SemanticStoreError("semantic_item_missing")
+            if iid not in created and iid not in item_reads:
+                raise SemanticStoreError("semantic_item_read_required")
+            if row["lifecycle"] != "active":
+                raise SemanticStoreError("semantic_item_retired")
+            return row
+
+        def create(value, action_key, roles=None):
+            iid = value["item_id"]
+            if conn.execute("SELECT 1 FROM items WHERE item_id=?", (iid,)).fetchone():
+                raise SemanticStoreError("semantic_item_identity_conflict")
+            conn.execute("INSERT INTO items VALUES(?,?,?,?,?,?,?,?)", (iid, value["kind"], dumps(value["identity_scope"]), value["title"], 0, "active", now, now))
+            for oid in value["observation_ids"]:
+                self._attach(conn, iid, [oid], action_key, role=(roles or {}).get(oid, "supports"))
+            created.add(iid); affect(iid, "detail_added")
+
+        for action in actions:
+            kind, key = action["type"], action["action_key"]
+            if conn.execute("SELECT 1 FROM action_receipts WHERE action_key=?", (key,)).fetchone():
+                raise SemanticStoreError("semantic_action_key_conflict")
+            if kind == "CREATE_ITEM":
+                create(action, key)
+            elif kind == "MERGE_INTO_ITEM":
+                iid, effect = action["item_id"], action["semantic_effect"]
+                require(iid)
+                changed = self._attach(conn, iid, action["observation_ids"], key, role="evidence_only" if effect == "none" else "supports")
+                if action.get("title") and effect != "none":
+                    conn.execute("UPDATE items SET title=? WHERE item_id=?", (text(action["title"]), iid))
+                if changed or effect != "none":
+                    affect(iid, effect)
+            elif kind == "RELATE_ITEMS":
+                left, right = require(action["from_item_id"]), require(action["to_item_id"])
+                if left["item_id"] == right["item_id"]:
+                    raise SemanticStoreError("semantic_self_relation")
+                for identity in action["evidence_ids"]:
+                    if not any(conn.execute(f"SELECT 1 FROM {table} WHERE {column}=?", (identity,)).fetchone()
+                               for table, column in (("observations", "observation_id"), ("claims", "claim_id"), ("source_spans", "span_id"), ("source_records", "source_version_id"))):
+                        raise SemanticStoreError("semantic_relation_evidence_missing")
+                conn.execute("INSERT INTO item_relations VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(from_item_id,to_item_id,relation) DO UPDATE SET direction=excluded.direction,reason=excluded.reason,evidence_json=excluded.evidence_json,receipt_id=excluded.receipt_id,read_revisions_json=excluded.read_revisions_json", (str(uuid.uuid4()), action["from_item_id"], action["to_item_id"], action["relation"], action["direction"], action["reason"], dumps(action["evidence_ids"]), dumps(item_reads), tx))
+                affect(left["item_id"]); affect(right["item_id"])
+            elif kind == "ADD_MEMBERSHIP":
+                require(action["item_id"])
+                if action["view_id"] not in view_reads:
+                    raise SemanticStoreError("semantic_view_read_required")
+                old = conn.execute("SELECT * FROM view_memberships WHERE view_id=? AND item_id=?", (action["view_id"], action["item_id"])).fetchone()
+                if not (old and (old["pinned"] or old["excluded"] or old["origin"] == "user") and action["origin"] != "user"):
+                    values = (action["view_id"], action["item_id"], action.get("placement", ""), action["origin"], action.get("reason", ""), int(action.get("pinned", False)), int(action.get("excluded", False)))
+                    if old is None or tuple(old) != values:
+                        conn.execute("INSERT INTO view_memberships VALUES(?,?,?,?,?,?,?) ON CONFLICT(view_id,item_id) DO UPDATE SET placement=excluded.placement,origin=excluded.origin,reason=excluded.reason,pinned=excluded.pinned,excluded=excluded.excluded", values)
+                        if action["origin"] == "user":
+                            conn.execute("UPDATE views SET override_revision=override_revision+1 WHERE view_id=?", (action["view_id"],))
+                        affect(action["item_id"])
+            elif kind == "MERGE_ITEMS":
+                for iid in action["item_ids"]:
+                    require(iid)
+                target = action["target_item_id"]
+                before = self._identity_snapshot(conn, action["item_ids"])
+                conn.execute("INSERT INTO identity_operations VALUES(?,?,?,?,?,?,?)", (key, kind, dumps(action["item_ids"]), dumps([target]), action["reason"], dumps({"before": before}), tx))
+                for iid in action["item_ids"]:
+                    if iid == target:
+                        continue
+                    for member in conn.execute("SELECT observation_id,role FROM item_observations WHERE item_id=?", (iid,)).fetchall():
+                        self._attach(conn, target, [member[0]], key, role=member[1])
+                    self._copy_identity_edges(conn, iid, target, key, tx, view_reads)
+                    self._alias(conn, iid, target, key)
+                    conn.execute("UPDATE items SET lifecycle='merged' WHERE item_id=?", (iid,))
+                    affect(iid)
+                affect(target, "evidence_changed")
+                after = self._identity_snapshot(conn, action["item_ids"])
+                conn.execute("UPDATE identity_operations SET before_json=? WHERE operation_id=?", (dumps({"before": before, "after": after, "after_fingerprint": self._identity_fingerprint(after)}), key))
+            elif kind == "SPLIT_ITEM":
+                old_id = action["item_id"]
+                require(old_id)
+                roles = dict(conn.execute("SELECT observation_id,role FROM item_observations WHERE item_id=?", (old_id,)).fetchall())
+                assigned = set().union(*(set(output["observation_ids"]) for output in action["outputs"]))
+                outputs = [output["item_id"] for output in action["outputs"]]
+                if set(roles) != assigned or old_id in outputs:
+                    raise SemanticStoreError("semantic_split_conservation_failed")
+                before = self._identity_snapshot(conn, [old_id])
+                conn.execute("INSERT INTO identity_operations VALUES(?,?,?,?,?,?,?)", (key, kind, dumps([old_id]), dumps(outputs), action["reason"], dumps({"before": before}), tx))
+                for output in action["outputs"]:
+                    create(output, key, roles)
+                    self._copy_identity_edges(conn, old_id, output["item_id"], key, tx, view_reads)
+                    self._alias(conn, old_id, output["item_id"], key)
+                conn.execute("UPDATE items SET lifecycle='split' WHERE item_id=?", (old_id,))
+                affect(old_id)
+                after = self._identity_snapshot(conn, [old_id, *outputs])
+                conn.execute("UPDATE identity_operations SET before_json=? WHERE operation_id=?", (dumps({"before": before, "after": after, "after_fingerprint": self._identity_fingerprint(after)}), key))
+            for relation in action.get("claim_relations", []):
+                for iid, effect in self._claim_relation(conn, relation, revision + 1).items():
+                    affect(iid, effect)
+        affected, outboxes = self._publish_items(conn, effects, tx, now)
+        conn.execute("UPDATE generation_manifest SET revision=revision+1")
+        receipt = {"receipt_id": tx, "transaction_id": tx, "outbox_id": tx, "outbox_ids": outboxes, "job_id": job_id,
+                   "affected_item_ids": affected, "store_revision": revision + 1,
+                   "input_fingerprint": signature, "generation_id": self.generation_id}
+        conn.execute("INSERT INTO canonical_transactions VALUES(?,?,?,?,?)", (tx, job_id, dumps(actions), dumps(outboxes), now))
+        conn.execute("INSERT INTO decision_log VALUES(?,?,?,?,?)", (job_id, tx, dumps(decision or {}), dumps(read_set), dumps(receipt)))
+        for action in actions:
+            conn.execute("INSERT INTO action_receipts VALUES(?,?,?,?,?,?)", (action["action_key"], job_id, tx, digest(action), dumps(action), dumps(receipt)))
+        self._record_proposal_supersessions(conn, job_id, now)
+        return receipt
 
     def restore_identity_operation(self, operation_id, expected_read_set):
         tx, now = str(uuid.uuid4()), timestamp(self.now_func())
@@ -1532,6 +1691,34 @@ class SemanticStore:
                 if any(r["job_id"] != row["job_id"] or r["input_fingerprint"] != digest(json.loads(r["action_json"])) for r in persisted):
                     raise SemanticStoreError("semantic_action_evidence_missing")
         return outboxes
+
+    def _verified_proposal_receipt(self, conn, job_id, actions, read_set, decision):
+        """Rebuild a proposal receipt from its exact immutable canonical bindings.
+
+        Nested receipt copies are checked against the reconstruction, never
+        treated as the authority for a replayed operation's fingerprint/effects.
+        """
+        from .live_views import require
+        code = "semantic_canonical_receipt_invalid"
+        row = conn.execute("SELECT * FROM decision_log WHERE job_id=?", (job_id,)).fetchone()
+        require(row is not None, code)
+        tx = row["transaction_id"]
+        transaction = conn.execute("SELECT * FROM canonical_transactions WHERE transaction_id=?", (tx,)).fetchone()
+        require(transaction is not None and transaction["job_id"] == job_id
+                and json.loads(transaction["actions_json"]) == actions
+                and json.loads(row["decision_json"]) == decision
+                and json.loads(row["read_set_json"]) == read_set
+                and type(read_set.get("store_revision")) is int, code)
+        outboxes = self._verify_transaction(conn, tx)
+        affected = [item[0] for item in conn.execute(
+            "SELECT item_id FROM item_revisions WHERE transaction_id=? ORDER BY item_id", (tx,))]
+        expected = {"receipt_id": tx, "transaction_id": tx, "outbox_id": tx, "outbox_ids": outboxes,
+                    "job_id": job_id, "affected_item_ids": affected, "store_revision": read_set["store_revision"] + 1,
+                    "input_fingerprint": digest([actions, read_set, decision]), "generation_id": self.generation_id}
+        require(json.loads(row["receipt_json"]) == expected, code)
+        persisted = conn.execute("SELECT receipt_json FROM action_receipts WHERE transaction_id=? ORDER BY rowid", (tx,)).fetchall()
+        require(len(persisted) == len(actions) and all(json.loads(value[0]) == expected for value in persisted), code)
+        return expected
 
     def _batch_proof(self, conn, batch_id, frozen=None):
         batch = conn.execute("SELECT * FROM capture_batches WHERE batch_id=?", (batch_id,)).fetchone()

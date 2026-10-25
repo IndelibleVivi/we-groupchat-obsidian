@@ -68,6 +68,15 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(self.pending(), [("cat", "done")])
         self.assertEqual(self.store.read_revision(), revision)
 
+    def test_strict_publication_drains_change_pages_beyond_one_daily_turn(self):
+        for index in range(21):
+            self.item("item-" + str(index))
+        result = self.runtime.publish_all()
+        self.assertTrue(result["complete"], result)
+        for index in range(21):
+            self.assertTrue(self.runtime.publisher.ready("changes:item-" + str(index), 1))
+        self.assertTrue(self.runtime.publisher.ready("control:changes"))
+
     def test_local_item_failure_does_not_prevent_other_pages_and_strict_still_raises(self):
         self.item("one")
         self.item("two")

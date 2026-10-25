@@ -290,9 +290,34 @@ the original active IDs and associations. Split restoration keeps the output
 IDs as `restored` redirects to the original identity. `identity_restorations`
 binds one exact compensation; replay with its exact original read set adopts it.
 
-`create_view(view_id,title,definition,*,origin="user")` creates a definition;
+`create_view(view_id,title,definition,*,origin="user")` creates a definition.
 `update_view(view_id,definition,expected_revision)` revises it. `get_view` returns
-definition_revision/override_revision. `pending_outbox(kind,limit=100)` and
+definition_revision/override_revision.
+
+Daily navigation uses `commit_live_view_plan(plan_job_id, choice_job_id)`. It first
+reuses an already committed exact operation receipt, then checks accepted v2
+TEXT/CHOICE routes, hashes, complete page coverage and actual Item/View/override
+dependencies. Stale dependencies retain model artifacts and create no accepted
+canonical action. A short transaction creates deterministic new definitions,
+fresh-CAS program proposal/choice, ordinary ADD_MEMBERSHIP changes and their
+canonical receipt atomically. Provider and projection IO occur outside it.
+The independent verifier reconstructs this program lineage. This uses existing
+jobs/artifact/transaction tables; no schema migration or supersession ledger is added.
+
+`update_view_controls(view_id, expected_definition_revision, expected_override_revision,
+*, definition=None, memberships=None, expected_item_revisions=None)` applies a user
+batch. Every member supplies both boolean `pinned`/`excluded` values and its exact
+Item revision. It preserves membership origin/placement/reason and increments only
+changed View revisions plus global state, without changing Item content revisions.
+Its `_update_view_controls(conn, ...)` seam allows reader action consumption in
+the same transaction. `include_memberships=False` omits the full membership return
+for bounded internal consumers; the public default retains it.
+Only existing active members are admitted. Auto induction adds memberships;
+neither it nor a definition edit removes old memberships. User overrides are
+protected by ordinary canonical apply. Frozen rebuild v1 keeps its original path
+and artifacts; previously stale accepted v1 actions are not automatically repaired.
+
+`pending_outbox(kind,limit=100)` and
 `ack_outbox(kind,outbox_id,owner_id,revision,receipt_id)` bind exact revisions.
 Projection ACK also requires the current Item revision. After a real latest
 projection ACK, `supersede_projection_outbox(owner_id,published_revision,

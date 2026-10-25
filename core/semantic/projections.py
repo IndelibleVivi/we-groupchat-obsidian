@@ -2689,6 +2689,11 @@ class ProjectionPublisher:
         guards = json.loads(guards_row[0]) if guards_row else {}
         if any(self.current_revision(item_id) != revision for item_id, revision in guards.get("revisions", {}).items()):
             return False
+        for item_id, revision in guards.get("known_revisions", {}).items():
+            known = self.ledger.one("SELECT MAX(content_revision) FROM reader_known WHERE generation_id=? AND item_id=?",
+                                   (self.ledger.generation_id, item_id))[0] or 0
+            if known != revision:
+                return False
         for item_id, binding in guards.get("items", {}).items():
             if self.current_revision(item_id) != binding[2]:
                 return False
@@ -2707,7 +2712,7 @@ class ProjectionPublisher:
             current = self.current_revision(object_id.removeprefix("source:").rsplit(":", 1)[0])
         else:
             current = self.current_revision(object_id)
-        if object_id.startswith(("brief:", "control:", "query-history:", "view:")):
+        if object_id.startswith(("brief:", "control:", "query-history:", "view:", "changes:")):
             latest = self.ledger.one("SELECT MAX(content_revision) FROM reader_proposals WHERE generation_id=? "
                                      "AND object_id=? AND status='pending'", (self.ledger.generation_id, object_id))[0]
             return latest == row["content_revision"] and (current is None or current <= latest)
