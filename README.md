@@ -59,6 +59,21 @@ filename headings out of reading mode, while retaining user properties and the
 original editable Markdown. Without it, use explicit read/known actions.
 The plugin is source-only and is not installed or enabled automatically.
 
+`WGO/首页.md` connects ready Items, topic views, today's latest successful brief,
+search, management and reading status. Recent, new, updated and followed/waiting
+lists show the current content version, observed visible-open version and explicit
+known version separately. Each list shows up to 20 entries plus its total; no
+plugin or extra model call is needed to build the home page. Ordinary user renames
+follow identity. A filename that cannot be represented safely as an Obsidian link
+is shown without a link, and an overlong title/wait label is replaced with a short
+notice rather than truncating a potentially sensitive URL.
+
+Source-free maintenance handles reading controls first and repairs projections
+independently of indexing. Local page failures retain their work while other
+independent pages continue; provider stops, unknown outcomes and manual conflicts
+keep their existing protections. Reading status reports the separate facets,
+and strict rebuild completion checks Item, View, control and home receipts.
+
 New Item pages start with a readable title as their filename, adding a short ID
 only for a collision. Existing UUID filenames, saved paths and user renames stay
 in place; a later generated title change does not move the page.
@@ -116,6 +131,11 @@ when `--runtime-root` is omitted; an unconfigured installation uses
 [provider contract](docs/semantic-providers.md), and [candidate status](docs/current-state.md).
 Consumer-specific archive producers now belong to external adapters; generic
 resource capture, explicit context capture, CAS and mounted backup remain here.
+
+The [development programme](docs/development-programme.md) connects this candidate
+to the mature reading workflow: reliable delivery, evolving topic navigation,
+evidence-based questions and explicit reading feedback. It distinguishes current
+capabilities from further development and real-use acceptance.
 
 ## Obsidian output preview
 

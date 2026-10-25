@@ -26,6 +26,23 @@ from core.source_inventory import SourceInventoryStore, source_namespaces_for_ro
 
 
 class HealthCheckTests(unittest.TestCase):
+    def test_semantic_delivery_line_reports_outcomes_without_private_details_or_read_claims(self):
+        database = {"delivery": {"state": "unknown", "counts": {
+            "accepted": 3, "rejected": 1, "silent": 2, "deferred": 4, "sending": 1, "unknown": 2,
+            "invalid": 0}, "event_id": "private-event", "code": "private-code", "body": "private-body"}}
+        line = health_check.semantic_delivery_status(database)
+        self.assertTrue(line.startswith("[WARN] Semantic reader delivery: state=unknown;"))
+        self.assertIn("accepted=3; rejected=1; silent=2; deferred=4; sending=1; unknown=2; invalid=0", line)
+        self.assertIn("accepted_is_read=False", line)
+        self.assertNotIn("private-", line)
+        database["delivery"]["state"] = "rejected"
+        self.assertTrue(health_check.semantic_delivery_status(database).startswith("[WARN]"))
+
+    def test_semantic_delivery_line_distinguishes_unprobed_from_missing_legacy_table(self):
+        self.assertIn("state=not_probed;", health_check.semantic_delivery_status({"state": "not_active"}))
+        self.assertIn("state=not_initialized;", health_check.semantic_delivery_status({
+            "delivery": {"state": "not_initialized", "counts": {}}}))
+
     def test_monitor_state_inspect_does_not_create_parent_or_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "absent" / "monitor-state.json"

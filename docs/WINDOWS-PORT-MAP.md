@@ -217,11 +217,12 @@ owner keeps its portable storage boundary, including v3 capture/applied receipts
 | `core/semantic/controls.py` | `deferred-w0.2` | Reader control reconciliation depends on current projection/file ownership and publication. |
 | `core/semantic/delivery.py` | `deferred-w0.2` | Durable attention/delivery receipts consume current reading storage; no Windows notification or opening adapter is enabled. |
 | `core/semantic/engine.py` | `deferred-w1+` | Bounded extraction and semantic proposal orchestration with typed accepted jobs; no Windows source/runtime activation. |
-| `core/semantic/health.py` | `deferred-w1+` | Config-inspected generation/checkpoint/budget counters only; existing SQLite evidence is opened read-only, never initialized or migrated. No provider, credential or protected-source access. |
+| `core/semantic/health.py` | `deferred-w1+` | Config-inspected generation/checkpoint/budget and delivery-status counters only; existing SQLite evidence is opened read-only, never initialized or migrated. No provider, credential or protected-source access. |
 | `core/semantic/jobs.py` | `deferred-w1+` | Lease, accepted artifact and explicit unknown-outcome reconciliation over an injected canonical transaction; Windows generation store acceptance remains deferred. |
 | `core/semantic/legacy.py` | `deferred-w0.2` | Exact local legacy evidence import and association preservation; current file/path and projection storage have not received Windows acceptance. |
 | `core/semantic/projections.py` | `deferred-w0.2` | Reading artifacts and ownership-aware publication use current filesystem/symlink/mode semantics; Windows native path/private publication acceptance remains outstanding. |
 | `core/semantic/reader_runtime.py` | `deferred-w0.2` | Background reader controls, direct-open and delivery composition use current projection storage and the macOS application shell. |
+| `core/semantic/reading_home.py` | `deferred-w0.2` | Bounded metadata navigation and exact opened/known version presentation reuse current reader/projection storage; no Windows filesystem or runtime acceptance implied. |
 | `core/semantic/rebuild.py` | `macos-only` | GenerationRegistry is read-only; the coordinator also owns explicit protected-source grants, macOS LaunchAgent/app lifecycle and current capture locks. No Windows rebuild/runtime claim. |
 | `core/semantic/rebuild_payloads.py` | `deferred-w0.2` | Private immutable payload publication and locked streaming journal conversion; Windows rebuild activation remains unsupported. |
 | `core/semantic/retrieval.py` | `deferred-w1+` | Generation/profile-bound lexical and dense retrieval with index receipts; Windows canonical/index lifecycle acceptance remains deferred. |

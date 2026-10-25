@@ -140,19 +140,19 @@ class SemanticRuntimeTests(unittest.TestCase):
         self.assertEqual(self.monitor._check_once()["status"], "semantic_processing_pending")
         self.assertEqual((len(self.text.calls), len(decision.calls)), counts)
         self.source.shards["shard"]["messages"].append(raw_message("g", 3, 30, "evidence"))
-        with patch.object(self.runtime, "publish_all", return_value={"complete": True}):
+        with patch.object(self.runtime, "maintain_derived", return_value={"state": "ready"}):
             self.assertEqual(self.monitor._check_once()["status"], "semantic_processing_pending")
         self.assertEqual(self.state.inspect().data["source_cursors"], before)
         self.assertEqual(len(self.store.list_items()), 1)
         # Restart keeps epoch/accepted artifacts; ACK moves only in raw order.
         self.runtime.engine = SemanticEngine(self.store, self.text, decision)
-        with patch.object(self.runtime, "publish_all", return_value={"complete": True}):
+        with patch.object(self.runtime, "maintain_derived", return_value={"state": "ready"}):
             for _ in range(4):
                 self.monitor._check_once()
         self.assertEqual(self.state.inspect().data["last_checked_ts"], 30)
         self.assertEqual(len(self.store.list_items()), 1)
         calls = len(self.text.calls), len(decision.calls)
-        with patch.object(self.runtime, "publish_all", return_value={"complete": True}):
+        with patch.object(self.runtime, "maintain_derived", return_value={"state": "ready"}):
             self.monitor._check_once()
         self.assertEqual((len(self.text.calls), len(decision.calls)), calls)
 
@@ -237,13 +237,26 @@ class SemanticRuntimeTests(unittest.TestCase):
 
     def test_projection_failure_does_not_replay_canonical_provider_work(self):
         self.append()
-        with patch.object(self.runtime, "publish_all", side_effect=OSError("synthetic projection failure")):
+        with patch.object(self.runtime, "_publish_all", side_effect=OSError("synthetic projection failure")):
             result = self.monitor._check_once()
         self.assertEqual(result["status"], "semantic_applied")
-        self.assertEqual(result["derived_state"], "pending")
+        self.assertEqual(result["derived_state"], "blocked")
+        self.assertFalse(result["derived"]["projection"]["complete"])
+        self.assertEqual(self.state.inspect().data["last_checked_ts"], 20)
         called = len(self.text.calls)
         self.monitor._check_once()
         self.assertEqual(len(self.text.calls), called)
+
+    def test_projection_summary_failure_after_ack_still_attempts_independent_index(self):
+        self.append()
+        with patch.object(self.runtime, "_projection_summary", side_effect=OSError("private inspection failure")), \
+             patch.object(self.runtime, "index_all", wraps=self.runtime.index_all) as index:
+            result = self.monitor._check_once()
+        self.assertEqual(result["status"], "semantic_applied")
+        self.assertEqual(result["derived_state"], "blocked")
+        self.assertEqual(result["derived"]["index"]["state"], "ready")
+        self.assertEqual(self.state.inspect().data["last_checked_ts"], 20)
+        index.assert_called_once_with(max_rounds=1)
 
     def test_dry_run_has_zero_source_or_provider_side_effects(self):
         before = self.state.inspect()

@@ -92,13 +92,13 @@ class AppMonitorResilienceTests(unittest.TestCase):
         app._semantic_reader_lock = threading.Lock()
         runtime, reader = unittest.mock.Mock(), unittest.mock.Mock()
         app._semantic_reader = unittest.mock.Mock(return_value=reader)
-        reader.poll.side_effect = app._run_semantic_reader
+        reader.poll.side_effect = lambda **_kwargs: app._run_semantic_reader()
         with patch("core.semantic.runtime.SemanticRuntime.active", return_value=runtime) as active:
             app._run_semantic_reader()
         active.assert_called_once_with(app.config)
-        reader.poll.assert_called_once()
-        runtime.index_all.assert_called_once_with(max_rounds=1)
-        runtime.publish_all.assert_called_once()
+        reader.poll.assert_called_once_with(maintain_derived=True)
+        runtime.index_all.assert_not_called()
+        runtime.publish_all.assert_not_called()
         self.assertFalse(app._semantic_reader_lock.locked())
 
     def test_semantic_daily_brief_does_not_enter_legacy_digest(self):

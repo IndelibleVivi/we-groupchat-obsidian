@@ -19,7 +19,7 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 [port map](docs/WINDOWS-PORT-MAP.md)，参与适配请从
 [Windows 开发接手说明](docs/WINDOWS-DEVELOPMENT.md) 开始。
 
-一个本地优先的 macOS 微信群聊总结工具。它读取你电脑上的微信本地数据库，生成群聊摘要、关键词搜索结果，并把值得关注的新消息整理成 Obsidian-friendly Markdown 笔记。
+一个本地优先的 macOS 微信群聊知识工具。它读取你电脑上的微信本地数据库，支持群聊摘要与搜索，并继续发展让知识、经验与生活故事在 Obsidian 中跨群、跨天延续的语义工作流。
 
 它不是微信/Tencent 官方软件，不是微信机器人，不是员工监控工具；启用云端 AI 时，它也不是完全离线工具。它不接入微信官方/非官方接口，也不会替你把聊天记录上传到项目作者的服务器。所有运行状态、数据库 key、知识库和导出文件默认都保存在你自己的 Mac 上；内置远程链接预览已停用并保持零网络请求；可选 MCP read tools 会另外把你选择读取的本机 chat-derived data 暴露给你配置的 MCP client。
 
@@ -47,6 +47,16 @@ Ollama 不再访问凭据存储。这仍是源码可移植性，不是 Windows a
 可选的[本地 Obsidian 插件](integrations/obsidian/README.md)只为确实可见的页面记录打开事件，
 并在阅读模式收起机器属性与重复的文件名标题，保留用户属性和原始可编辑 Markdown；
 未装插件时使用手动读过／已知动作。仓库提供插件源码，不自动安装或启用。
+
+`WGO/首页.md` 连接已就绪的条目、主题视图、当日最近成功简报、检索、管理与阅读状态。
+最近、新内容、更新、关注与等待列表分别显示当前内容版本、实际可见打开版本与明确已知版本；
+每类最多显示 20 条并给出总数。首页不依赖插件或新增模型请求，普通改名按 identity 接续。
+无法安全表示为 Obsidian 链接的文件名只显示提示；过长标题或等待标签整体显示简短说明，
+避免在 URL 脱敏前截断出敏感片段。
+
+来源无关的日常维护先处理阅读控制，再独立恢复正文与索引。局部页面失败保留原工作，
+其它独立页面继续发布；provider 停止、unknown 与手写冲突仍保留既有保护。
+阅读状态分别显示这些维护结果；严格重建按 Item、View、控制页与首页的实际回执判断完成。
 
 新 Item 页初始使用可读标题作为文件名，冲突时增加短 ID。已有 UUID 文件名、保存的位置与用户改名
 继续保留，后续自动标题变化不会移动页面。
@@ -76,6 +86,10 @@ SQLite 仍是知识真源。Embedding 可以选显式配置的本机模型服务
 数据流见[provider contract](docs/semantic-providers.md)，准确阶段见[候选状态](docs/current-state.md)。
 专用 archive producer、profile 与菜单已移至外部 adapter；公共 WGO 保留通用 source/capture、
 显式 context capture、CAS 和 mounted backup。
+
+[连续建设 programme](docs/development-programme.md) 把当前候选接向成熟的阅读工作流：
+可靠交付、持续生长的主题目录、有依据的问题入口与明确的阅读反馈；其中区分了现有能力、
+后续建设目标和真实使用验收。
 
 当前版本的已知抽取输出超限会保留失败页，通过更小的精确 coverage jobs 继续。未知 provider
 结果仍阻断；独立、明确的人工授权可以为有限的一组精确抽取页各开放一次新 attempt，

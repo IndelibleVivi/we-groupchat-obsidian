@@ -24,6 +24,14 @@ SQLite 保存 canonical source、语义、关系、任务和提交证据。Markd
 
 新 generation 使用固定的 `WGO/` 阅读根目录。Item 是持续更新的知识正文，保持稳定 `wgo_id`。`WGO/视图/` 下的 View 是主题目录页：通过链接或段落嵌入，把同一正文组织到不同主题下，不复制维护第二份正文，也不需要独立的查看器。简报保留当时的正文与证据。旧笔记有完整的冻结备份和可见的 Legacy 导航，不把旧摘要冒充原始聊天。
 
+从菜单“打开阅读首页”进入 `WGO/首页.md`，可以继续阅读最近条目、新内容、更新、
+关注与等待，或进入检索、管理、阅读状态、主题视图和今天最近成功的一版简报。
+每类列表显示最近 20 条和总数，只给已就绪目标生成链接；未就绪时保留说明。
+首页分别显示当前内容版本、实际可见打开版本和明确已知版本：打开过 v1 不会吞掉 v2，
+没有可见打开插件也能明确确认已知。过长标签会显示简短说明，完整标题与等待条件仍在原条目；
+含 Obsidian 保留分隔符的改名文件不生成伪有效链接，也不自动替用户改名。
+首页使用同一套人工编辑保护与 identity 接续，不产生新的模型调用或修改阅读事实。
+
 新细节可以改写它所进入的自动段落，保持原段落位置、稳定链接与完整证据；不必先逐字重复旧句再追加说明。没有新内容的段落保持原样，准确原话与手写保护仍生效。
 
 正文按内容选择 Markdown 形式：比较不同条件时可用表格，操作顺序用有序列表，平行要点用列表，准确原话用带归属和来源的引用。故事可以保留连续叙述，不强制插入表格。格式变化不能丢失条件、步骤或反证，也不能把不同成员各自的测试拼成一个人的完整成功案例。
@@ -58,6 +66,11 @@ WGO 只维护 `wgo_*` 属性和命名的 managed regions。用户自己的属性
 
 暂停监控停止新增来源采集；Obsidian 的轻量阅读控制仍独立运行。新选群聊从选择时间开始，保留同秒新行；再次调整列表不会重置已经迁移的群聊进度。旧 checkpoint 带 pending intent 时必须先由完整迁移证明其去向。
 
+日常维护先处理阅读控制，再分别恢复正文与索引。Embedding/index 故障不会挡住独立正文，
+单个页面的局部发布失败也不会取消其它可发布的知识；原模型任务、unknown 与手写冲突仍保留。
+`阅读状态.md` 显示本轮索引、正文就绪数量、待发布、冲突与未处理情况。
+这些是派生工作观察，不会倒退或擅自推进来源进度；完整重建仍须通过严格发布与独立验收。
+
 ## 模型与向量
 
 Text、typed decision、embedding 与 vector index 各有显式角色：
@@ -83,6 +96,13 @@ Text、typed decision、embedding 与 vector index 各有显式角色：
 ```
 
 健康检查只报告本机已提交的 generation、capture/applied、jobs、index/projection 与预算证据；不读取微信、调用模型或替代迁移验收。`candidate`、`pending`、`unknown`、`blocked` 各有不同含义。故障恢复必须沿 [重建 runbook](semantic-rebuild.md) 的 exact run id，不能删除数据库、清空 checkpoint 或用一次新扫描覆盖原有 pending intent。
+
+已激活 generation 的 `database.delivery` 另行报告本机通知结果计数。
+`unknown` 或尚在 `sending` 的回执使总体保持未知；`deferred` 表示仍待交付。
+明确拒收是可见的历史终态，单独不会永久阻断 generation，也不自动重发。
+`accepted` 只证明通知被接受，`silent` 只说明静默处理，都不代表读过或已知。
+旧库没有交付表时显示 `not_initialized`；未激活的 candidate 不探测交付状态，
+普通 health 行显示 `not_probed`。健康检查不会初始化这些表或改变原回执。
 
 预算状态按 generation 内完整 provider profile 的显式角色读取：Cloudflare Decision 或 Embedding 要求 Workers AI 证据，远端 Vectorize 只要求 Vectorize 证据。合法的本机 embedding＋本地 index＋text decision 显示 `provider_budget.state=not_required`、`ready=true`，不检查使用量数据库，也不代表本机模型服务已经在线。缺失或无效 profile 分别显示 `profile_missing`、`profile_invalid`，均不视为预算就绪；unknown job 仍保留为未知状态。
 

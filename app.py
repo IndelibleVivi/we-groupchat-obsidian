@@ -1637,6 +1637,7 @@ class WeGroupchatObsidianApp(rumps.App):
         checkin_label = "✅ 心跳通知：开" if self.config.get("monitor_notify_checkins") else "☑️ 心跳通知：关"
         monitor.add(rumps.MenuItem(checkin_label, callback=self._toggle_monitor_checkins))
         if semantic:
+            monitor.add(rumps.MenuItem("🏠 打开阅读首页", callback=self._open_semantic_home))
             monitor.add(rumps.MenuItem("🔎 打开检索", callback=self._open_semantic_query))
             monitor.add(rumps.MenuItem("📝 打开阅读管理", callback=self._open_semantic_management))
         else:
@@ -2334,9 +2335,7 @@ class WeGroupchatObsidianApp(rumps.App):
             if runtime is None:
                 return
             reader = self._semantic_reader(runtime)
-            reader.poll()
-            runtime.index_all(max_rounds=1)
-            runtime.publish_all()
+            reader.poll(maintain_derived=True)
         except Exception as exc:
             print("[semantic] reader deferred:", getattr(exc, "code", "semantic_reader_unavailable"))
         finally:
@@ -2405,6 +2404,30 @@ class WeGroupchatObsidianApp(rumps.App):
         subdir = self.config.get("monitor_obsidian_subdir")
         ensure_obsidian_vault(root, obsidian_subdir=subdir)
         subprocess.run(["open", os.path.join(os.path.expanduser(root), safe_obsidian_subdir(subdir))])
+
+    def _open_semantic_home(self, _):
+        threading.Thread(target=self._open_semantic_home_worker, daemon=True).start()
+
+    def _open_semantic_home_worker(self):
+        """Resolve the existing reading projection without constructing providers."""
+        from core.semantic.store import SemanticStore
+        from core.semantic.projections import ProjectionPublisher
+        from core.semantic.reading_home import ReadingHome
+        try:
+            pin = _semantic_pin(self.config)
+            if pin is None:
+                return
+            store = SemanticStore(pin.database, pin.generation_id)
+            publisher = ProjectionPublisher.for_store(store, pin.projection_root)
+            with publisher.locked():
+                relative = publisher.resolve(ReadingHome.OBJECT_ID)
+                if (relative is None or not publisher.ready(ReadingHome.OBJECT_ID)
+                        or _semantic_pin(self.config) != pin):
+                    return
+                path = publisher._safe_path(relative, create_parents=False)
+            subprocess.run(["open", str(path)])
+        except Exception:
+            print("[semantic] home unavailable: semantic_home_unavailable")
 
     def _open_semantic_query(self, _):
         pin = _semantic_pin(self.config)

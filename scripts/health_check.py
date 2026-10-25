@@ -499,6 +499,17 @@ def source_inventory_health(
     }
 
 
+def semantic_delivery_status(database: dict) -> str:
+    delivery = database.get("delivery", {"state": "not_probed", "counts": {}})
+    counts = delivery["counts"]
+    return (f"[{ok(delivery['state'] in {'recorded', 'empty', 'not_initialized', 'not_probed'})}] Semantic reader delivery: "
+            f"state={delivery['state']}; accepted={counts.get('accepted', 0)}; "
+            f"rejected={counts.get('rejected', 0)}; silent={counts.get('silent', 0)}; "
+            f"deferred={counts.get('deferred', 0)}; sending={counts.get('sending', 0)}; "
+            f"unknown={counts.get('unknown', 0)}; invalid={counts.get('invalid', 0)}; "
+            "accepted_is_read=False")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Print local we-groupchat-obsidian health status.")
     parser.add_argument(
@@ -683,6 +694,7 @@ def main(argv: list[str] | None = None) -> int:
           f"index_pending={outbox.get('index', {}).get('pending', 0)}; "
           f"projection_pending={outbox.get('projection', {}).get('pending', 0)}; "
           f"projection_conflicts={outbox.get('projection_conflicts', 0)}")
+    print(semantic_delivery_status(database))
     budget = semantic["provider_budget"]
     print(f"[{ok(budget['state'] == 'not_active' or budget['ready'])}] Semantic provider budget: "
           f"state={budget['state']}; missing={budget.get('counts', {}).get('missing', 0)}; "

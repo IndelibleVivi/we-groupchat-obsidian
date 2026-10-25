@@ -400,7 +400,7 @@ class ReaderRuntime:
                 receipt.edition_id, receipt.revision, plan.title or "今日简报", body, "brief",
                 tuple(bindings.values()), tuple(EvidenceTarget(*pair) for pair in sorted(evidence))))
 
-    def _status_page(self, statuses, codes):
+    def _status_page(self, statuses, codes, derived=None):
         lines = []
         labels = {"met": "已满足", "unmet": "尚未满足", "unknown": "尚不确定", "contested": "存在相反证据", "stopped": "已停止"}
         for result in statuses:
@@ -421,6 +421,28 @@ class ReaderRuntime:
             lines.append("阅读事件未确认（原文件保留）：" + "；".join(row["code"] + " × " + str(row["n"]) for row in failures))
         if codes:
             lines.append("待处理状态：" + "、".join(sorted(codes)[:20]))
+        if derived:
+            labels = {"ready": "就绪", "pending": "等待", "blocked": "受阻"}
+            index, projection = derived["index"], derived["projection"]
+            index_detail = "索引维护：" + labels.get(index["state"], "尚未确认")
+            if index.get("pending") is not None:
+                index_detail += "，待处理 " + str(index["pending"])
+            if index.get("codes"):
+                index_detail += "；" + "；".join(
+                    code + " × " + str(count) for code, count in sorted(index["codes"].items()))
+            lines.append(index_detail)
+            projection_detail = (
+                "正文维护：" + labels.get(projection["state"], "尚未确认")
+                + "，已就绪 " + str(projection["ready"] if projection["ready"] is not None else "未核对")
+                + "/" + str(projection["total"] if projection["total"] is not None else "未核对")
+                + "，待发布 " + str(projection["pending_outbox"] if projection["pending_outbox"] is not None else "未核对")
+                + "，阅读冲突 " + str(projection["conflicts"] if projection["conflicts"] is not None else "未核对")
+                + "，失败 " + str(projection["failed"])
+                + "，本轮未处理 " + str(projection["unprocessed"] if projection["unprocessed"] is not None else "未核对"))
+            if projection.get("codes"):
+                projection_detail += "；" + "；".join(
+                    code + " × " + str(count) for code, count in sorted(projection["codes"].items()))
+            lines.append(projection_detail)
         body = "\n\n".join(lines)
         signature = fingerprint(body)
         old = self.ledger.one("SELECT * FROM reader_runtime_status WHERE generation_id=?", (self.store.generation_id,))
@@ -431,7 +453,7 @@ class ReaderRuntime:
             with self.ledger.transaction() as conn:
                 conn.execute("INSERT OR REPLACE INTO reader_runtime_status VALUES(?,?,?)", (self.store.generation_id, signature, revision))
 
-    def poll(self):
+    def poll(self, *, maintain_derived=False):
         with self._lock:
             codes, statuses, actions, attention = set(), [], [], []
             items = self.store.list_items()
@@ -467,15 +489,34 @@ class ReaderRuntime:
                 attention = self.deliver_changes()
             except Exception as exc:
                 codes.add(self._code(exc))
-            try:
-                for item in items:
+            derived = None
+            if maintain_derived:
+                try:
+                    derived = self.runtime.maintain_derived(max_rounds=1)
+                except Exception as exc:
+                    code = self._code(exc)
+                    codes.add(code)
+                    empty = {"state": "blocked", "complete": False, "pending": None,
+                             "failed": 1, "codes": {code: 1}, "ready": None, "total": None,
+                             "pending_outbox": None, "conflicts": None, "unprocessed": None}
+                    derived = {"state": "blocked", "complete": False,
+                               "index": dict(empty), "projection": dict(empty)}
+            for item in items:
+                try:
                     if self.publisher.ready(item["item_id"], item["content_revision"]):
                         self.controls.register_item_actions(item["item_id"], item["content_revision"])
+                except Exception as exc:
+                    codes.add(self._code(exc))
+            try:
                 self.controls.refresh_management()
-                self._status_page(statuses, codes)
+            except Exception as exc:
+                codes.add(self._code(exc))
+            try:
+                self._status_page(statuses, codes, derived)
             except Exception as exc:
                 codes.add(self._code(exc))
             return {"properties": properties, "actions": len(actions), "query": query, "open_events": opened,
                     "watch_states": {key: sum(s["status"] == key for s in statuses) for key in sorted({s["status"] for s in statuses})},
                     "attention": {key: sum(r.status == key for r in attention) for key in sorted({r.status for r in attention})},
+                    "derived": derived,
                     "codes": sorted(codes)[:20]}

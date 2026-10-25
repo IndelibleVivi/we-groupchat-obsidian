@@ -102,6 +102,8 @@ flowchart TB
     BRIEF_FILE["(D) 冻结 edition 文本 不改写历史期"]:::derived
     DELIV["(C) DeliveryService 交付 receipt durable<br/>unknown 需 reconcile"]:::canon
     READER_RT["ReaderRuntime.poll<br/>属性/动作/查询/visible-open/watch/attention"]
+    MAINT["SemanticRuntime.maintain_derived<br/>来源无关：正文与索引独立恢复"]
+    HOME["(D) ReadingHome 首页<br/>就绪入口 + 当前/打开/已知版本"]:::derived
     INBOX["(O) Obsidian visible-open bridge 私有 event inbox"]:::optional
     NOTIF["_SemanticNotifier 本机通知"]
     WGO["(D) WGO/ Markdown 阅读根 位于 vault 内"]:::derived
@@ -315,6 +317,14 @@ flowchart TB
   READER_RT -->|watch 同步| WATCH
   READER_RT -->|attention 桥接| DELIV
   READER_RT -->|visible-open inbox| INBOX
+  READER_RT -->|controls 之后独立维护| MAINT
+  RUNTIME_CHECK -->|canonical ACK 之后| MAINT
+  MAINT -->|逐项正文/目录发布| PUB
+  MAINT -->|独立索引工作| RETRIEVAL
+  PUB -->|发布阅读导航| HOME
+  LEDGER -->|只读版本/偏好 metadata| HOME
+  STORE -->|只读条目/视图 metadata| HOME
+  HOME -->|仅链接就绪目标| WGO
   DELIV -->|resolve_click logical id| PUB
   CONTROLS -->|查询回调| RETRIEVAL
 

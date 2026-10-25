@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from datetime import datetime, timezone
 
 from core.monitor_state import MonitorStateStore
@@ -19,6 +19,9 @@ from core.semantic.health import HEALTH_SCHEMA, semantic_health
 from core.semantic.jobs import JobStore
 from core.semantic.rebuild import ACTIVE_SCHEMA, JOURNAL_SCHEMA, write_json
 from core.semantic.store import SemanticStore
+from core.semantic.controls import ReaderControls
+from core.semantic.delivery import AttentionEvent, ContentBinding, DeliveryService, EvidenceTarget, NotifyResult
+from core.semantic.projections import ProjectionPublisher
 from tests.test_monitor_state_v3 import _state, _migration, _capture, _vector
 
 
@@ -103,6 +106,165 @@ class SemanticHealthTests(unittest.TestCase):
         # durable state. File presence/mode and all DB/WAL bytes stay unchanged.
         return {str(p.relative_to(self.root)): (None if p.name.endswith("-shm") else p.read_bytes(), p.stat().st_mode)
                 for p in self.root.rglob("*") if p.is_file()}
+
+    def delivery_fixture(self, *, status="accepted", event="synthetic-event"):
+        publisher = ProjectionPublisher.for_store(self.store, self.root / "vault")
+        controls = ReaderControls(publisher.ledger, publisher, search=Mock())
+        service = DeliveryService(publisher.ledger, publisher, controls)
+        attention = AttentionEvent(event, "private-item", 1, "private-title", "private-body", "brief",
+            (ContentBinding("private-item", 1, 0),), (EvidenceTarget("private-item", "private-evidence"),))
+        registered = service.register(attention)
+        notifier = Mock()
+        notifier.send.side_effect = lambda envelope: NotifyResult(status, envelope.receipt_id)
+        return service, registered.event_id, notifier
+
+    def send_delivery(self, service, event_id, notifier, *, live=True, ready=True):
+        # The actual durable delivery owner crosses a synthetic publication and
+        # notifier boundary; health itself must never cross either boundary.
+        with patch.object(service.publisher, "current_revision", return_value=1), \
+             patch.object(service.publisher, "ready", return_value=ready) as readiness, \
+             patch.object(service.publisher, "evidence_link", return_value="synthetic-evidence"):
+            if isinstance(ready, tuple):
+                readiness.side_effect = ready
+            return service.deliver(event_id, device_id="private-device", channel="private-channel",
+                                   notifier=notifier, live=live)
+
+    def test_delivery_absence_and_empty_ledger_are_explicit_without_initialization(self):
+        self.generation_fixture(profile=self.local_profile())
+        before = self.bytes_and_modes()
+        report = self.report()
+        self.assertEqual(report["database"]["delivery"]["state"], "not_initialized")
+        self.assertEqual(before, self.bytes_and_modes())
+        service, _event, notifier = self.delivery_fixture()
+        before = self.bytes_and_modes()
+        report = self.report()
+        self.assertEqual(report["database"]["delivery"]["state"], "empty")
+        self.assertFalse(any(report["database"]["delivery"]["counts"].values()))
+        self.assertEqual(before, self.bytes_and_modes())
+        notifier.send.assert_not_called()
+
+    def test_unknown_delivery_is_observed_without_notifier_replay_or_private_fields(self):
+        self.generation_fixture(profile=self.local_profile())
+        service, event, notifier = self.delivery_fixture()
+        notifier.send.side_effect = RuntimeError("private-notifier-error")
+        self.assertEqual(self.send_delivery(service, event, notifier).status, "unknown")
+        before = self.bytes_and_modes()
+        for _ in range(2):
+            report = self.report()
+            self.assertEqual(report["state"], "unknown")
+            self.assertEqual(report["database"]["delivery"]["state"], "unknown")
+            self.assertEqual(report["database"]["delivery"]["counts"]["unknown"], 1)
+        self.assertEqual(before, self.bytes_and_modes())
+        notifier.send.assert_called_once()
+        for private in (event, "private-title", "private-body", "private-item", "private-evidence",
+                        "private-device", "private-channel", "private-notifier-error"):
+            self.assertNotIn(private, json.dumps(report))
+
+    def test_interrupted_sending_remains_unknown_observation_without_reconciliation(self):
+        self.generation_fixture(profile=self.local_profile())
+        service, event, notifier = self.delivery_fixture()
+        notifier.send.side_effect = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self.send_delivery(service, event, notifier)
+        before = self.bytes_and_modes()
+        report = self.report()
+        self.assertEqual(report["state"], "unknown")
+        self.assertEqual(report["database"]["delivery"]["state"], "unknown")
+        self.assertEqual(report["database"]["delivery"]["counts"]["sending"], 1)
+        self.assertEqual(before, self.bytes_and_modes())
+        self.assertEqual(service.ledger.one("SELECT status FROM reader_deliveries")[0], "sending")
+        notifier.send.assert_called_once()
+
+    def test_deferred_delivery_is_pending_without_a_notifier_call(self):
+        self.generation_fixture(profile=self.local_profile())
+        service, event, notifier = self.delivery_fixture()
+        self.assertEqual(self.send_delivery(service, event, notifier, ready=(True, True, False)).status, "deferred")
+        report = self.report()
+        self.assertEqual(report["state"], "pending")
+        self.assertEqual(report["database"]["delivery"]["state"], "deferred")
+        self.assertEqual(report["database"]["delivery"]["counts"]["deferred"], 1)
+        notifier.send.assert_not_called()
+
+    def test_terminal_delivery_counts_preserve_rejection_without_a_permanent_health_gate(self):
+        self.generation_fixture(profile=self.local_profile())
+        for status in ("rejected", "accepted", "silent"):
+            service, event, notifier = self.delivery_fixture(status=status, event="synthetic-" + status)
+            result = self.send_delivery(service, event, notifier, live=status != "silent")
+            self.assertEqual(result.status, status)
+            if status == "silent":
+                notifier.send.assert_not_called()
+            else:
+                notifier.send.assert_called_once()
+            report = self.report()
+            self.assertEqual(report["state"], "healthy")
+            self.assertEqual(report["database"]["delivery"]["state"], "rejected")
+            self.assertEqual(report["database"]["delivery"]["counts"][status], 1)
+        self.assertEqual(service.ledger.all("SELECT * FROM reader_open_observations"), [])
+        self.assertEqual(service.ledger.all("SELECT * FROM reader_known"), [])
+
+    def test_accepted_and_silent_are_recorded_outcomes_without_read_or_known_evidence(self):
+        self.generation_fixture(profile=self.local_profile())
+        for status in ("accepted", "silent"):
+            service, event, notifier = self.delivery_fixture(event="synthetic-" + status)
+            self.send_delivery(service, event, notifier, live=status != "silent")
+        report = self.report()
+        self.assertEqual(report["state"], "healthy")
+        self.assertEqual(report["database"]["delivery"]["state"], "recorded")
+        self.assertEqual(report["database"]["delivery"]["counts"]["accepted"], 1)
+        self.assertEqual(report["database"]["delivery"]["counts"]["silent"], 1)
+        self.assertEqual(service.ledger.all("SELECT * FROM reader_open_observations"), [])
+        self.assertEqual(service.ledger.all("SELECT * FROM reader_known"), [])
+
+    def test_delivery_inspection_reads_status_only_and_performs_no_writes(self):
+        self.generation_fixture(profile=self.local_profile())
+        service, event, notifier = self.delivery_fixture(status="unknown")
+        self.send_delivery(service, event, notifier)
+        real_connect = sqlite3.connect
+        def connect(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            def authorize(action, table, column, _db, _trigger):
+                if action == sqlite3.SQLITE_READ and (
+                        table in {"reader_attention_events", "reader_delivery_attempts"}
+                        or table == "reader_deliveries" and column not in {"status", ""}):
+                    return sqlite3.SQLITE_DENY
+                if action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+                              sqlite3.SQLITE_CREATE_TABLE}:
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+            conn.set_authorizer(authorize)
+            return conn
+        before = self.bytes_and_modes()
+        with patch("core.semantic.health.sqlite3.connect", side_effect=connect):
+            report = self.report()
+        self.assertEqual(report["state"], "unknown")
+        self.assertEqual(before, self.bytes_and_modes())
+        notifier.send.assert_called_once()
+
+    def test_candidate_delivery_is_not_probed_or_promoted_to_active(self):
+        self.generation_fixture(active=False, activated=False, profile=self.local_profile())
+        service, event, notifier = self.delivery_fixture(status="unknown")
+        self.send_delivery(service, event, notifier)
+        before = self.bytes_and_modes()
+        report = self.report()
+        self.assertEqual(report["state"], "candidate")
+        self.assertEqual(report["active_state"], "inactive")
+        self.assertEqual(report["database"], {"state": "not_active"})
+        self.assertEqual(before, self.bytes_and_modes())
+        notifier.send.assert_called_once()
+
+    def test_invalid_delivery_status_fails_closed_without_echoing_the_value(self):
+        self.generation_fixture(profile=self.local_profile())
+        service, event, notifier = self.delivery_fixture()
+        self.send_delivery(service, event, notifier)
+        with self.store.transaction() as conn:
+            conn.execute("UPDATE reader_deliveries SET status='private-malformed-status'")
+        before = self.bytes_and_modes()
+        report = self.report()
+        self.assertEqual(report["state"], "blocked")
+        self.assertEqual(report["database"]["delivery"]["state"], "invalid")
+        self.assertEqual(report["database"]["delivery"]["counts"]["invalid"], 1)
+        self.assertNotIn("private-malformed-status", json.dumps(report))
+        self.assertEqual(before, self.bytes_and_modes())
 
     def test_healthy_read_is_content_free_and_does_not_create_sidecars_or_change_permissions(self):
         self.generation_fixture()

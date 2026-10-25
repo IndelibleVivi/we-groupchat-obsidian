@@ -8,17 +8,21 @@
 
 ```mermaid
 flowchart TD
-    INPUT[选中群聊的消息与保留的旧知识] --> CAPTURE[只读采集：保存原始证据]
+    INPUT[选中群聊的原始消息] --> CAPTURE[只读采集：保存原始证据]
     CAPTURE --> MODEL[模型：抽取经历、方案、观点与更正]
     MODEL --> STORE[(SQLite：知识条目、归属、关系与处理凭据)]
-    STORE --> BODY[Obsidian：完整 Markdown 正文与来源]
-    STORE --> SEARCH[检索：全文、向量和关系候选]
+    STORE --> MAINT[来源无关维护：正文与索引独立恢复]
+    MAINT --> BODY[Obsidian：完整 Markdown 正文与来源]
+    MAINT --> SEARCH[检索：全文、向量和关系候选]
     STORE --> BRIEF[简报与后续变化]
+    BODY --> HOME[阅读首页：就绪入口与当前/打开/已知版本]
+    SEARCH --> HOME
+    BRIEF --> HOME
     BODY --> CONTROL[阅读、关注、静音、等待与标记已知]
     CONTROL --> BRIEF
     CAPTURE -. 来源不完整时停止 .-> STOP[保留进度，修复后继续]
     MODEL -. 失败或结果未知时停止 .-> STOP
-    INPUT -. 旧摘要、旧页、队列和资料 .-> HISTORY[独立历史保全]
+    LEGACY_INPUT[旧摘要、旧页、队列和资料] --> HISTORY[独立历史保全]
     HISTORY -. 不建立新 Item 或模型任务 .-> LEGACY_OUT[Legacy/ 可读历史]
 ```
 
@@ -58,6 +62,11 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 
 阅读操作见 [Obsidian 使用说明](../semantic-workflow.md)。下面保留完整技术图，供追踪
 具体 owner、失败边和源码；它与上面的阅读路线描述同一套实现。
+
+日常派生恢复由 `SemanticRuntime.maintain_derived` 组合：reader controls 先执行，
+正文与索引分别尝试，复用原 outbox、artifact 与 publisher。`ReadingHome` 从有界 metadata
+生成统一首页，只连接已就绪目标；实际打开版本、明确已知版本和当前内容版本保持独立。
+这些路径不重新读取微信或重新抽取知识，首次重建继续使用严格完整 publication。
 
 <details>
 <summary>展开完整技术 Mermaid、状态归属与源码表</summary>
@@ -239,6 +248,7 @@ active generation、恢复 app，并验证真实增量接续。抓到原始消�
 | `BRIEF_ACCEPT` / `BRIEF_FILE` | node | `core/semantic/briefing.py :: BriefingService.build/edition/history/rebuild` |
 | `DELIV` / `NOTIF` | node | `core/semantic/delivery.py :: DeliveryService.register/deliver/reconcile/resolve_click`；`app.py :: _SemanticNotifier` |
 | `READER_RT` / `INBOX` | node | `core/semantic/reader_runtime.py :: ReaderRuntime.poll/deliver_changes/deliver_brief`；`integrations/obsidian/` |
+| `MAINT` / `HOME` | node | `core/semantic/runtime.py :: SemanticRuntime.maintain_derived`；`core/semantic/reading_home.py :: ReadingHome.publish` |
 | `WGO` | node | `core/semantic/projections.py :: ProjectionPublisher`（managed root） |
 | `RES_CAP` / `RES_DB` | node | `core/resource_capture.py :: SelectedResourceCapture`、`resource_capture_operation_lock`、`_captures_contexts` |
 | `RES_BACK` / `CAS` / `MOUNTED` / `OBSIDX` | node | `core/resource_backup.py :: MountedResourceBackup.run/_run_owned/_run_locked/status` |

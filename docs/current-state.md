@@ -4,6 +4,32 @@ This checkout contains the semantic-generation rebuild candidate on top of the
 October Ops source line. Package metadata remains `v0.1.0-alpha.1`; no new release
 is implied by this document.
 
+The [development programme](development-programme.md) records the mature product
+goal and continuous construction order. Current gaps include live View induction
+(currently run during rebuild), evidence synthesis beyond query hit excerpts,
+and detailed comparisons between reading versions. Structural tests do not establish real
+editorial quality or native reading acceptance.
+
+Active semantic health now observes local reader delivery status counts without
+opening event payloads or initializing tables. Unknown/sending receipts prevent
+`healthy`; deferred delivery remains `pending`. Historical rejection is visible
+without imposing a permanent generation-wide gate, and accepted/silent never
+means read or known. Inactive candidates retain unprobed delivery status.
+
+The source candidate adds shared source-free derived maintenance for app reader
+turns and monitor downstream. Index and projection attempts have separate results;
+local object publication failures retain their work while independent targets
+continue. Reader status exposes current maintenance counts/codes. Strict rebuild
+publication remains separate from best-effort maintenance and requires actual
+Item/View/control/home completion.
+`ReadingHome` publishes `WGO/首页.md` from bounded metadata, linking ready Items,
+views, today's latest successful brief and controls. It displays current,
+visible-open and explicit known versions independently, including new versions
+after an earlier open. The menu opens the identity-resolved home on a daemon
+without model providers. Long labels and unsupported filename delimiters have
+explicit safe display fallbacks. This is source support, not installation,
+private-generation repair or native reading acceptance.
+
 - New installations and unmigrated state keep the legacy topic/event path.
   An accepted active-generation manifest selects the shared full-rebuild/live
   semantic engine; a half-written cutover blocks startup.

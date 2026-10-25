@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 import uuid
@@ -24,19 +25,29 @@ from core.provider_usage import ProviderUsageStore
 from .contracts import SemanticStoreError, digest
 from .engine import SemanticEngine, SemanticValidationError
 from .retrieval import HybridRetriever
-from .projections import ReadingLedger, ProjectionPublisher, CanonicalReadingAdapter, BodyPlanWriter
+from .projections import (BodyPlanWriter, CanonicalReadingAdapter, ProjectionPublisher,
+                          ReadingError, ReadingLedger)
 from .controls import ReaderControls, CoreSearchAdapter
 from .briefing import BriefChange, BriefingService
 from .delivery import DeliveryService
+from .reading_home import ReadingHome
 from .rebuild import GenerationRegistry, RebuildError
 from .store import SemanticStore
 from .source import SemanticCapture, MonitorReceiptBridge
-from .scheduling import scheduled_providers
+from .scheduling import ProviderNotDispatched, scheduled_providers
 from core.monitor_state import MONITOR_V3_STATE_SCHEMA, monitor_state_fingerprint
 from core.source_adapter import decode_cursor_token
 
 
 PROFILE_SCHEMA = "we-groupchat-obsidian.semantic-providers.v1"
+_MAINTENANCE_CODE = re.compile(r"[a-z][a-z0-9_]{0,99}")
+_MAINTENANCE_BLOCKED_CODES = frozenset({
+    "reading_generation_mismatch",
+    "reading_policy_mismatch",
+    "text_provider_outcome_unknown",
+    "text_provider_route_changed",
+    "text_provider_version_required",
+})
 
 
 def _within_capture(output, captured):
@@ -318,32 +329,19 @@ class SemanticRuntime:
                 cleaned = dict(snapshot.data)
                 monitor._clear_ai_failure_state(cleaned)
                 snapshot = monitor.state_store.commit(snapshot.revision, cleaned)
-            downstream = "ready"
-            try:
-                index = self.index_all(max_rounds=1)
-                projection = self.publish_all()
-                if not index["complete"] or not projection["complete"]:
-                    downstream = "pending"
-            except Exception:
-                # The canonical transaction and exact progress receipt already
-                # committed. Keep the outbox pending; reader timer resumes it.
-                downstream = "pending"
+            derived = self.maintain_derived(max_rounds=1)
             count = len(batch["members"])
             return {"status": "no_messages" if not count and batch["source_eof"] else "semantic_applied",
                     "source_eof": batch["source_eof"], "raw_message_count": count,
                     "message_count": count, "last_msg_ts": snapshot.data["last_checked_ts"],
-                    "semantic_generation_id": self.store.generation_id, "derived_state": downstream,
+                    "semantic_generation_id": self.store.generation_id,
+                    "derived_state": derived["state"], "derived": derived,
                     "message": "语义进度已确认"}
         if pending:
             downstream = "pending"
             if prepared_after_gap:
-                try:
-                    index = self.index_all(max_rounds=1)
-                    projection = self.publish_all()
-                    if index["complete"] and projection["complete"]:
-                        downstream = "ready"
-                except Exception:
-                    pass  # Durable outboxes retain downstream work.
+                derived = self.maintain_derived(max_rounds=1)
+                downstream = derived["state"]
             return {"status": "semantic_processing_pending", "derived_state": downstream,
                     "semantic_generation_id": self.store.generation_id,
                     "message": "部分资料等待更多依据；后续资料可继续处理，进度未越过待判断部分"}
@@ -408,52 +406,194 @@ class SemanticRuntime:
             if result["pending"] == 0:
                 return {"receipt_id": str(uuid.uuid4()), "complete": True,
                         "profile_id": self.roles.embedding.profile.profile_id,
-                        "index_generation_id": self.roles.index.index_identity}
+                        "index_generation_id": self.roles.index.index_identity, "pending": 0}
             if result["embedded"] == 0 and result["indexed"] == 0:
                 # Persisted mutation will be confirmed by the next bounded turn;
                 # no rapid re-upload and no success inferred from HTTP acceptance.
-                return {"receipt_id": str(uuid.uuid4()), "complete": False, "code": "index_confirmation_pending"}
-        return {"receipt_id": str(uuid.uuid4()), "complete": False, "code": "index_round_budget_reached"}
+                return {"receipt_id": str(uuid.uuid4()), "complete": False,
+                        "code": "index_confirmation_pending", "pending": result["pending"]}
+        return {"receipt_id": str(uuid.uuid4()), "complete": False,
+                "code": "index_round_budget_reached", "pending": result["pending"]}
 
     def publish_all(self):
+        return self._publish_all(strict=True)
+
+    @staticmethod
+    def _maintenance_code(exc, fallback):
+        value = getattr(exc, "code", None)
+        return value if isinstance(value, str) and _MAINTENANCE_CODE.fullmatch(value) else fallback
+
+    def _publish_all(self, *, strict):
+        """Publish through the existing owner with explicit strictness.
+
+        Rebuild retains the original fail-closed full-publication behavior. Normal app
+        maintenance contains one object's local rendering/filesystem failure
+        while stopping the whole pass on provider failure.
+        """
         published, conflicts = 0, 0
         # Targets precede redirect/hub publication so every stable old link works.
         items = self.store.list_items(include_retired=True)
         items.sort(key=lambda item: item["lifecycle"] != "active")
+        failures, provider_stopped, unprocessed = [], None, 0
+
+        def observe(receipt):
+            nonlocal published, conflicts
+            if receipt.status in {"published", "unchanged"}:
+                published += 1
+            elif receipt.status in {"conflict", "personal"}:
+                conflicts += 1
+            else:
+                raise SemanticStoreError("semantic_projection_incomplete")
+
+        def attempt(operation, fallback):
+            try:
+                receipt = operation()
+                if receipt is not None:
+                    observe(receipt)
+            except Exception as exc:
+                if strict:
+                    raise
+                failures.append(self._maintenance_code(exc, fallback))
         # Network preparation is independent. Publication and ACK preserve the
         # ordered targets/redirects and each existing filesystem/CAS boundary.
-        with self.scheduler.phase():
-            for start in range(0, len(items), 100):
-                prepared = self.scheduler.map("text", items[start:start + 100], lambda item:
-                    self.publisher.prepare_canonical_item(self.store, item["item_id"], self.body_writer,
-                        request_id="body:" + digest([self.store.generation_id, item["item_id"], item["content_revision"]])))
-                for plan in prepared:
-                    receipt = self.publisher.publish_prepared_item(self.store, plan)
-                    if receipt.status in {"published", "unchanged"}:
-                        published += 1
-                    elif receipt.status in {"conflict", "personal"}:
-                        conflicts += 1
-                    else:
-                        raise SemanticStoreError("semantic_projection_incomplete")
+        if strict:
+            with self.scheduler.phase():
+                for start in range(0, len(items), 100):
+                    prepared = self.scheduler.map("text", items[start:start + 100],
+                                                  self._prepare_item)
+                    for plan in prepared:
+                        observe(self.publisher.publish_prepared_item(self.store, plan))
+        else:
+            for index, item in enumerate(items):
+                try:
+                    with self.scheduler.phase():
+                        prepared = self._prepare_item(item)
+                    observe(self.publisher.publish_prepared_item(self.store, prepared))
+                except Exception as exc:
+                    failures.append(self._maintenance_code(exc, "semantic_projection_failed"))
+                    if isinstance(exc, (ProviderError, ProviderNotDispatched)):
+                        provider_stopped = failures[-1]
+                        unprocessed = len(items) - index - 1
+                        break
         with closing(self.store.connect()) as conn:
             views = [dict(r) for r in conn.execute("SELECT * FROM views")]
             memberships = [dict(r) for r in conn.execute("SELECT * FROM view_memberships WHERE excluded=0")]
         for view in views:
-            entries = []
-            for member in memberships:
-                if member["view_id"] == view["view_id"]:
-                    item = self.store.get_item(member["item_id"])
-                    if item["lifecycle"] == "active":
-                        entries.append((item["item_id"], "", item["title"]))
-            self.publisher.publish_view(view["view_id"], view["title"], entries,
-                                        revision=view["definition_revision"] + view["override_revision"])
-        self.controls.initialize_query(property_key=self.controls.property_mapping(self.config.get("semantic_reader_properties", {}))["query"])
+            def publish_view():
+                entries = []
+                for member in memberships:
+                    if member["view_id"] == view["view_id"]:
+                        item = self.store.get_item(member["item_id"])
+                        if item["lifecycle"] == "active":
+                            entries.append((item["item_id"], "", item["title"]))
+                return self.publisher.publish_view(view["view_id"], view["title"], entries,
+                    revision=view["definition_revision"] + view["override_revision"])
+            attempt(publish_view, "semantic_view_projection_failed")
+
+        def initialize_query():
+            receipt = self.controls.initialize_query(property_key=self.controls.property_mapping(
+                self.config.get("semantic_reader_properties", {}))["query"])
+            # Existing initialization returns None, including for an already
+            # initialized page. Verify its actual owner rather than infer ready.
+            if receipt is None and not self.publisher.ready(self.controls.QUERY_ID):
+                raise ReadingError("query_page_not_ready")
+            return receipt
+        attempt(initialize_query, "semantic_reader_query_setup_failed")
         for item in items:
-            if item["lifecycle"] == "active" and self.publisher.ready(item["item_id"], item["content_revision"]):
-                self.controls.register_item_actions(item["item_id"], item["content_revision"])
-        self.controls.refresh_management()
+            def register_actions():
+                if item["lifecycle"] == "active" and self.publisher.ready(item["item_id"], item["content_revision"]):
+                    self.controls.register_item_actions(item["item_id"], item["content_revision"])
+            attempt(register_actions, "semantic_reader_actions_failed")
+        attempt(self.controls.refresh_management, "semantic_reader_management_failed")
+        attempt(lambda: ReadingHome.for_runtime(self).publish(), "semantic_reading_home_failed")
+        codes = self._maintenance_counts(failures)
         return {"receipt_id": str(uuid.uuid4()), "published": published, "conflicts": conflicts,
-                "complete": conflicts == 0}
+                "complete": conflicts == 0 and not failures and provider_stopped is None,
+                "failed": len(failures), "unprocessed": unprocessed, "codes": codes,
+                "blocked": provider_stopped is not None or any(code in _MAINTENANCE_BLOCKED_CODES for code in failures),
+                "provider_stopped": provider_stopped}
+
+    @staticmethod
+    def _maintenance_counts(values):
+        counts = {}
+        for code in values:
+            if code not in counts and len(counts) >= 19:
+                code = "semantic_maintenance_other"
+            counts[code] = counts.get(code, 0) + 1
+        return counts
+
+    def _prepare_item(self, item):
+        return self.publisher.prepare_canonical_item(
+            self.store, item["item_id"], self.body_writer,
+            request_id="body:" + digest([
+                self.store.generation_id, item["item_id"], item["content_revision"]]))
+
+    def _index_maintenance(self, *, max_rounds):
+        try:
+            result = self.index_all(max_rounds=max_rounds)
+        except Exception as exc:
+            code = self._maintenance_code(exc, "semantic_index_failed")
+            return {"state": "blocked", "complete": False, "code": code,
+                    "pending": None, "failed": 1, "codes": {code: 1}}
+        complete = result.get("complete") is True
+        report = {"state": "ready" if complete else "pending", "complete": complete,
+                  "pending": result.get("pending"), "failed": 0, "codes": {}}
+        if not complete:
+            code = result.get("code")
+            code = (code if isinstance(code, str) and _MAINTENANCE_CODE.fullmatch(code)
+                    else "semantic_index_pending")
+            report.update(code=code, codes={code: 1})
+        return report
+
+    def _projection_summary(self, result):
+        with closing(self.store.connect()) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            pending_outbox = (int(conn.execute(
+                "SELECT COUNT(*) FROM projection_outbox WHERE status='pending'").fetchone()[0])
+                if "projection_outbox" in tables else 0)
+            conflicts = (int(conn.execute(
+                "SELECT COUNT(*) FROM reader_proposals WHERE status='pending'").fetchone()[0])
+                if "reader_proposals" in tables else 0)
+        items = self.store.list_items()
+        ready, probes = 0, []
+        for item in items:
+            try:
+                ready += int(self.publisher.ready(item["item_id"], item["content_revision"]))
+            except Exception as exc:
+                probes.append(self._maintenance_code(exc, "semantic_projection_probe_failed"))
+        codes = dict(result["codes"])
+        for code, count in self._maintenance_counts(probes).items():
+            if code not in codes and len(codes) >= 19:
+                code = "semantic_maintenance_other"
+            codes[code] = codes.get(code, 0) + count
+        blocked = (result.get("blocked") or result["provider_stopped"] is not None
+                   or any(code in _MAINTENANCE_BLOCKED_CODES for code in codes))
+        complete = (result["complete"] and not probes and not pending_outbox
+                    and not conflicts and ready == len(items))
+        state = "blocked" if blocked else "ready" if complete else "pending"
+        return {"state": state, "complete": complete, "published": result["published"],
+                "ready": ready, "total": len(items), "pending_outbox": pending_outbox,
+                "conflicts": max(conflicts, result["conflicts"]), "failed": result["failed"] + len(probes),
+                "unprocessed": result["unprocessed"], "codes": codes}
+
+    def maintain_derived(self, *, max_rounds=1):
+        """Attempt source-free projections and indexing independently."""
+        try:
+            projection = self._projection_summary(self._publish_all(strict=False))
+        except Exception as exc:
+            code = self._maintenance_code(exc, "semantic_projection_failed")
+            # A failed inspection cannot claim zero work or ready pages. Index
+            # maintenance still gets its independent turn below.
+            projection = {"state": "blocked", "complete": False, "published": 0,
+                          "ready": None, "total": None, "pending_outbox": None,
+                          "conflicts": None, "failed": 1, "unprocessed": None, "codes": {code: 1}}
+        index = self._index_maintenance(max_rounds=max_rounds)
+        states = {projection["state"], index["state"]}
+        state = ("blocked" if "blocked" in states else
+                 "pending" if "pending" in states else "ready")
+        return {"state": state, "complete": state == "ready",
+                "projection": projection, "index": index}
 
     def poll_controls(self):
         now = datetime.now(timezone.utc).isoformat()

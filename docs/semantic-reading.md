@@ -382,9 +382,11 @@ recheck disk state.
 Structured body anchors sit on their own line with blank lines around them,
 immediately after the actual table, list, quote or code block, before generated
 source footers. This follows Obsidian's [block-link rules](https://obsidian.md/help/links).
-Multiple unplaced citations use a collapsed native Obsidian source callout below
-their block. Each exact evidence link remains available when expanded; explicitly
-placed citations and actual resource links remain in their reading positions.
+Every cited evidence block also appears in an expanded, collapsible native
+Obsidian source callout below its paragraph. One timestamp range precedes the
+captured speaker labels and exact source-block embeds, including single citations
+and citations already placed in the prose. Explicit citations and actual resource
+links remain in their reading positions.
 A single supported Markdown block can be [embedded](https://obsidian.md/help/embeds)
 in a View, with source links beside the embed. A compound BodyBlock containing
 several Markdown blocks uses a stable navigation link instead: one block ID
@@ -509,15 +511,40 @@ Click targets are logical IDs resolved at click time inside the managed root.
 
 ## Source-independent reader and visible opens
 
+`ReadingHome(store, publisher, controls, *, config=None, limit=20).publish(now=None)`
+publishes `control:home`, initially at `首页.md`; `ReadingHome.for_runtime(runtime)`
+uses the same objects. It reads bounded canonical/reader metadata and publishes
+through the existing identity, manual-conflict and file-CAS owner. Recent/new/
+updated/followed lists keep current, visible-open and explicit known versions
+separate; default limits are 20 per section with totals, with an API maximum of 50.
+Only ready targets receive links. Local-day brief selection uses the configured
+timezone and can retain the latest successful edition while a revision is deferred.
+Oversized title/wait labels use whole-label notices, avoiding a partial URL before
+canonical redaction. Unsupported Obsidian filename delimiters receive an honest
+navigation notice. The home is a projection: no new schema, model call, preference,
+read/known write or unrelated outbox ACK is involved.
+
 The app composes `ReaderRuntime(semantic_runtime, *, notifier=None, device_id,
 live=False)` from the already configured `SemanticRuntime`; the app owns its
 daemon timer and persistent device ID. `poll()` performs property sync,
 registered management actions, query execution, visible-open inbox consumption,
 `WatchService.sync_reader_watch`, witness evaluation and attention bridging.
-It returns content-free counts and bounded status codes. It does not capture
+It returns content-free counts and bounded status codes. By default it does not capture
 sources, publish Item bodies, build an index or build a brief. Those remain
 separate runtime jobs, so no new source message is needed for a query, preference
 edit, explicit known action or visible-open receipt to take effect.
+
+The app selects `poll(maintain_derived=True)`: after controls and reading facts,
+it invokes `SemanticRuntime.maintain_derived(max_rounds=1)` and then publishes
+the current maintenance facets in `阅读状态.md`. Plain `poll()` retains the
+reader-only boundary above. Monitor downstream consumes the same source-free
+maintenance composition after canonical progress. Index and projection failures
+are reported independently; local object publication failures retain their own
+artifacts while other independent objects can publish. Provider/admission stops,
+unknown work, manual conflicts and exact ACK authority remain unchanged.
+`publish_all()` is still the strict rebuild entry, sharing the publication owner
+with live maintenance. Every Item/View/control/home receipt contributes to its
+completion result; a conflicted navigation page cannot establish complete output.
 
 `semantic_reader_properties` may be empty or contain overrides for `follow`,
 `mute`, `wait` and `query`; omitted roles use `阅读关注`, `阅读静音`, `阅读等待`
@@ -604,6 +631,16 @@ change. Historical rebuild/startup alone therefore produces zero notifier calls.
 notification/open handling; click callbacks resolve the logical event target
 through `DeliveryService.resolve_click()` at click time, including aliases and
 user renames. None of those delivery operations records read or known state.
+
+Content-free semantic health includes `database.delivery` for an active generation.
+It groups only local `reader_deliveries.status` values, with no event content,
+identity, code or payload reads. Unknown/sending outcomes prevent a healthy
+summary, deferred outcomes remain pending, and invalid statuses fail closed.
+Historical rejected outcomes remain visible without creating a permanent global
+gate. Accepted/silent outcomes provide no read/known evidence. A missing legacy
+table is `not_initialized` and is never created by inspection; inactive/candidate
+delivery is unprobed. This observation does not authorize sending, reconciliation
+or retries.
 
 ## Ownership and recovery
 

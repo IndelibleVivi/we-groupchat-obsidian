@@ -1,8 +1,9 @@
 # Architecture diagram sources
 
 The functional maps explain the supported product path: selected conversations
-and preserved legacy knowledge become continuing Items, readable pages, search,
-briefings, follow-up and reading controls. The independent resource lane keeps
+become continuing Items, readable pages, search, briefings, follow-up and reading
+controls. Source-first plans preserve legacy knowledge as separate readable
+history; older legacy-semantic plans retain their frozen import contract. The independent resource lane keeps
 link identity, attachment-byte consent, backup and external consumer delivery
 visible. Source capability does not establish a completed private migration.
 

@@ -260,6 +260,21 @@
   retain their existing owners. Waiting on a provider must not hold a database
   transaction or projection lock. Only trusted pre-dispatch evidence may defer a
   claimed job back to pending; unknown dispatched work remains unknown.
+- `core/semantic/runtime.py::SemanticRuntime.maintain_derived` composes
+  source-free live projection and index repair independently after canonical
+  work or reader controls. Local object failures retain their durable work;
+  provider/admission stops and unknown outcomes never authorize another attempt.
+  Strict rebuild `publish_all` retains full verification semantics through the
+  same publication owner. Item, View, control and home receipts must all contribute
+  to completion; maintenance observations do not own ACKs or retries.
+- `core/semantic/reading_home.py::ReadingHome` owns the bounded metadata-only
+  `control:home` projection, initially `首页.md`. It reuses publisher identity,
+  readiness, manual-conflict and CAS checks and keeps current/opened/known
+  versions distinct. No provider, source read, reader-fact write or unrelated
+  outbox ACK belongs here. Do not truncate an exact URL before redaction:
+  overlong labels use whole-label notices, and unsupported filename delimiters
+  must not become apparently working Obsidian links. Menu opens resolve identity
+  on a daemon worker without constructing model providers.
 - `core/semantic/source.py` bridges bounded source reads to durable captures and
   MonitorStateStore v3. Captured vectors advance only after raw storage; applied
   vectors advance only with a complete processing receipt. Provider failure may

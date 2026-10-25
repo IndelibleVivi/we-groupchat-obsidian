@@ -32,6 +32,7 @@ HEALTH_SCHEMA = "we-groupchat-obsidian.semantic-health.v1"
 _PROFILE_SCHEMA = "we-groupchat-obsidian.semantic-providers.v1"
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 _JOB_STATES = ("pending", "running", "failed", "unknown", "accepted", "done")
+_DELIVERY_STATES = ("accepted", "rejected", "unknown", "sending", "deferred", "silent")
 
 
 class _InspectionError(Exception):
@@ -201,6 +202,28 @@ def _counts(conn, table, states):
     return result
 
 
+def _delivery(conn, tables):
+    # This is local notifier outcome evidence only. Even accepted delivery is
+    # not an observed open or knowledge acknowledgement. Missing legacy tables
+    # must remain missing; health never installs a reader schema.
+    if "reader_deliveries" not in tables:
+        return {"state": "not_initialized", "counts": {key: 0 for key in (*_DELIVERY_STATES, "invalid")}}
+    counts = _counts(conn, "reader_deliveries", _DELIVERY_STATES)
+    if counts["invalid"]:
+        state = "invalid"
+    elif counts["unknown"] or counts["sending"]:
+        state = "unknown"
+    elif counts["deferred"]:
+        state = "deferred"
+    elif counts["rejected"]:
+        # Rejection is a known terminal outcome. Retain it visibly without
+        # inventing an automatic retry or a permanent generation-wide gate.
+        state = "rejected"
+    else:
+        state = "recorded" if counts["accepted"] or counts["silent"] else "empty"
+    return {"state": state, "counts": counts}
+
+
 def _database(path, generation, now):
     with _readonly(path) as conn:
         revision, budget_profile, activated = _manifest(conn, generation)
@@ -230,7 +253,7 @@ def _database(path, generation, now):
                   "projection_conflicts": (scalar("SELECT COUNT(*) FROM reader_proposals WHERE status='pending'")
                                            if "reader_proposals" in tables else 0)}
         return {"state": "available", "revision": revision, "activation_recorded": activated,
-                "raw": raw, "jobs": jobs, "outbox": outbox}, budget_profile
+                "raw": raw, "jobs": jobs, "outbox": outbox, "delivery": _delivery(conn, tables)}, budget_profile
 
 
 def _checkpoints(paths, generation, protected_root):
@@ -369,18 +392,21 @@ def semantic_health(config, *, checkpoint_paths=(), runtime_root=None, usage_pat
             raise _InspectionError("semantic_health_changed_during_inspection")
         if pin:
             db, checkpoints, budget = report["database"], report["checkpoints"], report["provider_budget"]
-            jobs, outbox = db["jobs"], db["outbox"]
+            jobs, outbox, delivery = db["jobs"], db["outbox"], db["delivery"]
             if not db["activation_recorded"]:
                 report["state"] = "blocked"
                 report["error_codes"] = ["semantic_health_activation_missing"]
-            elif checkpoints["state"] == "blocked" or not budget["ready"] or jobs["failed"] or jobs["invalid"] or outbox["index"]["invalid"] or outbox["projection"]["invalid"]:
+            elif (checkpoints["state"] == "blocked" or not budget["ready"] or jobs["failed"] or jobs["invalid"]
+                  or outbox["index"]["invalid"] or outbox["projection"]["invalid"] or delivery["state"] == "invalid"):
                 report["state"] = "blocked"
-            elif jobs["unknown"] or jobs["reader_unknown"] or budget["unknown_requests"] or budget["sent_requests"]:
+            elif (jobs["unknown"] or jobs["reader_unknown"] or budget["unknown_requests"] or budget["sent_requests"]
+                  or delivery["state"] == "unknown"):
                 report["state"] = "unknown"
             elif (checkpoints["state"] == "pending" or any(db["raw"][key] for key in
                     ("processing_pending_batches", "unread_core_sources", "unresolved_observations"))
                   or any(jobs[key] for key in ("pending", "running", "accepted", "reader_running"))
                   or outbox["index"]["pending"] or outbox["projection"]["pending"] or outbox["projection_conflicts"]
+                  or delivery["state"] == "deferred"
                   or phase in {"activation_committed", "provisional"}):
                 report["state"] = "pending"
             else:
