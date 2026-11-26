@@ -462,7 +462,7 @@ class AttachmentArchive:
         if not os.path.isdir(directory) or not _within(directory, root):
             return [], False
         stem, suffix = os.path.splitext(name)
-        variant = re.compile(rf"^{re.escape(stem)} \([1-9][0-9]*\){re.escape(suffix)}$")
+        variant = re.compile(rf"^{re.escape(stem)} ?\([1-9][0-9]*\){re.escape(suffix)}$")
         candidates = []
         try:
             entries = sorted(os.scandir(directory), key=lambda item: item.name)

@@ -2,13 +2,15 @@
 
 Local-first WeChat group chat summaries, monitor review, and Obsidian knowledge output.
 
-Status: functional, source-distributed macOS application. It has a menu-bar app,
-an optional legacy read-only MCP compatibility server, operator CLIs, durable
-local state, recovery/backup workers and a full regression suite; review the data-flow and account-safety notes before
-using it on real chat data. A bundled Python runtime or signed installer is not
-currently distributed. The current package metadata identifies the
-`v0.1.0-alpha.1` prerelease line; a source checkout, local alias build,
-installed copy, and live runtime remain separate acceptance states.
+WGO is distributed as macOS application source. It includes a menu-bar app,
+an optional legacy read-only MCP server, operator CLIs, durable local state,
+and recovery and backup tools. Review the data-flow and account-safety notes
+before using it on real chat data.
+
+[Quick Start](#quick-start) clones the current `main` source. The
+[`v0.1.0-alpha.3` prerelease](https://github.com/IndelibleVivi/we-groupchat-obsidian/releases/tag/v0.1.0-alpha.3)
+is a tagged source snapshot. Local alias builds use the package version
+`0.1.0a1` from `setup.py`.
 
 Windows port status: **shared storage and protected credential foundation**. Native macOS/Windows
 locks and path providers now support private storage and atomic publication for
@@ -136,9 +138,11 @@ Its most important boundaries are:
   advancing, while selected-resource and Direct Drive scans may process present
   shards only with a `source_degraded` result.
 - File attachment bytes can be preserved in a private local SHA-256
-  content-addressed archive. An optional backup copies immutable objects to an
-  ordinary filesystem target; verification proves the target bytes only, not a
-  sync provider's cloud-upload state.
+  content-addressed archive. The resolver checks the declared month's cache
+  for the exact filename and duplicate names such as `file(1).pdf` or
+  `file (1).pdf`. Available size and hash metadata narrow the candidates, and
+  different bytes remain ambiguous. Optional filesystem backup verifies bytes
+  at the mounted target. Provider-side sync remains unknown.
 - The default selected-resource backup lane needs no OAuth: it intersects
   actively monitored chats with an independent explicit selection, captures
   exact link and file metadata occurrences, optionally resolves explicitly
@@ -336,8 +340,9 @@ of relying on LaunchServices discovery:
 ./启动.command --allow-wechat-resign --wechat-app=/Applications/WeChat.app
 ```
 
-WGO has verified protected binary cipher-context key recovery for the exact
-macOS WeChat builds `4.1.11 (269136)` and `4.1.15 (270102)` on arm64.
+`main` includes protected-key profiles for the exact macOS WeChat builds
+`4.1.11 (269136)` and `4.1.15 (270102)` on arm64. The
+`v0.1.0-alpha.3` source snapshot includes the `4.1.11 (269136)` profile.
 Protected-key profiles are bound to an exact WeChat build, and every candidate
 must pass page-one HMAC verification against its encrypted database before
 entering the private key cache. An unknown future build fails closed and
@@ -454,7 +459,7 @@ operational facts that were previously easy to collapse:
 | `Monitor state` | Per-chat state files are valid, missing, corrupt, or the last runtime result observed a revision conflict. Corrupt state blocks progress; it is never reset to now. |
 | `Monitor raw cursor progress` | Counts of checkpointed chats and generation-bound shard cursors; no chat or cursor value is printed. |
 | `Source inventory` | Complete versus degraded/uninitialized inventory plus present, missing, cache-only, key-missing, and unreadable counts. “Complete” requires a complete expected-shard inventory, stable current generations, and successful reads. |
-| `Mounted resource handoff` | Existing destination binding and latest snapshot handoff evidence. `provider_side_sync=unknown` and `remote_verified=False` remain explicit even after `sync_delegated`. |
+| `Mounted resource handoff` | Existing destination binding and latest snapshot handoff evidence. A destination marker timeout reports `destination_unavailable`. `provider_side_sync=unknown` and `remote_verified=False` remain explicit even after `sync_delegated`. |
 | `Google Drive API remote verification` | Count of objects verified through the optional Direct Drive API ledger. It is separate from source completeness and mounted-folder delivery. |
 | `Link preview` / `MCP compatibility` / `Windows` | Preview is disabled with zero requests; MCP is legacy read-only and send-retired; the storage/credential foundation is source-level support; Windows product support remains unclaimed. |
 

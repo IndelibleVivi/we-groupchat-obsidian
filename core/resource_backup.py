@@ -3025,19 +3025,20 @@ def inspect_mounted_resource_backup(config, *, settings_path=SETTINGS_FILE):
             marker_path,
             error_code="destination_identity_missing",
         ).decode("utf-8"))
-        destination_id = str(uuid.UUID(str(marker.get("destination_uuid") or "")))
-        if marker.get("schema") != DESTINATION_MARKER_SCHEMA:
+        if not isinstance(marker, dict) or marker.get("schema") != DESTINATION_MARKER_SCHEMA:
             raise ValueError("destination identity schema")
-    except (
-        ResourceBackupError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        ValueError,
-    ):
+        destination_id = str(uuid.UUID(str(marker.get("destination_uuid") or "")))
+    except (OSError, ResourceBackupError, ValueError) as exc:
+        # The regular-file reader wraps open failures and chains the OS error.
+        error_code = (
+            "destination_unavailable"
+            if isinstance(exc, OSError) or isinstance(exc.__cause__, TimeoutError)
+            else "destination_identity_missing"
+        )
         result.update({
-            "state": "destination_identity_missing",
-            "handoff_semantics": "destination_identity_missing",
-            "last_error_code": "destination_identity_missing",
+            "state": error_code,
+            "handoff_semantics": error_code,
+            "last_error_code": error_code,
         })
         return result
 

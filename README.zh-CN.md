@@ -2,11 +2,12 @@
 
 本地优先的微信群聊总结、关注推送与 Obsidian 知识库工具。
 
-当前状态：可完整运行的 source-distributed macOS app。它已经拥有菜单栏 app、可选的 legacy read-only MCP compatibility Server、
-operator CLI、持久化本地状态、recovery/backup workers 和完整 regression suite；请先读完
-数据流和账号安全边界，再在真实聊天数据上使用。当前不分发 bundled Python runtime
-或已签名 installer。当前 package metadata 对应 `v0.1.0-alpha.1` prerelease line；
-source checkout、本地 alias build、installed copy 与 live runtime 仍是彼此独立的验收状态。
+WGO 以 macOS app 源码形式分发，提供菜单栏 app、可选的 legacy read-only MCP Server、
+运维 CLI、持久化本地状态和恢复备份工具。使用真实聊天数据前，请先阅读数据流和账号安全边界。
+
+下方安装命令获取当前 `main` 源码。
+[`v0.1.0-alpha.3` 预发布包](https://github.com/IndelibleVivi/we-groupchat-obsidian/releases/tag/v0.1.0-alpha.3)
+是固定在该 tag 的源码快照。本地 alias bundle 使用 `setup.py` 中的 package version `0.1.0a1`。
 
 Windows 迁移当前处于 **共享存储与受保护凭据基础阶段**。原生 macOS/Windows
 锁与路径适配已接入 config、monitor checkpoint 和 source inventory 的私有存储与
@@ -112,8 +113,9 @@ DeepSeek 按实际 token 用量计费，输入缓存命中、输入缓存未命�
   “没有新消息”。Monitor/catch-up 会在推进前停止；selected-resource 与 Direct Drive scan 只能继续处理
   present shards，并保持 `source_degraded`。
 - 文件附件可以进入本机私有的 SHA-256 content-addressed archive，同一份 bytes 只保留一个 object。
-  可选 backup 只把 immutable objects 复制到普通 filesystem target；验证的是目标目录 bytes，
-  不是 sync provider 的云端上传状态。
+  Resolver 在消息声明月份的缓存中查找原名，以及 `文件(1).pdf`、`文件 (1).pdf` 这样的重名文件。
+  可用的大小和 hash 会先筛选候选，内容不同的候选仍会报告歧义。可选 backup 验证挂载目标上的
+  文件 bytes，云端同步状态仍为未知。
 - 默认 selected-resource backup lane 不需要 OAuth：它取 active monitor chats 与独立显式 selection 的交集，
   捕获 exact link / file metadata occurrences；只有显式开启时才把文件解析进共享 CAS，再把 immutable objects、privacy-bounded catalog
   与 Markdown views 交给 Google Drive for Desktop 等现有 mounted folder。`sync_delegated` 只证明 target bytes，
@@ -278,8 +280,9 @@ macOS 可能在每只长驻 menu-app process 第一次读取 WeChat App Data 时
 
 这一步可能会退出微信，并要求输入 Mac 登录密码。输入密码时终端不显示字符是正常的。
 
-WGO 已验证 macOS 微信 arm64 精确 build `4.1.11 (269136)` 与
-`4.1.15 (270102)` 的 protected binary cipher-context key 读取。
+`main` 包含 macOS 微信 arm64 精确 build `4.1.11 (269136)` 和
+`4.1.15 (270102)` 的 protected-key profile。预发布源码快照
+`v0.1.0-alpha.3` 收录了 `4.1.11 (269136)` 的 profile。
 Protected-key profile 与精确微信 build 绑定，每个 candidate 都必须通过相应
 encrypted DB 的 page-one HMAC 验证才会写入私有 key cache；未识别的后续
 build 会 fail closed 并保留已验证 cache。`docs/recovery-acceptance.md`
@@ -380,7 +383,7 @@ source install 与 LaunchAgent 继续使用。
 | `Monitor state` | 每个 selected chat 的 state 是 healthy、missing、corrupt，或最近 runtime 观察到 revision conflict。Corrupt state 会阻断推进，绝不会自动 reset to now。 |
 | `Monitor raw cursor progress` | 只输出 checkpointed chat 数和 generation-bound shard cursor 数，不输出 chat/cursor value。 |
 | `Source inventory` | 区分 complete、degraded 与 uninitialized，并分别统计 present、missing、cache-only、key-missing、unreadable。只有 expected inventory 完整、current generations 稳定且 required reads 全部成功，才能叫 source complete。 |
-| `Mounted resource handoff` | 只读检查现有 destination binding 与 latest snapshot handoff；即使是 `sync_delegated`，也明确保留 `provider_side_sync=unknown`、`remote_verified=False`。 |
+| `Mounted resource handoff` | 只读检查现有 destination binding 与最新 snapshot handoff。目标标记访问超时会报告 `destination_unavailable`。`sync_delegated` 仍保留 `provider_side_sync=unknown` 和 `remote_verified=False`。 |
 | `Google Drive API remote verification` | 可选 Direct Drive API ledger 中经过 remote verification 的 object 数；它与 source completeness、mounted delivery 都是不同事实。 |
 | `Link preview` / `MCP compatibility` / `Windows` | Preview 停用且零请求；MCP 为 legacy read-only、send retired；存储/凭据中间层已接入源码，Windows 产品支持仍未声明。 |
 
