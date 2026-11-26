@@ -113,7 +113,8 @@ py -3.11 -m venv .venv
 这些测试使用临时目录和独立的合成凭据，不读取微信、不需要登录 Drive、不调用 AI。
 native secret tests 会创建、更新、跨进程读取并清理随机测试 identity 下的凭据。
 遇到失败要保留错误类型、测试名和环境；不能用跳过 native tests 来建立支持声明。
-Mac 全回归仍由 portability workflow 独立运行。
+Portability workflow 在 GitHub-hosted `macos-15`（Arm64）上运行 Python 3.10–3.14
+的 Mac 全回归。Windows foundation 验证使用 `windows-2022`（x64）和 Python 3.11。
 
 ## 正式适配的第一项工作：E1 exact-build evidence
 
