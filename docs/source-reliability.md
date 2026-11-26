@@ -265,8 +265,9 @@ receipts, backup manifest, or documentation.
 ### File resolution
 
 The resolver searches only the declared month in WeChat's `msg/file` cache. It
-accepts the exact name and conventional `name (N).ext` variants. Declared size
-and MD5/SHA-256, when available, filter candidates before selection.
+accepts the exact name and conventional `name(N).ext` or `name (N).ext`
+variants. Declared size and MD5/SHA-256, when available, filter candidates
+before selection.
 
 - one valid candidate is selected;
 - several candidates with identical bytes are equivalent duplicates and are
@@ -835,7 +836,9 @@ stable, and the required reads succeeded; it does not mean merely that one
 enumeration returned rows.
 
 The same health surface reports the existing mounted destination/snapshot
-handoff without opening CAS payload objects. Mounted `sync_delegated` remains
+handoff without opening CAS payload objects. A destination marker timeout
+reports `destination_unavailable`. A missing or malformed marker reports
+`destination_identity_missing`. Mounted `sync_delegated` remains
 `provider_side_sync=unknown` and `remote_verified=False`. A separate Direct
 Drive line reports the number of ledger objects that passed Drive API
 verification; that remote evidence is independent from source completeness.

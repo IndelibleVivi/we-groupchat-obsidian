@@ -211,7 +211,7 @@ catalog、archive receipt、backup manifest 或文档。
 ### 文件 resolver
 
 Resolver 只搜索消息声明月份下的 WeChat `msg/file` cache，候选仅限 exact name 和常见
-`name (N).ext` duplicate variant。有 declared size 或 MD5/SHA-256 时，先用 metadata 筛选。
+`name(N).ext` 或 `name (N).ext` 重名变体。有 declared size 或 MD5/SHA-256 时，先用 metadata 筛选。
 
 - 只有一个有效候选：选中；
 - 多个候选 bytes 完全相同：视为 equivalent duplicates，可 deterministic 选中；
@@ -667,7 +667,8 @@ cache-only、key-missing 与 unreadable。只有 expected logical-shard inventor
 保持稳定且 required reads 全部成功，才能叫 source complete；一次 enumeration 有 rows 不够。
 
 同一个 health surface 会只读报告现有 mounted destination/snapshot handoff，且不打开 CAS payload
-objects。Mounted `sync_delegated` 始终保留 `provider_side_sync=unknown` 与
+objects。访问目标标记超时时报告 `destination_unavailable`，标记缺失或格式无效时报告
+`destination_identity_missing`。Mounted `sync_delegated` 始终保留 `provider_side_sync=unknown` 与
 `remote_verified=False`。独立 Direct Drive 行只统计通过 Drive API verification 的 ledger objects；
 这份 remote evidence 与 source completeness 互不替代。Health 还直接写明三个固定产品边界：remote
 link preview 是 `link_preview_disabled` 且零请求；MCP 是 legacy read-only、send retired；Windows

@@ -1,3 +1,4 @@
+import errno
 import fcntl
 import hashlib
 import io
@@ -420,6 +421,40 @@ class ResourceBackupTests(unittest.TestCase):
         self.assertFalse(report["remote_verified"])
         self.assertFalse(os.path.exists(settings_path))
         self.assertFalse(os.path.exists(settings_path + ".lock"))
+
+    def test_read_only_mounted_health_inspector_reports_marker_timeouts(self):
+        marker_dir = Path(self.target) / "wgo-resource-backup"
+        marker_dir.mkdir(parents=True)
+        (marker_dir / DESTINATION_MARKER_NAME).write_bytes(b"{}")
+
+        for operation in ("open", "read"):
+            with self.subTest(operation=operation), patch.object(
+                os, operation, side_effect=TimeoutError(errno.ETIMEDOUT, "PRIVATE_SENTINEL")
+            ):
+                report = inspect_mounted_resource_backup(
+                    {**self.config, "resource_backup_enabled": True},
+                    settings_path=os.path.join(self.root, "missing-settings.json"),
+                )
+                self.assertEqual(report["state"], "destination_unavailable")
+                self.assertEqual(report["handoff_semantics"], "destination_unavailable")
+                self.assertEqual(report["last_error_code"], "destination_unavailable")
+                self.assertEqual(report["provider_side_sync"], "unknown")
+                self.assertFalse(report["remote_verified"])
+                self.assertNotIn("PRIVATE_SENTINEL", str(report))
+
+    def test_read_only_mounted_health_inspector_rejects_non_object_marker(self):
+        marker_dir = Path(self.target) / "wgo-resource-backup"
+        marker_dir.mkdir(parents=True)
+        (marker_dir / DESTINATION_MARKER_NAME).write_bytes(b"[]")
+
+        report = inspect_mounted_resource_backup(
+            {**self.config, "resource_backup_enabled": True},
+            settings_path=os.path.join(self.root, "missing-settings.json"),
+        )
+
+        self.assertEqual(report["state"], "destination_identity_missing")
+        self.assertEqual(report["last_error_code"], "destination_identity_missing")
+        self.assertFalse(report["remote_verified"])
 
     def _write_candidate_files(self):
         first = b"first file bytes"

@@ -462,6 +462,10 @@ bytes or open the source CAS. Explicit `verify` retains full target hashing.
 The general redacted health check uses a stricter read-only inspection path: it
 does not create/migrate the capture ledger, does not open CAS payload objects,
 and reports only destination/snapshot control evidence plus delivery counts.
+Opening or reading the destination marker can time out on a mounted filesystem.
+Health reports `destination_unavailable` for that timeout and continues with
+the other checks. A missing or malformed marker reports
+`destination_identity_missing`.
 Its mounted line always says `provider_side_sync=unknown` and
 `remote_verified=False`. Direct Drive API verification is a separate health
 line and never upgrades mounted handoff evidence.
